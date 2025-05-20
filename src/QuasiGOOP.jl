@@ -11,8 +11,10 @@ using LinearSolve: LinearProblem, init, solve!, KrylovJL_GMRES, UMFPACKFactoriza
 using SymbolicTracingUtils: SymbolicTracingUtils
 using JLD2, BenchmarkTools
 
-
 include("parametric_ordered_preferences_MPCC_game.jl")
 export ParametricOrderedPreferencesMPCCGame, solve_relaxed_pop_game, total_dim
+
+include("quasi_goop.jl")
+export PrimalDualSysEqn, ordered_preferences, ParametricQuasiGOOP
 
 end # module QuasiGOOP

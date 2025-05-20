@@ -1,4 +1,4 @@
-module N_player_KKT_Intersection
+module Intersection
 
 using TrajectoryGamesExamples: UnicycleDynamics, planar_double_integrator
 using TrajectoryGamesBase:
@@ -218,6 +218,9 @@ function get_setup(
     # Specify prioritized constraint
     is_prioritized_constraint = [[true, true, true], [true, true, true]] #, [true, true]]
 
+    # Construct a preferences object
+    preferences = ordered_preferences(prioritized_preferences, is_prioritized_constraint)
+
     # Shared constraints
     function shared_equality_constraints(z, θ)
         [0]
@@ -233,38 +236,24 @@ function get_setup(
         @assert length(xs) == num_players
         # Avoid collision between 2 players
         mapreduce(vcat, 2:length(xs[1])) do k
-            [
-                sum((xs[1][k][1:2] - xs[2][k][1:2]) .^ 2) - collision_avoidance^2,
-                # sum((xs[1][k][1:2] - xs[3][k][1:2]) .^ 2) - collision_avoidance^2
-                # sum((xs[2][k][1:2] - xs[3][k][1:2]) .^ 2) - collision_avoidance^2
-            ]
+            [sum((xs[1][k][1:2] - xs[2][k][1:2]) .^ 2) - collision_avoidance^2]
         end
     end
 
-    problem = ParametricOrderedPreferencesMPCCGame(;
+    problem = ParametricQuasiGOOP(;
         objectives,
         equality_constraints,
         inequality_constraints,
-        prioritized_preferences,
-        is_prioritized_constraint,
+        preferences,
         shared_equality_constraints,
         shared_inequality_constraints,
         primal_dimensions,
         parameter_dimensions,
         equality_dimensions,
         inequality_dimensions,
-        relaxation_mode,
     )
 
-    (;
-        problem,
-        flatten_parameters,
-        equality_constraints,
-        inequality_constraints,
-        shared_equality_constraints,
-        shared_inequality_constraints,
-        prioritized_preferences,
-    )
+    (; problem, flatten_parameters)
 end
 
 function demo(; map_end = 7, lane_width = 2, verbose = false)
@@ -392,370 +381,177 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
         problem_data,
     )
 
-    strategy = GLMakie.@lift let
-        result = get_receding_horizon_solution($θ; warmstart_solution)
-        warmstart_solution = nothing
-        result.strategies
-    end
+    # strategy = GLMakie.@lift let 
+    #     result = get_receding_horizon_solution($θ; warmstart_solution)
+    #     warmstart_solution = nothing
+    #     result.strategies
+    # end 
 
-    # Plot using GLMakie
-    figure = GLMakie.Figure()
-    ax = GLMakie.Axis(
-        figure[1, 1];
-        aspect = 1,
-        xgridvisible = false,
-        ygridvisible = false,
-        backgroundcolor = :lightgreen,
-    )
-    GLMakie.hidedecorations!(ax)
-    GLMakie.hidespines!(ax)
+    # # Plot using GLMakie
+    # figure = GLMakie.Figure()
+    # ax = GLMakie.Axis(figure[1, 1]; aspect = 1, xgridvisible = false, ygridvisible = false, backgroundcolor = :lightgreen)
+    # GLMakie.hidedecorations!(ax)
+    # GLMakie.hidespines!(ax)
 
-    # Draw intersection
-    offset = 0.2
+    # # Draw intersection
+    # offset = 0.2
 
-    vertical_road_background = GLMakie.Polygon(
-        GLMakie.Point2f[
-            (-lane_width-offset, -map_end),
-            (lane_width+offset, -map_end),
-            (lane_width+offset, map_end),
-            (-lane_width-offset, map_end),
-        ],
-    )
-    GLMakie.poly!(vertical_road_background, color = :white)
-    GLMakie.lines!(
-        ax,
-        [-lane_width-offset, -lane_width-offset],
-        [-map_end, -lane_width],
-        color = :black,
-        linewidth = 1,
-    )
-    GLMakie.lines!(
-        ax,
-        [-lane_width-offset, -lane_width-offset],
-        [map_end, lane_width],
-        color = :black,
-        linewidth = 1,
-    )
-    GLMakie.lines!(
-        ax,
-        [lane_width+offset, lane_width+offset],
-        [-map_end, -lane_width],
-        color = :black,
-        linewidth = 1,
-    )
-    GLMakie.lines!(
-        ax,
-        [lane_width+offset, lane_width+offset],
-        [map_end, lane_width],
-        color = :black,
-        linewidth = 1,
-    )
+    # vertical_road_background = GLMakie.Polygon(
+    #     GLMakie.Point2f[(-lane_width-offset, -map_end), (lane_width+offset, -map_end), (lane_width+offset, map_end), (-lane_width-offset, map_end)]
+    # )
+    # GLMakie.poly!(vertical_road_background, color = :white)
+    # GLMakie.lines!(ax, [-lane_width-offset, -lane_width-offset], [-map_end, -lane_width], color = :black, linewidth = 1)
+    # GLMakie.lines!(ax, [-lane_width-offset, -lane_width-offset], [map_end, lane_width], color = :black, linewidth = 1)
+    # GLMakie.lines!(ax, [lane_width+offset, lane_width+offset], [-map_end, -lane_width], color = :black, linewidth = 1)
+    # GLMakie.lines!(ax, [lane_width+offset, lane_width+offset], [map_end, lane_width], color = :black, linewidth = 1)
 
-    horizontal_road_background = GLMakie.Polygon(
-        GLMakie.Point2f[
-            (-map_end, -lane_width-offset),
-            (map_end, -lane_width-offset),
-            (map_end, lane_width+offset),
-            (-map_end, lane_width+offset),
-        ],
-    )
-    GLMakie.poly!(horizontal_road_background, color = :white)
-    GLMakie.lines!(
-        ax,
-        [-lane_width-offset, -map_end],
-        [-lane_width-offset, -lane_width-offset],
-        color = :black,
-        linewidth = 1,
-    )
-    GLMakie.lines!(
-        ax,
-        [-lane_width-offset, -map_end],
-        [lane_width+offset, lane_width+offset],
-        color = :black,
-        linewidth = 1,
-    )
-    GLMakie.lines!(
-        ax,
-        [lane_width+offset, map_end],
-        [lane_width+offset, lane_width+offset],
-        color = :black,
-        linewidth = 1,
-    )
-    GLMakie.lines!(
-        ax,
-        [lane_width+offset, map_end],
-        [-lane_width-offset, -lane_width-offset],
-        color = :black,
-        linewidth = 1,
-    )
+    # horizontal_road_background = GLMakie.Polygon(
+    #     GLMakie.Point2f[(-map_end, -lane_width-offset), (map_end, -lane_width-offset), (map_end, lane_width+offset), (-map_end, lane_width+offset)]
+    # )
+    # GLMakie.poly!(horizontal_road_background, color = :white)
+    # GLMakie.lines!(ax, [-lane_width-offset, -map_end], [-lane_width-offset, -lane_width-offset], color = :black, linewidth = 1)
+    # GLMakie.lines!(ax, [-lane_width-offset, -map_end], [lane_width+offset, lane_width+offset], color = :black, linewidth = 1)
+    # GLMakie.lines!(ax, [lane_width+offset, map_end], [lane_width+offset, lane_width+offset], color = :black, linewidth = 1)
+    # GLMakie.lines!(ax, [lane_width+offset, map_end], [-lane_width-offset, -lane_width-offset], color = :black, linewidth = 1)
 
-    vertical_road = GLMakie.Polygon(
-        GLMakie.Point2f[
-            (-lane_width, -map_end),
-            (lane_width, -map_end),
-            (lane_width, map_end),
-            (-lane_width, map_end),
-        ],
-    )
-    GLMakie.poly!(vertical_road, color = :gray)
-    horizontal_road = GLMakie.Polygon(
-        GLMakie.Point2f[
-            (-map_end, -lane_width),
-            (map_end, -lane_width),
-            (map_end, lane_width),
-            (-map_end, lane_width),
-        ],
-    )
-    GLMakie.poly!(horizontal_road, color = :gray)
+    # vertical_road = GLMakie.Polygon(
+    #     GLMakie.Point2f[(-lane_width, -map_end), (lane_width, -map_end), (lane_width, map_end), (-lane_width, map_end)]
+    # )
+    # GLMakie.poly!(vertical_road, color = :gray)
+    # horizontal_road = GLMakie.Polygon(
+    #     GLMakie.Point2f[(-map_end, -lane_width), (map_end, -lane_width), (map_end, lane_width), (-map_end, lane_width)]
+    # )
+    # GLMakie.poly!(horizontal_road, color = :gray)
 
-    # Lane markings (dashed center lines)
-    GLMakie.lines!(ax, [-lane_width, -map_end], [0, 0], color = :yellow, linewidth = 2)
-    GLMakie.lines!(ax, [-lane_width, -map_end], [0, 0], color = :yellow, linewidth = 2)
-    GLMakie.lines!(ax, [lane_width, map_end], [0, 0], color = :yellow, linewidth = 2)
-    GLMakie.lines!(ax, [lane_width, map_end], [0, 0], color = :yellow, linewidth = 2)
-    GLMakie.lines!(ax, [0, 0], [-lane_width, -map_end], color = :yellow, linewidth = 2)
-    GLMakie.lines!(ax, [0, 0], [-lane_width, -map_end], color = :yellow, linewidth = 2)
-    GLMakie.lines!(ax, [0, 0], [lane_width, map_end], color = :yellow, linewidth = 2)
-    GLMakie.lines!(ax, [0, 0], [lane_width, map_end], color = :yellow, linewidth = 2)
+    # # Lane markings (dashed center lines)
+    # GLMakie.lines!(ax, [-lane_width, -map_end], [0, 0], color = :yellow, linewidth = 2)
+    # GLMakie.lines!(ax, [-lane_width, -map_end], [0, 0], color = :yellow, linewidth = 2)
+    # GLMakie.lines!(ax, [lane_width, map_end], [0, 0], color = :yellow, linewidth = 2)
+    # GLMakie.lines!(ax, [lane_width, map_end], [0, 0], color = :yellow, linewidth = 2)
+    # GLMakie.lines!(ax, [0, 0], [-lane_width, -map_end], color = :yellow, linewidth = 2)
+    # GLMakie.lines!(ax, [0, 0], [-lane_width, -map_end], color = :yellow, linewidth = 2)
+    # GLMakie.lines!(ax, [0, 0], [lane_width, map_end], color = :yellow, linewidth = 2)
+    # GLMakie.lines!(ax, [0, 0], [lane_width, map_end], color = :yellow, linewidth = 2)
 
-    # Add directional arrows using arrows!
-    xs = [-3, 3, 1, -1]  # Starting x-coordinates for arrows
-    ys = [-1, 1, -3, 3]  # Starting y-coordinates for arrows
-    us = [1, -1, 0, 0]      # Arrow x-directions
-    vs = [0, 0, 1, -1]      # Arrow y-directions
+    # # Add directional arrows using arrows!
+    # xs = [-3, 3, 1, -1]  # Starting x-coordinates for arrows
+    # ys = [-1, 1, -3, 3]  # Starting y-coordinates for arrows
+    # us = [1, -1, 0, 0]      # Arrow x-directions
+    # vs = [0, 0, 1, -1]      # Arrow y-directions
 
-    GLMakie.arrows!(
-        xs,
-        ys,
-        us,
-        vs;
-        arrowsize = 15,
-        lengthscale = 0.5,
-        arrowcolor = :white,
-        linecolor = :white,
-        linewidth = 3,
-    )
+    # GLMakie.arrows!(xs, ys, us, vs; arrowsize = 15, lengthscale = 0.5, arrowcolor = :white, linecolor = :white, linewidth = 3)
 
-    # Visuliaze trajectories
-    # goop_data = load_object("data/Intersection_closed_loop/GOOP_solution/intersection.jld2")
-    # # NOTE: For some reason, GLMakie plots trajectories after reflecting the points along y=x. 
-    # # To fix this, we need to reflect the points along y=x before plotting them.
-    # goop_strategy1_xs = Observable([vcat(v[2], v[1], v[3:end]) for v in goop_data["strategy1"].xs])
-    # goop_strategy2_xs = Observable([vcat(v[2], v[1], v[3:end]) for v in goop_data["strategy2"].xs])
-    # goop_strategy1 = Observable(goop_data["strategy1"])
-    # goop_strategy2 = Observable(goop_data["strategy2"])
+    # # Visuliaze trajectories
+    # # goop_data = load_object("data/Intersection_closed_loop/GOOP_solution/intersection.jld2")
+    # # # NOTE: For some reason, GLMakie plots trajectories after reflecting the points along y=x. 
+    # # # To fix this, we need to reflect the points along y=x before plotting them.
+    # # goop_strategy1_xs = Observable([vcat(v[2], v[1], v[3:end]) for v in goop_data["strategy1"].xs])
+    # # goop_strategy2_xs = Observable([vcat(v[2], v[1], v[3:end]) for v in goop_data["strategy2"].xs])
+    # # goop_strategy1 = Observable(goop_data["strategy1"])
+    # # goop_strategy2 = Observable(goop_data["strategy2"])
 
-    # goop_strategy1 = GLMakie.@lift OpenLoopStrategy($goop_strategy1_xs, $goop_strategy1.us)
-    # goop_strategy2 = GLMakie.@lift OpenLoopStrategy($goop_strategy2_xs, $goop_strategy2.us)
+    # # goop_strategy1 = GLMakie.@lift OpenLoopStrategy($goop_strategy1_xs, $goop_strategy1.us)
+    # # goop_strategy2 = GLMakie.@lift OpenLoopStrategy($goop_strategy2_xs, $goop_strategy2.us)
 
-    # GLMakie.plot!(ax, goop_strategy1, color = :blue)
-    # GLMakie.plot!(ax, goop_strategy2, color = :red)
-    strategy1 = GLMakie.@lift OpenLoopStrategy($strategy[1].xs, $strategy[1].us)
-    strategy2 = GLMakie.@lift OpenLoopStrategy($strategy[2].xs, $strategy[2].us)
-    GLMakie.plot!(ax, strategy1, color = :blue)
-    GLMakie.plot!(ax, strategy2, color = :red)
+    # # GLMakie.plot!(ax, goop_strategy1, color = :blue)
+    # # GLMakie.plot!(ax, goop_strategy2, color = :red)
+    # strategy1 = GLMakie.@lift OpenLoopStrategy($strategy[1].xs, $strategy[1].us)
+    # strategy2 = GLMakie.@lift OpenLoopStrategy($strategy[2].xs, $strategy[2].us)
+    # GLMakie.plot!(ax, strategy1, color = :blue)
+    # GLMakie.plot!(ax, strategy2, color = :red)
 
-    # Visualize initial states 
-    GLMakie.scatter!(
-        ax,
-        GLMakie.@lift([GLMakie.Point2f($θ1[1:2]), GLMakie.Point2f($θ2[1:2])]),
-        markersize = 20,
-        color = [:blue, :red],
-    )
+    # # Visualize initial states 
+    # GLMakie.scatter!(
+    #     ax,
+    #     GLMakie.@lift([GLMakie.Point2f($θ1[1:2]), GLMakie.Point2f($θ2[1:2])]),
+    #     markersize = 20,
+    #     color = [:blue, :red]
+    # )
 
-    # Visualize goal positions
-    GLMakie.scatter!(
-        ax,
-        GLMakie.@lift(GLMakie.Point2f($goal_position1)),
-        markersize = 20,
-        marker = :star5,
-        color = :blue,
-    )
-    GLMakie.scatter!(
-        ax,
-        GLMakie.@lift(GLMakie.Point2f($goal_position2)),
-        markersize = 20,
-        marker = :star5,
-        color = :red,
-    )
+    # # Visualize goal positions
+    # GLMakie.scatter!(
+    #     ax,
+    #     GLMakie.@lift(GLMakie.Point2f($goal_position1)),
+    #     markersize = 20,
+    #     marker = :star5,
+    #     color = :blue,
+    # )
+    # GLMakie.scatter!(
+    #     ax,
+    #     GLMakie.@lift(GLMakie.Point2f($goal_position2)),
+    #     markersize = 20,
+    #     marker = :star5,
+    #     color = :red,
+    # )
 
-    # Save img 
-    # GLMakie.save("data/Intersection_closed_loop/trajectory.png", figure)
+    # # Save img 
+    # # GLMakie.save("data/Intersection_closed_loop/trajectory.png", figure)
 
-    # closed_loop + receding horizon demo
-    time_step = 2
-    while time_step < 3 #15
-        println("time_step: ", time_step)
-        GLMakie.save("data/Intersection_closed_loop/trajectory$(time_step).png", figure)
-        # Update the positions of the vehicles
-        println("Update initial state1")
-        θ1.val[1:state_dim(dynamics)] = first(strategy[]).xs[begin + 1] # Asynchronous update: mutate p1's initial state without triggering others
-        println("Update initial state2")
-        initial_state2[] = strategy[][2].xs[begin + 1]
-        time_step += 1
-    end
+    # # closed_loop + receding horizon demo
+    # time_step = 2
+    # while time_step < 3 #15
+    #     println("time_step: ", time_step)
+    #     GLMakie.save("data/Intersection_closed_loop/trajectory$(time_step).png", figure)
+    #     # Update the positions of the vehicles
+    #     println("Update initial state1")
+    #     θ1.val[1:state_dim(dynamics)] = first(strategy[]).xs[begin + 1] # Asynchronous update: mutate p1's initial state without triggering others
+    #     println("Update initial state2")
+    #     initial_state2[] = strategy[][2].xs[begin + 1]
+    #     time_step += 1
+    # end
 
-    # Store speed data for Intersection
-    horizontal_speed_data = Vector{Vector{Float64}}[]
-    vertical_speed_data = Vector{Vector{Float64}}[]
-    openloop_distance1 = Vector{Float64}[]
+    # # Store speed data for Intersection
+    # horizontal_speed_data = Vector{Vector{Float64}}[]
+    # vertical_speed_data = Vector{Vector{Float64}}[]
+    # openloop_distance1 = Vector{Float64}[]
 
-    # Store openloop speed data
-    push!(
-        horizontal_speed_data,
-        [vcat(strategy[][1].xs...)[3:4:end], vcat(strategy[][2].xs...)[3:4:end]],
-    )#, vcat(strategy[3].xs...)[3:4:end]])
-    push!(
-        vertical_speed_data,
-        [vcat(strategy[][1].xs...)[4:4:end], vcat(strategy[][2].xs...)[4:4:end]],
-    )#, vcat(strategy[3].xs...)[4:4:end]])
+    # # Store openloop speed data
+    # push!(horizontal_speed_data, [vcat(strategy[][1].xs...)[3:4:end], vcat(strategy[][2].xs...)[3:4:end]])#, vcat(strategy[3].xs...)[3:4:end]])
+    # push!(vertical_speed_data, [vcat(strategy[][1].xs...)[4:4:end], vcat(strategy[][2].xs...)[4:4:end]])#, vcat(strategy[3].xs...)[4:4:end]])
 
-    # Store openloop distance data
-    push!(
-        openloop_distance1,
-        [
-            sqrt(sum((strategy[][1].xs[k][1:2] - strategy[][2].xs[k][1:2]) .^ 2)) for
-            k in 1:planning_horizon
-        ],
-    )
+    # # Store openloop distance data
+    # push!(openloop_distance1, [sqrt(sum((strategy[][1].xs[k][1:2] - strategy[][2].xs[k][1:2]) .^ 2)) for k in 1:planning_horizon])
 
-    # Visualize horizontal speed
-    T = 1
-    fig = GLMakie.Figure() # limits = (nothing, (nothing, 0.7))
-    ax2 = GLMakie.Axis(
-        fig[1, 1];
-        xlabel = "time step",
-        ylabel = "speed",
-        title = "Horizontal Speed",
-    )
-    GLMakie.scatterlines!(
-        ax2,
-        0:(planning_horizon - 1),
-        horizontal_speed_data[T][1],
-        label = "Vehicle 1",
-        color = :blue,
-    )
-    GLMakie.scatterlines!(
-        ax2,
-        0:(planning_horizon - 1),
-        horizontal_speed_data[T][2],
-        label = "Vehicle 2",
-        color = :red,
-    )
-    GLMakie.lines!(
-        ax2,
-        0:(planning_horizon - 1),
-        [1.5 for _ in 0:(planning_horizon - 1)],
-        color = :black,
-        linestyle = :dash,
-    )
-    fig[2, 1:2] =
-        GLMakie.Legend(fig, ax2, framevisible = false, orientation = :horizontal)
+    # # Visualize horizontal speed
+    # T = 1
+    # fig = GLMakie.Figure() # limits = (nothing, (nothing, 0.7))
+    # ax2 = GLMakie.Axis(fig[1, 1]; xlabel = "time step", ylabel = "speed", title = "Horizontal Speed")
+    # GLMakie.scatterlines!(ax2, 0:planning_horizon-1, horizontal_speed_data[T][1], label = "Vehicle 1", color = :blue)
+    # GLMakie.scatterlines!(ax2, 0:planning_horizon-1, horizontal_speed_data[T][2], label = "Vehicle 2", color = :red)
+    # GLMakie.lines!(ax2, 0:planning_horizon-1, [1.5 for _ in 0:planning_horizon-1], color = :black, linestyle = :dash)
+    # fig[2,1:2] = GLMakie.Legend(fig, ax2, framevisible = false, orientation = :horizontal)
 
-    # Visualize vertical speed
-    ax3 = GLMakie.Axis(
-        fig[1, 2];
-        xlabel = "time step",
-        ylabel = "speed",
-        title = "Vertical Speed",
-    )
-    GLMakie.scatterlines!(
-        ax3,
-        0:(planning_horizon - 1),
-        vertical_speed_data[T][1],
-        label = "Vehicle 1",
-        color = :blue,
-    )
-    GLMakie.scatterlines!(
-        ax3,
-        0:(planning_horizon - 1),
-        vertical_speed_data[T][2],
-        label = "Vehicle 2",
-        color = :red,
-    )
-    GLMakie.lines!(
-        ax3,
-        0:(planning_horizon - 1),
-        [1.5 for _ in 0:(planning_horizon - 1)],
-        color = :black,
-        linestyle = :dash,
-    )
+    # # Visualize vertical speed
+    # ax3 = GLMakie.Axis(fig[1, 2]; xlabel = "time step", ylabel = "speed", title = "Vertical Speed")
+    # GLMakie.scatterlines!(ax3, 0:planning_horizon-1, vertical_speed_data[T][1], label = "Vehicle 1", color = :blue)
+    # GLMakie.scatterlines!(ax3, 0:planning_horizon-1, vertical_speed_data[T][2], label = "Vehicle 2", color = :red)
+    # GLMakie.lines!(ax3, 0:planning_horizon-1, [1.5 for _ in 0:planning_horizon-1], color = :black, linestyle = :dash)
 
-    GLMakie.save("./data/Intersection_closed_loop/GOOP_plots/speed.png", fig)
+    # GLMakie.save("./data/Intersection_closed_loop/GOOP_plots/speed.png", fig)
 
-    # Visualize distance bw vehicles , limits = (nothing, (collision_avoidance-0.05, 0.4)) 
-    fig = GLMakie.Figure() # limits = (nothing, (nothing, 0.7))
-    ax4 = GLMakie.Axis(
-        fig[1, 1];
-        xlabel = "time step",
-        ylabel = "distance",
-        title = "Distance bw vehicles",
-    )
-    GLMakie.scatterlines!(
-        ax4,
-        0:(planning_horizon - 1),
-        openloop_distance1[T],
-        label = "B/w Agent 1 & Agent 2",
-        color = :black,
-        marker = :star5,
-        markersize = 20,
-    )
-    GLMakie.lines!(
-        ax4,
-        0:(planning_horizon - 1),
-        [1.0 for _ in 0:(planning_horizon - 1)],
-        color = :black,
-        linestyle = :dash,
-    )
-    fig[2, 1] = GLMakie.Legend(fig, ax4, framevisible = false, orientation = :horizontal)
+    # # Visualize distance bw vehicles , limits = (nothing, (collision_avoidance-0.05, 0.4)) 
+    # fig = GLMakie.Figure() # limits = (nothing, (nothing, 0.7))
+    # ax4 = GLMakie.Axis(fig[1, 1]; xlabel = "time step", ylabel = "distance", title = "Distance bw vehicles")
+    # GLMakie.scatterlines!(ax4, 0:planning_horizon-1, openloop_distance1[T], label = "B/w Agent 1 & Agent 2", color = :black, marker = :star5, markersize = 20)
+    # GLMakie.lines!(ax4, 0:planning_horizon-1, [1.0 for _ in 0:planning_horizon-1], color = :black, linestyle = :dash)
+    # fig[2,1] = GLMakie.Legend(fig, ax4, framevisible = false, orientation = :horizontal)
 
-    GLMakie.save(
-        "./data/Intersection_closed_loop/GOOP_plots/" * "distance_bw_vehicles.png",
-        fig,
-    )
+    # GLMakie.save("./data/Intersection_closed_loop/GOOP_plots/" * "distance_bw_vehicles.png", fig)
 
-    # Store distance from center yellow line 
-    distance_from_center = Vector{Vector{Float64}}[]
-    push!(
-        distance_from_center,
-        [vcat(strategy[][1].xs...)[2:4:end], vcat(-strategy[][2].xs...)[1:4:end]],
-    )#, vcat(strategy[3].xs...)[2:4:end]])
+    # # Store distance from center yellow line 
+    # distance_from_center = Vector{Vector{Float64}}[]
+    # push!(distance_from_center, [vcat(strategy[][1].xs...)[2:4:end], vcat(-strategy[][2].xs...)[1:4:end]])#, vcat(strategy[3].xs...)[2:4:end]])
 
-    # Visualize distance from center yellow line
-    fig = GLMakie.Figure() # limits = (nothing, (nothing, 0.7))
-    ax5 = GLMakie.Axis(
-        fig[1, 1];
-        xlabel = "time step",
-        ylabel = "distance",
-        title = "Position from center yellow line",
-    )
-    GLMakie.scatterlines!(
-        ax5,
-        0:(planning_horizon - 1),
-        distance_from_center[T][1],
-        label = "Vehicle 1",
-        color = :blue,
-    )
-    GLMakie.scatterlines!(
-        ax5,
-        0:(planning_horizon - 1),
-        distance_from_center[T][2],
-        label = "Vehicle 2",
-        color = :red,
-    )
-    GLMakie.lines!(
-        ax5,
-        0:(planning_horizon - 1),
-        [0.0 for _ in 0:(planning_horizon - 1)],
-        color = :black,
-        linestyle = :dash,
-    )
-    fig[2, 1] = GLMakie.Legend(fig, ax5, framevisible = false, orientation = :horizontal)
+    # # Visualize distance from center yellow line
+    # fig = GLMakie.Figure() # limits = (nothing, (nothing, 0.7))
+    # ax5 = GLMakie.Axis(fig[1, 1]; xlabel = "time step", ylabel = "distance", title = "Position from center yellow line")
+    # GLMakie.scatterlines!(ax5, 0:planning_horizon-1, distance_from_center[T][1], label = "Vehicle 1", color = :blue)
+    # GLMakie.scatterlines!(ax5, 0:planning_horizon-1, distance_from_center[T][2], label = "Vehicle 2", color = :red)
+    # GLMakie.lines!(ax5, 0:planning_horizon-1, [0.0 for _ in 0:planning_horizon-1], color = :black, linestyle = :dash)
+    # fig[2,1] = GLMakie.Legend(fig, ax5, framevisible = false, orientation = :horizontal)
 
-    GLMakie.save(
-        "./data/Intersection_closed_loop/GOOP_plots/" * "position_from_center.png",
-        fig,
-    )
+    # GLMakie.save("./data/Intersection_closed_loop/GOOP_plots/" * "position_from_center.png", fig)
+
 end
 
 end
