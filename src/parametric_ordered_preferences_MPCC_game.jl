@@ -149,7 +149,7 @@ function ParametricOrderedPreferencesMPCCGame(;
                 auxillary_constraints,
             )
 
-            # auxillary constraint: sᵢ ≥ 0
+            # auxillary constraint: sᵢ ≥ 0 (Note to my self: THIS CAN BE DROPPED)
             append!(private_inner_inequality_constraints[player_idx], slacks_ii)
 
             # store private_slacks
