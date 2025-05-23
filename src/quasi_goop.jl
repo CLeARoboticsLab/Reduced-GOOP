@@ -18,11 +18,15 @@ mutable struct Equalities_ii{T <: Lagrangian_term}
 	equalities::Vector{Vector{T}}
 end
 
-function Equalities_ii{T}(N::Int) where {T <: Lagrangian_term}
+function Equalities_ii{T}(num_levels::Int) where {T <: Lagrangian_term} 
 	Equalities_ii{T}(
-		[nothing for _ in 1:(N+1)],
-		[Vector{T}() for _ in 1:(N+1)],
+		[nothing for _ in 1:(num_levels+1)],
+		[Vector{T}() for _ in 1:(num_levels+1)],
 	)
+end
+
+function Equalities_ii(num_levels::Int, num_players::Int)
+    [ Equalities_ii{Lagrangian_term}(num_levels) for _ in 1:num_players ]
 end
 
 struct ordered_preferences
@@ -106,6 +110,7 @@ function QuasiGOOP_to_PDSyst(;
 	# Problem data
 	ordered_priority_levels = eachindex(preferences.preferences[1]) # assume all players have the same number of preferences
 	num_players = length(preferences.preferences)
+    num_levels = length(ordered_priority_levels)
 
 	primal_dimension_ii = 0
 	equality_dimension_ii = copy(equality_dimensions)
@@ -120,7 +125,7 @@ function QuasiGOOP_to_PDSyst(;
 	# Preallocate arrays of symbolic functions for each player
 	private_inner_equality_constraints = Vector{Symbolics.Num}[]
 	Lagrangian_terms = Lagrangian_term[]
-	F_ii = Equalities_ii{Lagrangian_term}(length(ordered_priority_levels))
+	F_ii = Equalities_ii(num_levels, num_players)
 
 	# Store dimensions
 	private_primals = [[dim] for dim in primal_dimensions]
@@ -130,13 +135,13 @@ function QuasiGOOP_to_PDSyst(;
 
 	function set_up_level(priority_level, player_idx)
 		# Step 1. Reformulation for prioritized constraints
-        prioritized_constraints_ii =
-            preferences.preferences[player_idx][priority_level] # fᵢ(x,θ) ≥ 0
-        preference_slack_dimension_ii =
-            length(prioritized_constraints_ii(dummy_primals, dummy_parameters))
-        primal_dimension_ii += preference_slack_dimension_ii
-        append!(private_primals[player_idx], preference_slack_dimension_ii)
-        inequality_dimension_ii[player_idx] += 2preference_slack_dimension_ii # account for sᵢ ≥ 0
+		prioritized_constraints_ii =
+			preferences.preferences[player_idx][priority_level] # fᵢ(x,θ) ≥ 0
+		preference_slack_dimension_ii =
+			length(prioritized_constraints_ii(dummy_primals, dummy_parameters))
+		primal_dimension_ii += preference_slack_dimension_ii
+		append!(private_primals[player_idx], preference_slack_dimension_ii)
+		inequality_dimension_ii[player_idx] += 2preference_slack_dimension_ii # account for sᵢ ≥ 0
 
 		# Step 2. Reformulate inequality constraints as equality constraints (via additional slacks)
 		equality_dimension_ii[player_idx] += inequality_dimension_ii[player_idx]
@@ -199,9 +204,9 @@ function QuasiGOOP_to_PDSyst(;
 			)
 		else
 			# equalities from previous levels become equality constraints 
-			for kk in 1:length(F_ii.equalities[priority_level-1])
+			for kk in 1:length(F_ii[player_idx].equalities[priority_level-1])
 				let
-					expr = F_ii.equalities[priority_level-1][kk].expr
+					expr = F_ii[player_idx].equalities[priority_level-1][kk].expr
 					push!(
 						Lagrangian_terms,
 						Lagrangian_term(expr, nothing, 0),
@@ -217,7 +222,7 @@ function QuasiGOOP_to_PDSyst(;
 						preference_slacks_ii) - barrier_slacks_ii, nothing, 0), #fg
 			)
 		end
-		append!(F_ii.equalities[priority_level], Lagrangian_terms)
+		append!(F_ii[player_idx].equalities[priority_level], Lagrangian_terms)
 		empty!(Lagrangian_terms)
 
 		inequality_dimension_ii[player_idx] = 0 # reset inequality dimension
@@ -240,12 +245,12 @@ function QuasiGOOP_to_PDSyst(;
 		# Step 5. Define symbolic expression for Lagrangian and stationarity conditions/constraints
 		if priority_level > 1
 			dims = let
-				ns = [length(e.expr) for e in F_ii.stationarity[priority_level-1]]
-				ds = [length(e.expr) for e in F_ii.equalities[priority_level]]
+				ns = [length(e.expr) for e in F_ii[player_idx].stationarity[priority_level-1]]
+				ds = [length(e.expr) for e in F_ii[player_idx].equalities[priority_level]]
 				vcat(ns[1], ds) # 2:[110, 28, 64, 14], 3: [223, 28, 64, 14, 56]
 			end
 		else
-			dims = [length(e.expr) for e in F_ii.equalities[priority_level]]
+			dims = [length(e.expr) for e in F_ii[player_idx].equalities[priority_level]]
 		end
 
 		λ = BlockArray(λ, dims)
@@ -259,7 +264,7 @@ function QuasiGOOP_to_PDSyst(;
 
 		Main.@infiltrate
 		if priority_level > 1
-			prev_st = F_ii.stationarity[priority_level-1]
+			prev_st = F_ii[player_idx].stationarity[priority_level-1]
 			for element in prev_st
 				expr = element.expr
 				deriv_order = element.deriv_order
@@ -270,7 +275,7 @@ function QuasiGOOP_to_PDSyst(;
 			end
 		end
 		Main.@infiltrate
-		eqs = F_ii.equalities[priority_level]
+		eqs = F_ii[player_idx].equalities[priority_level]
 		for (kk, eq) in enumerate(eqs)
 			dual_idx = priority_level > 1 ? 1 + kk : kk
 			deriv_order = priority_level > 1 ? eq.deriv_order : 0
@@ -282,87 +287,39 @@ function QuasiGOOP_to_PDSyst(;
 		end
 
 		Main.@infiltrate
-        stationarity = build_and_filter_stationarity!(x, Lagrangian_terms)
-		F_ii.stationarity[priority_level] = copy(Lagrangian_terms)
-		empty!(Lagrangian_terms)    
+		stationarity = build_and_filter_stationarity!(x, Lagrangian_terms)
+		F_ii[player_idx].stationarity[priority_level] = copy(Lagrangian_terms)
+		empty!(Lagrangian_terms)
 
-		########## CHECK STATIONARITY ##########
-		# if priority_level == first(ordered_priority_levels)
-		# 	push!(
-		# 		private_inner_equality_constraints,
-		# 		equality_constraints[player_idx](x, θ),
-		# 	)
-		# 	append!(
-		# 		private_inner_equality_constraints[player_idx],
-		# 		vcat(
-		# 			auxillary_constraints,
-		# 			preference_slacks_ii,
-		# 			inequality_constraints[player_idx](x, θ)) - barrier_slacks_ii,
-		# 	)
-		# 	g_ii = private_inner_equality_constraints[player_idx]
-		# 	L = objective_ii - barrier_objective_ii - λ' * g_ii
-		# 	println("Check stationarity at level $(priority_level) = ", all(isequal.(stationarity, Symbolics.gradient(L, x)))) # true
-		# 	# Append stationarity constraints for next level 
-		# 	pushfirst!(
-		# 		private_inner_equality_constraints[player_idx],
-		# 		stationarity...,
-		# 	)
-		# elseif priority_level > 1
-		# 	# Append barrier slack equalities
-		# 	append!(
-		# 		private_inner_equality_constraints[player_idx],
-		# 		vcat(
-		# 			auxillary_constraints,
-		# 			preference_slacks_ii) - barrier_slacks_ii,
-		# 	)
-        #     g_ii = private_inner_equality_constraints[player_idx]
-		# 	L = objective_ii - barrier_objective_ii - λ' * g_ii
-        #     original_goop_stationarity = Symbolics.gradient(L, x)
-        #     mask = .!Symbolics.iszero.(original_goop_stationarity)
-        #     original_goop_stationarity = original_goop_stationarity[mask]
-		# 	println("Check stationarity at level $(priority_level) = ", all(isequal.(stationarity, original_goop_stationarity))) # also true for level n if deriv_order > n is imposed (n ≥ 2)
-        #     # Remove previous stationarity constraints
-        #     deleteat!(
-        #         private_inner_equality_constraints[player_idx],
-        #         1:length(F_ii.stationarity[priority_level-1][1].expr),
-        #     )
-        #     # Append stationarity constraints for next level 
-		# 	pushfirst!(
-		# 		private_inner_equality_constraints[player_idx],
-		# 		stationarity...,
-		# 	)
-		# end
-		############ END CHECK STATIONARITY ##########
-
-        check_stationarity!(
-            priority_level,
-            ordered_priority_levels,
-            private_inner_equality_constraints,
-            equality_constraints,
-            inequality_constraints,
-            F_ii,
-            player_idx,
-            x, θ,
-            auxillary_constraints,
-            preference_slacks_ii,
-            barrier_slacks_ii,
-            objective_ii,
-            barrier_objective_ii,
-            λ,
-            stationarity
-        )
-        # `private_inner_equality_constraints` has been updated in-place,
+		check_stationarity!(
+			priority_level,
+			ordered_priority_levels,
+			private_inner_equality_constraints,
+			equality_constraints,
+			inequality_constraints,
+			F_ii[player_idx],
+			player_idx,
+			x, θ,
+			auxillary_constraints,
+			preference_slacks_ii,
+			barrier_slacks_ii,
+			objective_ii,
+			barrier_objective_ii,
+			λ,
+			stationarity,
+		)
+		# `private_inner_equality_constraints` has been updated in-place,
 
 		# Update primal_dimension_ii with induced primal dimension
 		induced_primal_dimension_ii = length(λ)
 		primal_dimension_ii += induced_primal_dimension_ii
 		append!(private_primals[player_idx], induced_primal_dimension_ii)
 
-        # Update equality_dimension_ii
-        Main.@infiltrate
-        stationarity_dimension = length(stationarity)
-        prev_equality_dimension_ii = sum(length(e.expr) for e in F_ii.equalities[priority_level])
-        equality_dimension_ii[player_idx] = stationarity_dimension + prev_equality_dimension_ii
+		# Update equality_dimension_ii
+		Main.@infiltrate
+		stationarity_dimension = length(stationarity)
+		prev_equality_dimension_ii = sum(length(e.expr) for e in F_ii[player_idx].equalities[priority_level])
+		equality_dimension_ii[player_idx] = stationarity_dimension + prev_equality_dimension_ii
 	end
 
 	# Build KKT system for each priority level for each player's own problem
@@ -379,27 +336,29 @@ end
 
 "Helper function to filter zeros out of the stationarity vector."
 function build_and_filter_stationarity!(x, Lagrangian_terms)
-    n = length(x)
-    stationarity = zero.(x)   
-    mask = falses(n) # mask[j] = true iff row j was ever non‑zero
+	n = length(x)
+	stationarity = zero.(x)
+	mask = falses(n) # mask[j] = true iff row j was ever non‑zero
 
-    for (i, term) in enumerate(Lagrangian_terms)
-        new_term = Symbolics.gradient(term, vcat(x))
-        Lagrangian_terms[i] = new_term
-        stationarity .+= new_term.expr
-        # record which positions are non‑zero in this term
-        mask .|= .!Symbolics.iszero.(new_term.expr) # mask[j] = mask[j] || (!Symbolics.iszero(expr[j])), elementwise OR and assign
-    end
+    Main.@infiltrate
 
-    # drop all rows that never lit up
-    if any(.!mask)
-        stationarity = stationarity[mask]
-        for t in Lagrangian_terms
-            t.expr = t.expr[mask]
-        end
-    end
+	for (i, term) in enumerate(Lagrangian_terms)
+		new_term = Symbolics.gradient(term, vcat(x))
+		Lagrangian_terms[i] = new_term
+		stationarity .+= new_term.expr
+		# record which positions are non‑zero in this term
+		mask .|= .!Symbolics.iszero.(new_term.expr) # mask[j] = mask[j] || (!Symbolics.iszero(expr[j])), elementwise OR and assign
+	end
 
-    stationarity
+	# drop all rows that never lit up
+	if any(.!mask)
+		stationarity = stationarity[mask]
+		for t in Lagrangian_terms
+			t.expr = t.expr[mask]
+		end
+	end
+
+	stationarity
 end
 
 """
@@ -409,79 +368,79 @@ Compute and verify stationarity at the given `priority_level` for `player_idx`.
 - Returns `match::Bool`
 """
 function check_stationarity!(
-    priority_level::Int,
-    ordered_priority_levels::AbstractVector{<:Int},
-    private_inner_equality_constraints::Vector{Vector{Symbolics.Num}},
-    equality_constraints,
-    inequality_constraints::Vector{Function},
-    F_ii,
-    player_idx::Int,
-    x,
-    θ,
-    auxillary_constraints::Vector{Symbolics.Num},
-    preference_slacks_ii::Vector{Symbolics.Num},
-    barrier_slacks_ii::Vector{Symbolics.Num},
-    objective_ii::Symbolics.Num,
-    barrier_objective_ii::Symbolics.Num,
-    λ,
-    stationarity
-) :: Bool
+	priority_level::Int,
+	ordered_priority_levels::AbstractVector{<:Int},
+	private_inner_equality_constraints::Vector{Vector{Symbolics.Num}},
+	equality_constraints,
+	inequality_constraints::Vector{Function},
+	F_ii,
+	player_idx::Int,
+	x,
+	θ,
+	auxillary_constraints::Vector{Symbolics.Num},
+	preference_slacks_ii::Vector{Symbolics.Num},
+	barrier_slacks_ii::Vector{Symbolics.Num},
+	objective_ii::Symbolics.Num,
+	barrier_objective_ii::Symbolics.Num,
+	λ,
+	stationarity,
+)::Bool
 
-    if priority_level == first(ordered_priority_levels)
-        # — base level: include all equality + slacks —
-        push!(
-            private_inner_equality_constraints,
-            equality_constraints[player_idx](x, θ),
-        )
-        append!(
-            private_inner_equality_constraints[player_idx],
-            vcat(
-                auxillary_constraints,
-                preference_slacks_ii,
-                inequality_constraints[player_idx](x, θ),
-            ) .- barrier_slacks_ii,
-        )
+	if priority_level == first(ordered_priority_levels)
+		# — base level: include all equality + slacks —
+		push!(
+			private_inner_equality_constraints,
+			equality_constraints[player_idx](x, θ),
+		)
+		append!(
+			private_inner_equality_constraints[player_idx],
+			vcat(
+				auxillary_constraints,
+				preference_slacks_ii,
+				inequality_constraints[player_idx](x, θ),
+			) .- barrier_slacks_ii,
+		)
 
-        g_ii = private_inner_equality_constraints[player_idx]
-        L    = objective_ii - barrier_objective_ii - λ' * g_ii
-        computed = Symbolics.gradient(L, x)
+		g_ii = private_inner_equality_constraints[player_idx]
+		L = objective_ii - barrier_objective_ii - λ' * g_ii
+		computed = Symbolics.gradient(L, x)
 
-        match = all(isequal.(stationarity, computed))
-        println("Check stationarity at level $priority_level = $match")
+		match = all(isequal.(stationarity, computed))
+		println("Check stationarity at level $priority_level = $match")
 
-        # prepend for the next level
-        pushfirst!(private_inner_equality_constraints[player_idx], stationarity...)
+		# prepend for the next level
+		pushfirst!(private_inner_equality_constraints[player_idx], stationarity...)
 
-    elseif priority_level > 1
-        # — higher levels: only the slack equalities —
-        append!(
-            private_inner_equality_constraints[player_idx],
-            vcat(auxillary_constraints, preference_slacks_ii) .- barrier_slacks_ii,
-        )
+	elseif priority_level > 1
+		# — higher levels: only the slack equalities —
+		append!(
+			private_inner_equality_constraints[player_idx],
+			vcat(auxillary_constraints, preference_slacks_ii) .- barrier_slacks_ii,
+		)
 
-        g_ii = private_inner_equality_constraints[player_idx]
-        L    = objective_ii - barrier_objective_ii - λ' * g_ii
-        computed = Symbolics.gradient(L, x)
+		g_ii = private_inner_equality_constraints[player_idx]
+		L = objective_ii - barrier_objective_ii - λ' * g_ii
+		computed = Symbolics.gradient(L, x)
 
-        # mask out always-zero entries
-        mask = .! Symbolics.iszero.(computed)
-        computed_masked = computed[mask]
+		# mask out always-zero entries
+		mask = .! Symbolics.iszero.(computed)
+		computed_masked = computed[mask]
 
-        match = all(isequal.(stationarity, computed_masked))
-        println("Check stationarity at level $priority_level = $match")
+		match = all(isequal.(stationarity, computed_masked))
+		println("Check stationarity at level $priority_level = $match")
 
-        # remove previous stationarity constraints
-        num_prev = length(F_ii.stationarity[priority_level-1][1].expr)
-        deleteat!(private_inner_equality_constraints[player_idx], 1:num_prev)
+		# remove previous stationarity constraints
+		num_prev = length(F_ii.stationarity[priority_level-1][1].expr)
+		deleteat!(private_inner_equality_constraints[player_idx], 1:num_prev)
 
-        # prepend the new stationarity
-        pushfirst!(private_inner_equality_constraints[player_idx], stationarity...)
+		# prepend the new stationarity
+		pushfirst!(private_inner_equality_constraints[player_idx], stationarity...)
 
-    else
-        error("Invalid priority_level: $priority_level")
-    end
+	else
+		error("Invalid priority_level: $priority_level")
+	end
 
-    return match
+	return match
 end
 
 "Helper function to create a 'PrimalDualSysEqn' object from symbolic functions."
