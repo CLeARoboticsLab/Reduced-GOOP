@@ -6,8 +6,8 @@ end
 
 function Symbolics.gradient(f::Lagrangian_term, x::AbstractVector{<:Symbolics.Num})
 	if f.deriv_order > 1
-        return Lagrangian_term(zero.(x), f.duals, f.deriv_order + 1)
-    end
+		return Lagrangian_term(zero.(x), f.duals, f.deriv_order + 1)
+	end
 
 	f.deriv_order += 1
 	# Return new object after taking gradient
@@ -162,7 +162,7 @@ function QuasiGOOP_to_PDSyst(;
 			@assert sum(private_primals[player_idx]) == primal_dimension_ii
 		end
 
-		Main.@infiltrate
+		# Main.@infiltrate
 
 		# Step 3. Define symbolic variables for primals
 		total_dimension =
@@ -191,7 +191,7 @@ function QuasiGOOP_to_PDSyst(;
 
 		x = BlockArray(z[Block(1)], private_primals[player_idx])
 		λ = z[Block(2)] # dual variables for equality constraints
-		Main.@infiltrate
+		# Main.@infiltrate
 
 		# Step 4. Define symbolic expression for objective and (equality) constraints
 		if priority_level < last(ordered_priority_levels)
@@ -257,7 +257,6 @@ function QuasiGOOP_to_PDSyst(;
 			push!(private_slacks, sum_slacks)
 
 		else #topmost level objective
-			Main.@infiltrate
 			objective_ii = preferences.preferences[player_idx][priority_level](x, θ)
 			println("objective_$(priority_level) for player $(player_idx) = ", objective_ii)
 			for kk in 1:length(F_ii[player_idx].equalities[priority_level-1])
@@ -280,7 +279,7 @@ function QuasiGOOP_to_PDSyst(;
 		else
 			dims = let
 				ns = [length(e.expr) for e in F_ii[player_idx].stationarity[priority_level-1]]
-                @assert all(item -> item == ns[1], ns) 
+				@assert all(item -> item == ns[1], ns)
 				ds = [length(e.expr) for e in F_ii[player_idx].equalities[priority_level]]
 				vcat(ns[1], ds) # level 2:[110, 28, 64, 14], level 3: [223, 28, 64, 14, 56], level 4: [321, 28, 64, 14, 56]
 			end
@@ -360,7 +359,26 @@ function QuasiGOOP_to_PDSyst(;
 		end
 		start_idx += primal_dimension_ii
 	end
-    Main.@infiltrate
+	Main.@infiltrate
+
+	# Build stationarity and equality at the final level for all players
+	final_stationarity = vcat((
+		mapreduce(
+			t -> t.expr,
+			.+,
+			F_ii[player].stationarity[end];
+			init = zero.(F_ii[player].stationarity[end][1].expr),
+		) for player in 1:num_players)...
+	)
+	final_equality = reduce(
+		vcat,
+		(t.expr
+		 for player in 1:num_players
+		 for t in F_ii[player].equalities[end]
+		),
+	)
+
+	# Return the PrimalDualSysEqn object
 
 end
 
@@ -374,10 +392,10 @@ function build_and_filter_stationarity!(x, Lagrangian_terms)
 		new_term = Symbolics.gradient(term, collect(x))
 		Lagrangian_terms[i] = new_term
 		stationarity .+= new_term.expr
-		println("new_term.deriv_order = ", new_term.deriv_order)
-        if new_term.deriv_order > 2
-            all(Symbolics.iszero.(new_term.expr))
-        end
+		println("....new_term.deriv_order = ", new_term.deriv_order)
+		if new_term.deriv_order > 2
+			all(Symbolics.iszero.(new_term.expr))
+		end
 		# record which positions are non‑zero in this term
 		mask .|= .!Symbolics.iszero.(new_term.expr) # mask[j] = mask[j] || (!Symbolics.iszero(expr[j])), elementwise OR and assign
 	end
