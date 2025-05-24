@@ -108,6 +108,10 @@ function QuasiGOOP_to_PDSyst(;
 	backend = SymbolicTracingUtils.SymbolicsBackend()
 
 	# Problem data
+	# Append objectives to the end of preferences for each player_idx
+	for (i, obj) in enumerate(objectives)
+		push!(preferences.preferences[i], obj)
+	end
 	ordered_priority_levels = eachindex(preferences.preferences[1]) # assume all players have the same number of preferences
 	num_players = length(preferences.preferences)
 	num_levels = length(ordered_priority_levels)
@@ -135,24 +139,28 @@ function QuasiGOOP_to_PDSyst(;
 
 	start_idx = 1
 
+
 	function set_up_level(priority_level, player_idx)
-		# Step 1. Reformulation for prioritized constraints
-		prioritized_constraints_ii =
-			preferences.preferences[player_idx][priority_level] # fᵢ(x,θ) ≥ 0
-		preference_slack_dimension_ii =
-			length(prioritized_constraints_ii(dummy_primals, dummy_parameters))
-		primal_dimension_ii += preference_slack_dimension_ii
-		append!(private_primals[player_idx], preference_slack_dimension_ii)
-		inequality_dimension_ii[player_idx] += 2preference_slack_dimension_ii # account for sᵢ ≥ 0
+		if priority_level < last(ordered_priority_levels)
+			# Do the following for preferences, not for topmost level objective
+			# Step 1. Reformulation for prioritized constraints
+			prioritized_constraints_ii =
+				preferences.preferences[player_idx][priority_level] # fᵢ(x,θ) ≥ 0
+			preference_slack_dimension_ii =
+				length(prioritized_constraints_ii(dummy_primals, dummy_parameters))
+			primal_dimension_ii += preference_slack_dimension_ii
+			append!(private_primals[player_idx], preference_slack_dimension_ii)
+			inequality_dimension_ii[player_idx] += 2preference_slack_dimension_ii # account for sᵢ ≥ 0
 
-		# Step 2. Reformulate inequality constraints as equality constraints (via additional slacks)
-		equality_dimension_ii[player_idx] += inequality_dimension_ii[player_idx]
-		barrier_slacks_dimension_ii = copy(inequality_dimension_ii[player_idx])
-		primal_dimension_ii += barrier_slacks_dimension_ii
-		append!(private_primals[player_idx], barrier_slacks_dimension_ii)
-		@assert sum(private_primals[player_idx]) == primal_dimension_ii
+			# Step 2. Reformulate inequality constraints as equality constraints (via additional slacks)
+			equality_dimension_ii[player_idx] += inequality_dimension_ii[player_idx]
+			barrier_slacks_dimension_ii = copy(inequality_dimension_ii[player_idx])
+			primal_dimension_ii += barrier_slacks_dimension_ii
+			append!(private_primals[player_idx], barrier_slacks_dimension_ii)
+			@assert sum(private_primals[player_idx]) == primal_dimension_ii
+		end
 
-		# Main.@infiltrate
+		Main.@infiltrate
 
 		# Step 3. Define symbolic variables for primals
 		total_dimension =
@@ -184,31 +192,72 @@ function QuasiGOOP_to_PDSyst(;
 		# Main.@infiltrate
 
 		# Step 4. Define symbolic expression for objective and (equality) constraints
-		preference_slacks_ii = blocks(x)[end-1] # These slacks are introduced before reformulation slacks; second-last block
-		barrier_slacks_ii = blocks(x)[end] # last block
-		objective_ii = sum(preference_slacks_ii) # or sum(preference_slacks_ii)
-		println("objective_ii = ", objective_ii)
-		barrier_objective_ii = μ * sum(log.(barrier_slacks_ii))
+		if priority_level < last(ordered_priority_levels)
+			# Step 4a. Define symbolic expression for objective and (equality) constraints
+			preference_slacks_ii = blocks(x)[end-1] # These slacks are introduced before reformulation slacks; second-last block
+			barrier_slacks_ii = blocks(x)[end] # last block
+			objective_ii = sum(preference_slacks_ii) # or sum(preference_slacks_ii)
+			println("objective_$(priority_level) for player $(player_idx) = ", objective_ii)
+			barrier_objective_ii = μ * sum(log.(barrier_slacks_ii))
 
-		# Replace inequality constriants: fg(x,sₚ) = sₚ + g(x) ≥ 0, fg(x,sₚ) - sᵦ = 0
-		auxillary_constraints = prioritized_constraints_ii(x, θ) .+ preference_slacks_ii
+			# Replace inequality constriants: fg(x,sₚ) = sₚ + g(x) ≥ 0, fg(x,sₚ) - sᵦ = 0
+			auxillary_constraints = prioritized_constraints_ii(x, θ) .+ preference_slacks_ii
 
-		if priority_level == first(ordered_priority_levels)
-			push!(
-				Lagrangian_terms,
-				Lagrangian_term(
-					equality_constraints[player_idx](x, θ), nothing, 0), #f
+			if priority_level == first(ordered_priority_levels)
+				push!(
+					Lagrangian_terms,
+					Lagrangian_term(
+						equality_constraints[player_idx](x, θ), nothing, 0), #f
+				)
+				push!(
+					Lagrangian_terms,
+					Lagrangian_term(
+						vcat(
+							auxillary_constraints,
+							preference_slacks_ii,
+							inequality_constraints[player_idx](x, θ)) - barrier_slacks_ii, nothing, 0), #fg
+				)
+			else
+				# equalities from previous levels become equality constraints 
+				for kk in 1:length(F_ii[player_idx].equalities[priority_level-1])
+					let
+						expr = F_ii[player_idx].equalities[priority_level-1][kk].expr
+						push!(
+							Lagrangian_terms,
+							Lagrangian_term(expr, nothing, 0),
+						)
+					end
+				end
+				#subsequent levels also have additional equalities from preference function
+				push!(
+					Lagrangian_terms,
+					Lagrangian_term(
+						vcat(
+							auxillary_constraints,
+							preference_slacks_ii) - barrier_slacks_ii, nothing, 0), #fg
+				)
+			end
+			# append!(F_ii[player_idx].equalities[priority_level], Lagrangian_terms)
+			# empty!(Lagrangian_terms)
+			inequality_dimension_ii[player_idx] = 0 # reset inequality dimension
+
+			x_temp = let
+				Symbolics.scalarize(
+					only(Symbolics.@variables(z̃[1:total_dimension])),
+				)
+			end
+			sum_slacks = Symbolics.build_function(
+				sum(preference_slacks_ii),
+				x_temp,
+				θ,
+				expression = Val{false},
 			)
-			push!(
-				Lagrangian_terms,
-				Lagrangian_term(
-					vcat(
-						auxillary_constraints,
-						preference_slacks_ii,
-						inequality_constraints[player_idx](x, θ)) - barrier_slacks_ii, nothing, 0), #fg
-			)
-		else
-			# equalities from previous levels become equality constraints 
+			push!(private_slacks, sum_slacks)
+
+		else #topmost level objective
+			Main.@infiltrate
+			objective_ii = preferences.preferences[player_idx][priority_level](x, θ)
+			println("objective_$(priority_level) for player $(player_idx) = ", objective_ii)
 			for kk in 1:length(F_ii[player_idx].equalities[priority_level-1])
 				let
 					expr = F_ii[player_idx].equalities[priority_level-1][kk].expr
@@ -218,43 +267,21 @@ function QuasiGOOP_to_PDSyst(;
 					)
 				end
 			end
-			#subsequent levels also have additional equalities from preference function
-			push!(
-				Lagrangian_terms,
-				Lagrangian_term(
-					vcat(
-						auxillary_constraints,
-						preference_slacks_ii) - barrier_slacks_ii, nothing, 0), #fg
-			)
+            barrier_objective_ii = 0
 		end
 		append!(F_ii[player_idx].equalities[priority_level], Lagrangian_terms)
 		empty!(Lagrangian_terms)
 
-		inequality_dimension_ii[player_idx] = 0 # reset inequality dimension
-
-		x_temp = let
-			Symbolics.scalarize(
-				only(Symbolics.@variables(z̃[1:total_dimension])),
-			)
-		end
-		sum_slacks = Symbolics.build_function(
-			sum(preference_slacks_ii),
-			x_temp,
-			θ,
-			expression = Val{false},
-		)
-		push!(private_slacks, sum_slacks)
-
-		# Main.@infiltrate
+		Main.@infiltrate
 		# Step 5. Define symbolic expression for Lagrangian and stationarity conditions/constraints
-		if priority_level > 1
+		if priority_level == first(ordered_priority_levels)
+			dims = [length(e.expr) for e in F_ii[player_idx].equalities[priority_level]]
+		else
 			dims = let
 				ns = [length(e.expr) for e in F_ii[player_idx].stationarity[priority_level-1]]
 				ds = [length(e.expr) for e in F_ii[player_idx].equalities[priority_level]]
-				vcat(ns[1], ds) # 2:[110, 28, 64, 14], 3: [223, 28, 64, 14, 56]
+				vcat(ns[1], ds) # level 2:[110, 28, 64, 14], level 3: [223, 28, 64, 14, 56]
 			end
-		else
-			dims = [length(e.expr) for e in F_ii[player_idx].equalities[priority_level]]
 		end
 
 		λ = BlockArray(λ, dims)
@@ -316,6 +343,7 @@ function QuasiGOOP_to_PDSyst(;
 		append!(private_primals[player_idx], induced_primal_dimension_ii)
 
 		# Update equality_dimension_ii
+        Main.@infiltrate
 		stationarity_dimension = length(stationarity)
 		prev_equality_dimension_ii = sum(length(e.expr) for e in F_ii[player_idx].equalities[priority_level])
 		equality_dimension_ii[player_idx] = stationarity_dimension + prev_equality_dimension_ii
@@ -325,9 +353,7 @@ function QuasiGOOP_to_PDSyst(;
 	for player in 1:num_players
 		primal_dimension_ii = sum(private_primals[player])
 		for priority_level in ordered_priority_levels
-			if !isnothing(preferences.is_prioritized_constraint[player][priority_level])
-				set_up_level(priority_level, player)
-			end
+			set_up_level(priority_level, player)
 		end
 		start_idx += primal_dimension_ii
 	end
@@ -346,7 +372,7 @@ function build_and_filter_stationarity!(x, Lagrangian_terms)
 		Lagrangian_terms[i] = new_term
 		stationarity .+= new_term.expr
 		# println("new_term.deriv_order = ", new_term.deriv_order)
-		new_term.deriv_order > 2 && @assert new_term.expr == zero.(collect(x))
+		# new_term.deriv_order > 2 && @assert new_term.expr == zero.(collect(x))
 		# record which positions are non‑zero in this term
 		mask .|= .!Symbolics.iszero.(new_term.expr) # mask[j] = mask[j] || (!Symbolics.iszero(expr[j])), elementwise OR and assign
 	end
