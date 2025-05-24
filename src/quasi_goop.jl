@@ -6,7 +6,7 @@ end
 
 function Symbolics.gradient(f::Lagrangian_term, x::AbstractVector{<:Symbolics.Num})
 	f.deriv_order > 1 && Lagrangian_term(zero.(x), f.duals, f.deriv_order + 1)
-    
+
 	f.deriv_order += 1
 	# Return new object after taking gradient
 	expr = isnothing(f.duals) ? f.expr : -f.expr' * f.duals
@@ -267,7 +267,7 @@ function QuasiGOOP_to_PDSyst(;
 					)
 				end
 			end
-            barrier_objective_ii = 0
+			barrier_objective_ii = 0
 		end
 		append!(F_ii[player_idx].equalities[priority_level], Lagrangian_terms)
 		empty!(Lagrangian_terms)
@@ -319,23 +319,25 @@ function QuasiGOOP_to_PDSyst(;
 		stationarity = build_and_filter_stationarity!(x, Lagrangian_terms)
 		F_ii[player_idx].stationarity[priority_level] = copy(Lagrangian_terms)
 		empty!(Lagrangian_terms)
-		check_stationarity!(
-			priority_level,
-			ordered_priority_levels,
-			private_inner_equality_constraints, # `private_inner_equality_constraints` has been updated in-place,
-			equality_constraints,
-			inequality_constraints,
-			F_ii[player_idx],
-			player_idx,
-			x, θ,
-			auxillary_constraints,
-			preference_slacks_ii,
-			barrier_slacks_ii,
-			objective_ii,
-			barrier_objective_ii,
-			λ,
-			stationarity,
-		)
+		if priority_level < last(ordered_priority_levels)
+			check_stationarity!(
+				priority_level,
+				ordered_priority_levels,
+				private_inner_equality_constraints, # `private_inner_equality_constraints` has been updated in-place,
+				equality_constraints,
+				inequality_constraints,
+				F_ii[player_idx],
+				player_idx,
+				x, θ,
+				auxillary_constraints,
+				preference_slacks_ii,
+				barrier_slacks_ii,
+				objective_ii,
+				barrier_objective_ii,
+				λ,
+				stationarity,
+			)
+		end
 
 		# Update primal_dimension_ii with induced primal dimension
 		induced_primal_dimension_ii = length(λ)
@@ -343,7 +345,7 @@ function QuasiGOOP_to_PDSyst(;
 		append!(private_primals[player_idx], induced_primal_dimension_ii)
 
 		# Update equality_dimension_ii
-        Main.@infiltrate
+		Main.@infiltrate
 		stationarity_dimension = length(stationarity)
 		prev_equality_dimension_ii = sum(length(e.expr) for e in F_ii[player_idx].equalities[priority_level])
 		equality_dimension_ii[player_idx] = stationarity_dimension + prev_equality_dimension_ii
@@ -371,12 +373,13 @@ function build_and_filter_stationarity!(x, Lagrangian_terms)
 		new_term = Symbolics.gradient(term, collect(x))
 		Lagrangian_terms[i] = new_term
 		stationarity .+= new_term.expr
-		# println("new_term.deriv_order = ", new_term.deriv_order)
-		# new_term.deriv_order > 2 && @assert new_term.expr == zero.(collect(x))
+		println("new_term.deriv_order = ", new_term.deriv_order)
+		Main.@infiltrate
+		# new_term.deriv_order > 2 && @assert all(Symbolics.iszero.(new_term.expr))
 		# record which positions are non‑zero in this term
 		mask .|= .!Symbolics.iszero.(new_term.expr) # mask[j] = mask[j] || (!Symbolics.iszero(expr[j])), elementwise OR and assign
 	end
-
+    Main.@infiltrate
 	# drop all rows that never lit up
 	if any(.!mask)
 		stationarity = stationarity[mask]
