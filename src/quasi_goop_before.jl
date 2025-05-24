@@ -5,9 +5,7 @@ mutable struct Lagrangian_term{T <: Symbolics.Num}
 end
 
 function Symbolics.gradient(f::Lagrangian_term, x::AbstractVector{<:Symbolics.Num})
-	if f.deriv_order > 1
-        return Lagrangian_term(zero.(x), f.duals, f.deriv_order + 1)
-    end
+	f.deriv_order > 1 && Lagrangian_term(zero.(x), f.duals, f.deriv_order + 1)
 
 	f.deriv_order += 1
 	# Return new object after taking gradient
@@ -22,8 +20,8 @@ end
 
 function Equalities_ii{T}(num_levels::Int) where {T <: Lagrangian_term}
 	Equalities_ii{T}(
-		[nothing for _ in 1:(num_levels)],
-		[Vector{T}() for _ in 1:(num_levels)],
+		[nothing for _ in 1:(num_levels+1)],
+		[Vector{T}() for _ in 1:(num_levels+1)],
 	)
 end
 
@@ -274,15 +272,15 @@ function QuasiGOOP_to_PDSyst(;
 		append!(F_ii[player_idx].equalities[priority_level], Lagrangian_terms)
 		empty!(Lagrangian_terms)
 
+		Main.@infiltrate
 		# Step 5. Define symbolic expression for Lagrangian and stationarity conditions/constraints
 		if priority_level == first(ordered_priority_levels)
 			dims = [length(e.expr) for e in F_ii[player_idx].equalities[priority_level]]
 		else
 			dims = let
 				ns = [length(e.expr) for e in F_ii[player_idx].stationarity[priority_level-1]]
-                @assert all(item -> item == ns[1], ns) 
 				ds = [length(e.expr) for e in F_ii[player_idx].equalities[priority_level]]
-				vcat(ns[1], ds) # level 2:[110, 28, 64, 14], level 3: [223, 28, 64, 14, 56], level 4: [321, 28, 64, 14, 56]
+				vcat(ns[1], ds) # level 2:[110, 28, 64, 14], level 3: [223, 28, 64, 14, 56]
 			end
 		end
 
@@ -321,7 +319,7 @@ function QuasiGOOP_to_PDSyst(;
 		stationarity = build_and_filter_stationarity!(x, Lagrangian_terms)
 		F_ii[player_idx].stationarity[priority_level] = copy(Lagrangian_terms)
 		empty!(Lagrangian_terms)
-		if priority_level < 4 # hardcoded for now since after level 3, quasiGOOP is significantly different
+		if priority_level < last(ordered_priority_levels)
 			check_stationarity!(
 				priority_level,
 				ordered_priority_levels,
@@ -347,6 +345,7 @@ function QuasiGOOP_to_PDSyst(;
 		append!(private_primals[player_idx], induced_primal_dimension_ii)
 
 		# Update equality_dimension_ii
+		Main.@infiltrate
 		stationarity_dimension = length(stationarity)
 		prev_equality_dimension_ii = sum(length(e.expr) for e in F_ii[player_idx].equalities[priority_level])
 		equality_dimension_ii[player_idx] = stationarity_dimension + prev_equality_dimension_ii
@@ -360,7 +359,6 @@ function QuasiGOOP_to_PDSyst(;
 		end
 		start_idx += primal_dimension_ii
 	end
-    Main.@infiltrate
 
 end
 
@@ -370,14 +368,13 @@ function build_and_filter_stationarity!(x, Lagrangian_terms)
 	stationarity = zero.(x)
 	mask = falses(n) # mask[j] = true iff row j was ever non‑zero
 
+
 	for (i, term) in enumerate(Lagrangian_terms)
 		new_term = Symbolics.gradient(term, collect(x))
 		Lagrangian_terms[i] = new_term
 		stationarity .+= new_term.expr
 		println("new_term.deriv_order = ", new_term.deriv_order)
-        if new_term.deriv_order > 2
-            all(Symbolics.iszero.(new_term.expr))
-        end
+		new_term.deriv_order > 2 && @assert all(Symbolics.iszero.(new_term.expr))
 		# record which positions are non‑zero in this term
 		mask .|= .!Symbolics.iszero.(new_term.expr) # mask[j] = mask[j] || (!Symbolics.iszero(expr[j])), elementwise OR and assign
 	end
