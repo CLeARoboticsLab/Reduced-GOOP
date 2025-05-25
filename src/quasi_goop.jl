@@ -22,8 +22,8 @@ end
 
 function Equalities_ii{T}(num_levels::Int) where {T <: Lagrangian_term}
 	Equalities_ii{T}(
-		[nothing for _ in 1:(num_levels)],
-		[Vector{T}() for _ in 1:(num_levels)],
+		[nothing for _ in 1:(num_levels+1)],
+		[Vector{T}() for _ in 1:(num_levels+1)],
 	)
 end
 
@@ -64,7 +64,7 @@ function ParametricQuasiGOOP(;
 )
 
 	(;
-		objectives_symbolic,
+		stationarity_symbolic,
 		equality_symbolic,
 		inequality_symbolic,
 		preferences_symbolic,
@@ -110,10 +110,10 @@ function QuasiGOOP_to_PDSyst(;
 	backend = SymbolicTracingUtils.SymbolicsBackend()
 
 	# Problem data
-	# Append objectives to the end of preferences for each player_idx
-	for (i, obj) in enumerate(objectives)
-		push!(preferences.preferences[i], obj)
-	end
+	# # Append objectives to the end of preferences for each player_idx
+	# for (i, obj) in enumerate(objectives)
+	# 	push!(preferences.preferences[i], obj)
+	# end
 	ordered_priority_levels = eachindex(preferences.preferences[1]) # assume all players have the same number of preferences
 	num_players = length(preferences.preferences)
 	num_levels = length(ordered_priority_levels)
@@ -143,24 +143,22 @@ function QuasiGOOP_to_PDSyst(;
 
 
 	function set_up_level(priority_level, player_idx)
-		if priority_level < last(ordered_priority_levels)
-			# Do the following for preferences, not for topmost level objective
-			# Step 1. Reformulation for prioritized constraints
-			prioritized_constraints_ii =
-				preferences.preferences[player_idx][priority_level] # fᵢ(x,θ) ≥ 0
-			preference_slack_dimension_ii =
-				length(prioritized_constraints_ii(dummy_primals, dummy_parameters))
-			primal_dimension_ii += preference_slack_dimension_ii
-			append!(private_primals[player_idx], preference_slack_dimension_ii)
-			inequality_dimension_ii[player_idx] += 2preference_slack_dimension_ii # account for sᵢ ≥ 0
+		# Do the following for preferences, not for topmost level objective
+		# Step 1. Reformulation for prioritized constraints
+		prioritized_constraints_ii =
+			preferences.preferences[player_idx][priority_level] # fᵢ(x,θ) ≥ 0
+		preference_slack_dimension_ii =
+			length(prioritized_constraints_ii(dummy_primals, dummy_parameters))
+		primal_dimension_ii += preference_slack_dimension_ii
+		append!(private_primals[player_idx], preference_slack_dimension_ii)
+		inequality_dimension_ii[player_idx] += 2preference_slack_dimension_ii # account for sᵢ ≥ 0
 
-			# Step 2. Reformulate inequality constraints as equality constraints (via additional slacks)
-			equality_dimension_ii[player_idx] += inequality_dimension_ii[player_idx]
-			barrier_slacks_dimension_ii = copy(inequality_dimension_ii[player_idx])
-			primal_dimension_ii += barrier_slacks_dimension_ii
-			append!(private_primals[player_idx], barrier_slacks_dimension_ii)
-			@assert sum(private_primals[player_idx]) == primal_dimension_ii
-		end
+		# Step 2. Reformulate inequality constraints as equality constraints (via additional slacks)
+		equality_dimension_ii[player_idx] += inequality_dimension_ii[player_idx]
+		barrier_slacks_dimension_ii = copy(inequality_dimension_ii[player_idx])
+		primal_dimension_ii += barrier_slacks_dimension_ii
+		append!(private_primals[player_idx], barrier_slacks_dimension_ii)
+		@assert sum(private_primals[player_idx]) == primal_dimension_ii
 
 		# Main.@infiltrate
 
@@ -194,71 +192,32 @@ function QuasiGOOP_to_PDSyst(;
 		# Main.@infiltrate
 
 		# Step 4. Define symbolic expression for objective and (equality) constraints
-		if priority_level < last(ordered_priority_levels)
-			# Step 4a. Define symbolic expression for objective and (equality) constraints
-			preference_slacks_ii = blocks(x)[end-1] # These slacks are introduced before reformulation slacks; second-last block
-			barrier_slacks_ii = blocks(x)[end] # last block
-			objective_ii = sum(preference_slacks_ii) # or sum(preference_slacks_ii)
-			println("objective_$(priority_level) for player $(player_idx) = ", objective_ii)
-			barrier_objective_ii = μ * sum(log.(barrier_slacks_ii))
+		# Step 4a. Define symbolic expression for objective and (equality) constraints
+		preference_slacks_ii = blocks(x)[end-1] # These slacks are introduced before reformulation slacks; second-last block
+		barrier_slacks_ii = blocks(x)[end] # last block
+		objective_ii = sum(preference_slacks_ii) # or sum(preference_slacks_ii)
+		println("objective_$(priority_level) for player $(player_idx) = ", objective_ii)
+		barrier_objective_ii = μ * sum(log.(barrier_slacks_ii))
 
-			# Replace inequality constriants: fg(x,sₚ) = sₚ + g(x) ≥ 0, fg(x,sₚ) - sᵦ = 0
-			auxillary_constraints = prioritized_constraints_ii(x, θ) .+ preference_slacks_ii
+		# Replace inequality constriants: fg(x,sₚ) = sₚ + g(x) ≥ 0, fg(x,sₚ) - sᵦ = 0
+		auxillary_constraints = prioritized_constraints_ii(x, θ) .+ preference_slacks_ii
 
-			if priority_level == first(ordered_priority_levels)
-				push!(
-					Lagrangian_terms,
-					Lagrangian_term(
-						equality_constraints[player_idx](x, θ), nothing, 0), #f
-				)
-				push!(
-					Lagrangian_terms,
-					Lagrangian_term(
-						vcat(
-							auxillary_constraints,
-							preference_slacks_ii,
-							inequality_constraints[player_idx](x, θ)) - barrier_slacks_ii, nothing, 0), #fg
-				)
-			else
-				# equalities from previous levels become equality constraints 
-				for kk in 1:length(F_ii[player_idx].equalities[priority_level-1])
-					let
-						expr = F_ii[player_idx].equalities[priority_level-1][kk].expr
-						push!(
-							Lagrangian_terms,
-							Lagrangian_term(expr, nothing, 0),
-						)
-					end
-				end
-				#subsequent levels also have additional equalities from preference function
-				push!(
-					Lagrangian_terms,
-					Lagrangian_term(
-						vcat(
-							auxillary_constraints,
-							preference_slacks_ii) - barrier_slacks_ii, nothing, 0), #fg
-				)
-			end
-			# append!(F_ii[player_idx].equalities[priority_level], Lagrangian_terms)
-			# empty!(Lagrangian_terms)
-			inequality_dimension_ii[player_idx] = 0 # reset inequality dimension
-
-			x_temp = let
-				Symbolics.scalarize(
-					only(Symbolics.@variables(z̃[1:total_dimension])),
-				)
-			end
-			sum_slacks = Symbolics.build_function(
-				sum(preference_slacks_ii),
-				x_temp,
-				θ,
-				expression = Val{false},
+		if priority_level == first(ordered_priority_levels)
+			push!(
+				Lagrangian_terms,
+				Lagrangian_term(
+					equality_constraints[player_idx](x, θ), nothing, 0), #f
 			)
-			push!(private_slacks, sum_slacks)
-
-		else #topmost level objective
-			objective_ii = preferences.preferences[player_idx][priority_level](x, θ)
-			println("objective_$(priority_level) for player $(player_idx) = ", objective_ii)
+			push!(
+				Lagrangian_terms,
+				Lagrangian_term(
+					vcat(
+						auxillary_constraints,
+						preference_slacks_ii,
+						inequality_constraints[player_idx](x, θ)) - barrier_slacks_ii, nothing, 0), #fg
+			)
+		else
+			# equalities from previous levels become equality constraints 
 			for kk in 1:length(F_ii[player_idx].equalities[priority_level-1])
 				let
 					expr = F_ii[player_idx].equalities[priority_level-1][kk].expr
@@ -268,10 +227,35 @@ function QuasiGOOP_to_PDSyst(;
 					)
 				end
 			end
-			barrier_objective_ii = 0
+			#subsequent levels also have additional equalities from preference function
+			push!(
+				Lagrangian_terms,
+				Lagrangian_term(
+					vcat(
+						auxillary_constraints,
+						preference_slacks_ii) - barrier_slacks_ii, nothing, 0), #fg
+			)
 		end
 		append!(F_ii[player_idx].equalities[priority_level], Lagrangian_terms)
 		empty!(Lagrangian_terms)
+		inequality_dimension_ii[player_idx] = 0 # reset inequality dimension
+
+		x_temp = let
+			Symbolics.scalarize(
+				only(Symbolics.@variables(z̃[1:total_dimension])),
+			)
+		end
+		sum_slacks = Symbolics.build_function(
+			sum(preference_slacks_ii),
+			x_temp,
+			θ,
+			expression = Val{false},
+		)
+		push!(private_slacks, sum_slacks)
+
+
+		# append!(F_ii[player_idx].equalities[priority_level], Lagrangian_terms)
+		# empty!(Lagrangian_terms)
 
 		# Step 5. Define symbolic expression for Lagrangian and stationarity conditions/constraints
 		if priority_level == first(ordered_priority_levels)
@@ -359,26 +343,116 @@ function QuasiGOOP_to_PDSyst(;
 		end
 		start_idx += primal_dimension_ii
 	end
+
 	Main.@infiltrate
 
-	# Build stationarity and equality at the final level for all players
-	final_stationarity = vcat((
+	# Build the topmost level of the KKT system 
+	# 1. Build equalitiy constraints for the topmost level 
+	for player_idx in 1:num_players
+		# Equality constraints from previous level
+		for kk in 1:length(F_ii[player_idx].equalities[num_levels])
+			let
+				expr = F_ii[player_idx].equalities[num_levels][kk].expr
+				push!(
+					Lagrangian_terms,
+					Lagrangian_term(expr, nothing, 0),
+				)
+			end
+		end
+		F_ii[player_idx].equalities[num_levels+1] = copy(Lagrangian_terms)
+		empty!(Lagrangian_terms)
+	end
+	final_equality = [
+		reduce(vcat, [t.expr for t in F_ii[player].equalities[num_levels+1]]) for player in 1:num_players
+	]
+	# 2. Build stationarity (of the previous level) for the topmost level
+	final_stationarity = [
 		mapreduce(
 			t -> t.expr,
 			.+,
-			F_ii[player].stationarity[end];
-			init = zero.(F_ii[player].stationarity[end][1].expr),
-		) for player in 1:num_players)...
-	)
-	final_equality = reduce(
-		vcat,
-		(t.expr
-		 for player in 1:num_players
-		 for t in F_ii[player].equalities[end]
-		),
-	)
+			F_ii[player].stationarity[num_levels];
+			init = zero.(F_ii[player].stationarity[num_levels][1].expr))
+		for player in 1:num_players]
+	@assert all(Symbolics.iszero, vcat(final_stationarity[1], final_equality[1]) .- private_inner_equality_constraints[1])
+	@assert all(Symbolics.iszero, vcat(final_stationarity[2], final_equality[2]) .- private_inner_equality_constraints[2])
 
-	# Return the PrimalDualSysEqn object
+	Main.@infiltrate
+
+	# 3. Shared inequality constraints (TODO: do the same for shared equality constraints)
+	shared_inequality_dimension = length(shared_inequality_constraints(dummy_primals, dummy_parameters))
+	shared_equality_dimension = 2shared_inequality_dimension
+
+	# Build shared equality constraints from shared inequality constraints
+	supplemental_primal_dimension_ii = shared_equality_dimension # s, t 
+	primal_dimension_ii = map(sum, private_primals)
+	total_dimension =
+		sum(primal_dimension_ii) +
+		supplemental_primal_dimension_ii +
+		sum(equality_dimension_ii) +
+		shared_equality_dimension # cₛ(x₁,x₂) - s = 0, s ≥ 0 → cₛ(x₁,x₂) - s = 0, s - t = 0 and t ≥ 0 implictly defined via objective - θ[17]*log(t)
+
+	# Build symbolic variables for this MCP
+	z̃ = Symbolics.scalarize(only(Symbolics.@variables(z̃[1:total_dimension])))
+	z = BlockArray(
+		z̃,
+		[
+			sum(primal_dimension_ii),
+			supplemental_primal_dimension_ii,
+			sum(equality_dimension_ii),
+			shared_equality_dimension,
+		],
+	)
+	θ̃ = Symbolics.scalarize(
+		only(Symbolics.@variables(θ̃[1:augmented_parameter_dimension])),
+	)
+	θ = BlockArray(θ̃, vcat(parameter_dimensions, [1]))
+
+	x = BlockArray(z[Block(1)], primal_dimension_ii)
+    x_supplemental = BlockArray(z[Block(2)], [shared_inequality_dimension, shared_inequality_dimension])
+	λ = BlockArray(z[Block(3)], equality_dimension_ii)
+	λₛ = z[Block(4)]
+
+	Main.@infiltrate
+    trajectory_primals = [
+        i > 1 ? z[(1:private_primals[i][1]) .+ sum(primal_dimension_ii[1:(i - 1)])] :
+        z[1:private_primals[i][1]] for i in 1:num_players
+    ]
+    trajectory_x = BlockArray(
+        vcat(trajectory_primals...),
+        [private_primals[i][1] for i in 1:num_players],
+    )
+    fs = map(f -> f(trajectory_x, θ)- θ[end] * sum(log.(x_supplemental[Block(2)])), objectives)
+    gs = private_inner_equality_constraints # contains MPCC (nested) constraints
+    g̃ = vcat(
+        shared_inequality_constraints(trajectory_x, θ) - x_supplemental[Block(1)], # g̃ = cₛ(x₁,x₂) - s = 0
+        x_supplemental[Block(1)] - x_supplemental[Block(2)], # g̃ = s - t = 0
+    )
+
+    # Build Lagrangian for all players.
+    Ls = map(zip(1:num_players, fs, gs)) do (i, f, g)
+        f - λ[Block(i)]' * g - λₛ' * g̃
+    end
+
+    # Build F = [∇ₓLs, gs, g̃,].
+    ∇ₓLs = map(zip(Ls, blocks(x))) do (L, xᵢ)
+        Symbolics.gradient(L, vcat(xᵢ, x_supplemental))
+    end
+    F_symbolic = [reduce(vcat, ∇ₓLs), reduce(vcat, gs), g̃]
+
+    # Set lower and upper bounds for z. Current setting has only equalities, so no non-negativity on z
+    z̲ = [
+        fill(-Inf, sum(primal_dimension_ii))
+        fill(-Inf, supplemental_primal_dimension_ii)
+        fill(-Inf, sum(equality_dimension_ii))
+        fill(-Inf, shared_equality_dimension)
+    ]
+    z̅ = [
+        fill(Inf, sum(primal_dimension_ii))
+        fill(Inf, supplemental_primal_dimension_ii)
+        fill(Inf, sum(equality_dimension_ii))
+        fill(Inf, shared_equality_dimension)
+    ]
+	# Return the componnents
 
 end
 

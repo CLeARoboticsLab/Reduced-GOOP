@@ -42,9 +42,9 @@ function get_setup(
     objectives = [
         function (z, θ)
             (; xs, us) =
-                unflatten_trajectory(z[Block(1)], state_dimension, control_dimension)
+                unflatten_trajectory(z[Block(i)], state_dimension, control_dimension)
             0.5*sum(sum(u .^ 2) for u in us)
-        end for _ in 1:num_players
+        end for i in 1:num_players
     ]
 
     equality_constraints = [ # private: z[Block(1)] are original private primals
