@@ -39,14 +39,6 @@ struct ordered_preferences
 	is_prioritized_constraint::Vector{Vector{Bool}}
 end
 
-struct PrimalDualSysEqn{T1, T2}
-	"A callable function that computes F!(val, x, λ; θ, μ) in-place for 'val'"
-	F!::T1
-	"A callable function that computes ∇F!(val, x, λ; θ, μ) in-place for 'val'"
-	∇F!::T2
-	#TODO dimensions
-end
-
 """
 Function that constructs a `ParametricQuasiGOOP` object from callable functins of objectives, constraints, and preferences.
 """
@@ -64,12 +56,12 @@ function ParametricQuasiGOOP(;
 )
 
 	(;
-		stationarity_symbolic,
-		equality_symbolic,
-		inequality_symbolic,
-		preferences_symbolic,
-		shared_equality_symbolic,
-		shared_inequality_symbolic,
+		K_symbolic,
+		z_symbolic,
+		θ_symbolic,
+		lower_bounds,
+		upper_bounds,
+		dims,
 	) = QuasiGOOP_to_PDSyst(;
 		objectives,
 		equality_constraints,
@@ -83,14 +75,15 @@ function ParametricQuasiGOOP(;
 		inequality_dimensions,
 	)
 
-	PrimalDualSysEqn(;
-		objectives_symbolic,
-		equality_symbolic,
-		inequality_symbolic,
-		preferences_symbolic,
-		shared_equality_symbolic,
-		shared_inequality_symbolic,
+	PrimalDualSys(
+		K_symbolic,
+		z_symbolic,
+		θ_symbolic,
+		lower_bounds,
+		upper_bounds,
+		dims
 	)
+	# Main.@infiltrate
 end
 
 "Helper function to create components of the Primal-Dual system of equations from QuasiGOOP."
@@ -105,15 +98,11 @@ function QuasiGOOP_to_PDSyst(;
 	parameter_dimensions::Vector{Int},
 	equality_dimensions::Vector{Int},
 	inequality_dimensions::Vector{Int},
-)
-	println("Make a PrimalDualSysEqn object from callable functions + implement approximations")
+);
+	println("Make a PrimalDualSys object from callable functions + implement approximations")
 	backend = SymbolicTracingUtils.SymbolicsBackend()
 
 	# Problem data
-	# # Append objectives to the end of preferences for each player_idx
-	# for (i, obj) in enumerate(objectives)
-	# 	push!(preferences.preferences[i], obj)
-	# end
 	ordered_priority_levels = eachindex(preferences.preferences[1]) # assume all players have the same number of preferences
 	num_players = length(preferences.preferences)
 	num_levels = length(ordered_priority_levels)
@@ -344,7 +333,7 @@ function QuasiGOOP_to_PDSyst(;
 		start_idx += primal_dimension_ii
 	end
 
-	Main.@infiltrate
+	# Main.@infiltrate
 
 	# Build the topmost level of the KKT system 
 	# 1. Build equalitiy constraints for the topmost level 
@@ -376,20 +365,19 @@ function QuasiGOOP_to_PDSyst(;
 	@assert all(Symbolics.iszero, vcat(final_stationarity[1], final_equality[1]) .- private_inner_equality_constraints[1])
 	@assert all(Symbolics.iszero, vcat(final_stationarity[2], final_equality[2]) .- private_inner_equality_constraints[2])
 
-	Main.@infiltrate
+	# Main.@infiltrate
 
-	# 3. Shared inequality constraints (TODO: do the same for shared equality constraints)
+	# 3. Shared inequality constraints
 	shared_inequality_dimension = length(shared_inequality_constraints(dummy_primals, dummy_parameters))
-	shared_equality_dimension = 2shared_inequality_dimension
+	shared_equality_dimension = length(shared_equality_constraints(dummy_primals, dummy_parameters))
 
 	# Build shared equality constraints from shared inequality constraints
-	supplemental_primal_dimension_ii = shared_equality_dimension # s, t 
 	primal_dimension_ii = map(sum, private_primals)
 	total_dimension =
 		sum(primal_dimension_ii) +
-		supplemental_primal_dimension_ii +
 		sum(equality_dimension_ii) +
-		shared_equality_dimension # cₛ(x₁,x₂) - s = 0, s ≥ 0 → cₛ(x₁,x₂) - s = 0, s - t = 0 and t ≥ 0 implictly defined via objective - θ[17]*log(t)
+		shared_inequality_dimension +
+		shared_equality_dimension 
 
 	# Build symbolic variables for this MCP
 	z̃ = Symbolics.scalarize(only(Symbolics.@variables(z̃[1:total_dimension])))
@@ -397,9 +385,9 @@ function QuasiGOOP_to_PDSyst(;
 		z̃,
 		[
 			sum(primal_dimension_ii),
-			supplemental_primal_dimension_ii,
 			sum(equality_dimension_ii),
 			shared_equality_dimension,
+			shared_inequality_dimension
 		],
 	)
 	θ̃ = Symbolics.scalarize(
@@ -408,52 +396,82 @@ function QuasiGOOP_to_PDSyst(;
 	θ = BlockArray(θ̃, vcat(parameter_dimensions, [1]))
 
 	x = BlockArray(z[Block(1)], primal_dimension_ii)
-    x_supplemental = BlockArray(z[Block(2)], [shared_inequality_dimension, shared_inequality_dimension])
-	λ = BlockArray(z[Block(3)], equality_dimension_ii)
-	λₛ = z[Block(4)]
+	λ = BlockArray(z[Block(2)], equality_dimension_ii)
+	λₛ = z[Block(3)]
+	μₛ = z[Block(4)]
 
-	Main.@infiltrate
-    trajectory_primals = [
-        i > 1 ? z[(1:private_primals[i][1]) .+ sum(primal_dimension_ii[1:(i - 1)])] :
-        z[1:private_primals[i][1]] for i in 1:num_players
-    ]
-    trajectory_x = BlockArray(
-        vcat(trajectory_primals...),
-        [private_primals[i][1] for i in 1:num_players],
-    )
-    fs = map(f -> f(trajectory_x, θ)- θ[end] * sum(log.(x_supplemental[Block(2)])), objectives)
-    gs = private_inner_equality_constraints # contains MPCC (nested) constraints
-    g̃ = vcat(
-        shared_inequality_constraints(trajectory_x, θ) - x_supplemental[Block(1)], # g̃ = cₛ(x₁,x₂) - s = 0
-        x_supplemental[Block(1)] - x_supplemental[Block(2)], # g̃ = s - t = 0
-    )
+	# Main.@infiltrate
+	trajectory_primals = [
+		i > 1 ? z[(1:private_primals[i][1]) .+ sum(primal_dimension_ii[1:(i-1)])] :
+		z[1:private_primals[i][1]] for i in 1:num_players
+	]
+	trajectory_x = BlockArray(
+		vcat(trajectory_primals...),
+		[private_primals[i][1] for i in 1:num_players],
+	)
+	fs = map(f -> f(trajectory_x, θ), objectives)
+	gs = private_inner_equality_constraints # contains MPCC (nested) constraints
+	g̃ = shared_equality_constraints(trajectory_x, θ)
+	h̃ = shared_inequality_constraints(trajectory_x, θ)
 
-    # Build Lagrangian for all players.
-    Ls = map(zip(1:num_players, fs, gs)) do (i, f, g)
-        f - λ[Block(i)]' * g - λₛ' * g̃
-    end
 
-    # Build F = [∇ₓLs, gs, g̃,].
-    ∇ₓLs = map(zip(Ls, blocks(x))) do (L, xᵢ)
-        Symbolics.gradient(L, vcat(xᵢ, x_supplemental))
-    end
-    F_symbolic = [reduce(vcat, ∇ₓLs), reduce(vcat, gs), g̃]
+	# Build Lagrangian for all players.
+	Ls = map(zip(1:num_players, fs, gs)) do (i, f, g)
+		f - λ[Block(i)]' * g - λₛ' * g̃ - μₛ' * h̃
+	end
 
-    # Set lower and upper bounds for z. Current setting has only equalities, so no non-negativity on z
-    z̲ = [
-        fill(-Inf, sum(primal_dimension_ii))
-        fill(-Inf, supplemental_primal_dimension_ii)
-        fill(-Inf, sum(equality_dimension_ii))
-        fill(-Inf, shared_equality_dimension)
-    ]
-    z̅ = [
-        fill(Inf, sum(primal_dimension_ii))
-        fill(Inf, supplemental_primal_dimension_ii)
-        fill(Inf, sum(equality_dimension_ii))
-        fill(Inf, shared_equality_dimension)
-    ]
-	# Return the componnents
+	# Build F = [∇ₓLs, gs, g̃,].
+	∇ₓLs = map(zip(Ls, blocks(x))) do (L, xᵢ) # TODO: drop terms at topmost level too? 
+		# ∇ₓL = Symbolics.gradient(L, xᵢ)
+		# mask = .!Symbolics.iszero.(∇ₓL)
+		# ∇ₓL[mask] # filter out zero rows
+		Symbolics.gradient(L, xᵢ)
+	end
 
+	symbolic_type = eltype(x)
+	K = Vector{symbolic_type}(
+		filter!(
+			!isnothing,
+			[
+				reduce(vcat, ∇ₓLs)
+				reduce(vcat, gs)
+				g̃
+				h̃
+			],
+		),
+	)
+	# Main.@infiltrate
+
+	# Set lower and upper bounds for z. 
+	z̲ = [
+		fill(-Inf, sum(primal_dimension_ii))
+		fill(-Inf, sum(equality_dimension_ii))
+		fill(-Inf, shared_equality_dimension)
+		fill(0, shared_inequality_dimension)
+	]
+	z̅ = [
+		fill(Inf, sum(primal_dimension_ii))
+		fill(Inf, sum(equality_dimension_ii))
+		fill(Inf, shared_equality_dimension)
+		fill(Inf, shared_inequality_dimension)
+	]
+	# Main.@infiltrate
+	dims = (;
+		x = only(blocksizes(x)),
+		θ = only(blocksizes(θ)),
+		λ = only(blocksizes(λ)),
+		λₛ = only(blocksizes(λₛ)),
+		μₛ = only(blocksizes(μₛ)),
+	)
+
+	(;
+		K_symbolic = collect(K),
+		z_symbolic = collect(z),
+		θ_symbolic = collect(θ),
+		lower_bounds = z̲,
+		upper_bounds = z̅,
+		dims,
+	)
 end
 
 "Helper function to filter zeros out of the stationarity vector."
@@ -486,10 +504,9 @@ function build_and_filter_stationarity!(x, Lagrangian_terms)
 end
 
 """
-Compute and verify stationarity at the given `priority_level` for `player_idx`.  
+Compute and verify stationarity at the given `priority_level (<4)` for `player_idx`.  
 - Appends the appropriate equality (and slack) constraints into `private_inner_equality_constraints`  
 - Computes the gradient of the Lagrangian and compares it to `stationarity`  
-- Returns `match::Bool`
 """
 function check_stationarity!(
 	priority_level::Int,
@@ -575,25 +592,24 @@ function check_stationarity!(
 	return match
 end
 
-"Helper function to create a 'PrimalDualSysEqn' object from symbolic functions."
-function PrimalDualSysEqn(;
-	objectives::Vector{<:Symbolics.Num},
-	equality_constraints::Vector{<:Symbolics.Num},
-	inequality_constraints::Vector{<:Symbolics.Num},
-	preferences::ordered_preferences,
-	shared_equality_constraints,
-	shared_inequality_constraints,
-	primal_dimensions::Vector{Int},
-	parameter_dimensions::Vector{Int},
-	equality_dimensions::Vector{Int},
-	inequality_dimensions::Vector{Int},
+"Solve GOOP." #TODO modify the following
+function solve(
+    mcp::PrimalDualSys,
+    θ;
+    solver_type = InteriorPoint(),
+    kwargs...
 )
-	println("Make a PrimalDualSysEqn object from symbolic functions")
-	#TODO
+	# Main.@infiltrate
+    (; x, y, s, kkt_error, status) = solve(solver_type, mcp, θ; kwargs...)
 
-	F! = nothing
-	∇F! = nothing
-	PrimaldualSysEqn(F!, ∇F!)
+    # Unpack primals per-player for ease of access later.
+	# Main.@infiltrate
+    end_dims = cumsum(mcp.dims.x)
+    primals = map(1:num_players(game)) do ii
+        (ii == 1) ? x[1:end_dims[ii]] : x[(end_dims[ii - 1] + 1):end_dims[ii]]
+    end
+
+    (; primals, variables = (; x, y, s), kkt_error, status)
 end
 
 # struct ParametricQuasiGOOP{T1, T2, T3, T4, T5, T6, T7, T8}
@@ -622,23 +638,5 @@ end
 #     shared_inequality_dimension::T8
 
 #     "Corresponding Primal Dual System Representation."
-#     pd_system::PrimalDualSysEqn 
-# end
-
-# "Helper function to create a 'PrimalDualSysEqn' object from callable functions."
-# function PrimalDualSysEqn(;
-#     objectives::Vector{<:Function},
-#     equality_constraints::Vector{<:Function},
-#     inequality_constraints::Vector{<:Function},
-#     preferences::ordered_preferences,
-#     shared_equality_constraints::Vector{<:Function},
-#     shared_inequality_constraints::Vector{<:Function},
-#     primal_dimensions::Vector{Int},
-#     parameter_dimensions::Vector{Int},
-#     equality_dimensions::Vector{Int},
-#     inequality_dimensions::Vector{Int},
-#     )
-#     println("Make a PrimalDualSysEqn object from callable functions")
-#     #TODO
-
+#     pd_system::PrimalDualSys 
 # end

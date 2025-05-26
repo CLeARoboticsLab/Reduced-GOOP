@@ -284,25 +284,30 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 
     dynamics_dimension = state_dim(dynamics) + control_dim(dynamics)
     primal_dimension = dynamics_dimension * planning_horizon
-
+    
     # Run-time record
     runtime = Float64[]
 
     function get_receding_horizon_solution(θ; warmstart_solution)
         # Measure run time
+        # elapsed_time = @elapsed begin
+        #     (; relaxation, solution, residual) = solve_relaxed_pop_game(
+        #         problem,
+        #         warmstart_solution,
+        #         θ;
+        #         ϵ,
+        #         κ,
+        #         max_iterations,
+        #         tolerance,
+        #         verbose,
+        #     )
+        # end
         elapsed_time = @elapsed begin
-            (; relaxation, solution, residual) = solve_relaxed_pop_game(
-                problem,
-                warmstart_solution,
-                θ;
-                ϵ,
-                κ,
-                max_iterations,
-                tolerance,
-                verbose,
-            )
+            # Main.@infiltrate
+            sol = solve(problem, θ)
         end
         push!(runtime, elapsed_time)
+        # Main.@infiltrate
 
         if all([
             string(solution[i].status) != "MCP_Solved" for i in 1:first(size(solution))
@@ -381,11 +386,11 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
         problem_data,
     )
 
-    # strategy = GLMakie.@lift let 
-    #     result = get_receding_horizon_solution($θ; warmstart_solution)
-    #     warmstart_solution = nothing
-    #     result.strategies
-    # end 
+    strategy = GLMakie.@lift let 
+        result = get_receding_horizon_solution($θ; warmstart_solution)
+        warmstart_solution = nothing
+        result.strategies
+    end 
 
     # # Plot using GLMakie
     # figure = GLMakie.Figure()
