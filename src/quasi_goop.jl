@@ -5,7 +5,7 @@ mutable struct Lagrangian_term{T <: Symbolics.Num}
 end
 
 function Symbolics.gradient(f::Lagrangian_term, x::AbstractVector{<:Symbolics.Num})
-	if f.deriv_order > 1
+	if f.deriv_order > 2 # 1: drop terms, if 2 or higher: keep terms
 		return Lagrangian_term(zero.(x), f.duals, f.deriv_order + 1)
 	end
 
@@ -81,7 +81,7 @@ function ParametricQuasiGOOP(;
 		θ_symbolic,
 		lower_bounds,
 		upper_bounds,
-		dims
+		dims,
 	)
 	# Main.@infiltrate
 end
@@ -98,7 +98,8 @@ function QuasiGOOP_to_PDSyst(;
 	parameter_dimensions::Vector{Int},
 	equality_dimensions::Vector{Int},
 	inequality_dimensions::Vector{Int},
-);
+)
+	;
 	println("Make a PrimalDualSys object from callable functions + implement approximations")
 	backend = SymbolicTracingUtils.SymbolicsBackend()
 
@@ -130,7 +131,6 @@ function QuasiGOOP_to_PDSyst(;
 
 	start_idx = 1
 
-
 	function set_up_level(priority_level, player_idx)
 		# Do the following for preferences, not for topmost level objective
 		# Step 1. Reformulation for prioritized constraints
@@ -149,7 +149,7 @@ function QuasiGOOP_to_PDSyst(;
 		append!(private_primals[player_idx], barrier_slacks_dimension_ii)
 		@assert sum(private_primals[player_idx]) == primal_dimension_ii
 
-		# Main.@infiltrate
+		Main.@infiltrate
 
 		# Step 3. Define symbolic variables for primals
 		total_dimension =
@@ -174,7 +174,7 @@ function QuasiGOOP_to_PDSyst(;
 				[1],
 			),
 		)
-		μ = θ[end] # annealing parameter
+		σ = θ[end] # annealing parameter
 
 		x = BlockArray(z[Block(1)], private_primals[player_idx])
 		λ = z[Block(2)] # dual variables for equality constraints
@@ -186,7 +186,7 @@ function QuasiGOOP_to_PDSyst(;
 		barrier_slacks_ii = blocks(x)[end] # last block
 		objective_ii = sum(preference_slacks_ii) # or sum(preference_slacks_ii)
 		println("objective_$(priority_level) for player $(player_idx) = ", objective_ii)
-		barrier_objective_ii = μ * sum(log.(barrier_slacks_ii))
+		barrier_objective_ii = σ * sum(log.(barrier_slacks_ii))
 
 		# Replace inequality constriants: fg(x,sₚ) = sₚ + g(x) ≥ 0, fg(x,sₚ) - sᵦ = 0
 		auxillary_constraints = prioritized_constraints_ii(x, θ) .+ preference_slacks_ii
@@ -289,15 +289,24 @@ function QuasiGOOP_to_PDSyst(;
 			)
 		end
 
-		# Main.@infiltrate
-		stationarity = build_and_filter_stationarity!(x, Lagrangian_terms)
+		prune_zeros = false
+		stationarity = build_and_filter_stationarity!(x, Lagrangian_terms; prune_zeros) # Lagrangian_terms updated in_place
+		# # use perturbed KKT interpretation (from NW textbook) This didn't really work but let's come back to it later
+		m = length(barrier_slacks_ii)
+		for term in Lagrangian_terms
+			# Main.@infiltrate
+			@views term.expr[(end-m+1):end] .*= barrier_slacks_ii
+		end
+		Main.@infiltrate
 		F_ii[player_idx].stationarity[priority_level] = copy(Lagrangian_terms)
 		empty!(Lagrangian_terms)
+		Main.@infiltrate
+
 		if priority_level < 4 # hardcoded for now since after level 3, quasiGOOP is significantly different
 			check_stationarity!(
 				priority_level,
 				ordered_priority_levels,
-				private_inner_equality_constraints, # `private_inner_equality_constraints` has been updated in-place,
+				private_inner_equality_constraints, # `private_inner_equality_constraints` is updated in-place,
 				equality_constraints,
 				inequality_constraints,
 				F_ii[player_idx],
@@ -309,7 +318,8 @@ function QuasiGOOP_to_PDSyst(;
 				objective_ii,
 				barrier_objective_ii,
 				λ,
-				stationarity,
+				stationarity;
+				prune_zeros,
 			)
 		end
 
@@ -333,9 +343,10 @@ function QuasiGOOP_to_PDSyst(;
 		start_idx += primal_dimension_ii
 	end
 
-	# Main.@infiltrate
+	Main.@infiltrate
 
 	# Build the topmost level of the KKT system 
+	#TODO: Check final_equality and final_stationarity
 	# 1. Build equalitiy constraints for the topmost level 
 	for player_idx in 1:num_players
 		# Equality constraints from previous level
@@ -362,8 +373,14 @@ function QuasiGOOP_to_PDSyst(;
 			F_ii[player].stationarity[num_levels];
 			init = zero.(F_ii[player].stationarity[num_levels][1].expr))
 		for player in 1:num_players]
+	Main.@infiltrate
 	@assert all(Symbolics.iszero, vcat(final_stationarity[1], final_equality[1]) .- private_inner_equality_constraints[1])
 	@assert all(Symbolics.iszero, vcat(final_stationarity[2], final_equality[2]) .- private_inner_equality_constraints[2])
+
+	# # Use perturbed KKT interpretation (from NW textbook) This didn't really work but let's come back to it later
+	# for player in 1:num_players
+	# 	private_inner_equality_constraints[player] = vcat(final_stationarity[player], final_equality[player])
+	# end
 
 	# Main.@infiltrate
 
@@ -377,7 +394,7 @@ function QuasiGOOP_to_PDSyst(;
 		sum(primal_dimension_ii) +
 		sum(equality_dimension_ii) +
 		shared_inequality_dimension +
-		shared_equality_dimension 
+		shared_equality_dimension
 
 	# Build symbolic variables for this MCP
 	z̃ = Symbolics.scalarize(only(Symbolics.@variables(z̃[1:total_dimension])))
@@ -387,7 +404,7 @@ function QuasiGOOP_to_PDSyst(;
 			sum(primal_dimension_ii),
 			sum(equality_dimension_ii),
 			shared_equality_dimension,
-			shared_inequality_dimension
+			shared_inequality_dimension,
 		],
 	)
 	θ̃ = Symbolics.scalarize(
@@ -414,7 +431,6 @@ function QuasiGOOP_to_PDSyst(;
 	g̃ = shared_equality_constraints(trajectory_x, θ)
 	h̃ = shared_inequality_constraints(trajectory_x, θ)
 
-
 	# Build Lagrangian for all players.
 	Ls = map(zip(1:num_players, fs, gs)) do (i, f, g)
 		f - λ[Block(i)]' * g - λₛ' * g̃ - μₛ' * h̃
@@ -440,28 +456,28 @@ function QuasiGOOP_to_PDSyst(;
 			],
 		),
 	)
-	# Main.@infiltrate
 
 	# Set lower and upper bounds for z. 
 	z̲ = [
-		fill(-Inf, sum(primal_dimension_ii))
+		fill(-Inf, sum(primal_dimension_ii)) #sum(primal_dimension_ii)
 		fill(-Inf, sum(equality_dimension_ii))
 		fill(-Inf, shared_equality_dimension)
 		fill(0, shared_inequality_dimension)
 	]
 	z̅ = [
-		fill(Inf, sum(primal_dimension_ii))
+		fill(Inf, sum(primal_dimension_ii)) #sum(length(∇ₓL) for ∇ₓL in ∇ₓLs)
 		fill(Inf, sum(equality_dimension_ii))
 		fill(Inf, shared_equality_dimension)
 		fill(Inf, shared_inequality_dimension)
 	]
-	# Main.@infiltrate
+
 	dims = (;
 		x = only(blocksizes(x)),
 		θ = only(blocksizes(θ)),
 		λ = only(blocksizes(λ)),
 		λₛ = only(blocksizes(λₛ)),
 		μₛ = only(blocksizes(μₛ)),
+		private_primals,
 	)
 
 	(;
@@ -475,7 +491,7 @@ function QuasiGOOP_to_PDSyst(;
 end
 
 "Helper function to filter zeros out of the stationarity vector."
-function build_and_filter_stationarity!(x, Lagrangian_terms)
+function build_and_filter_stationarity!(x, Lagrangian_terms; prune_zeros = true)
 	n = length(x)
 	stationarity = zero.(x)
 	mask = falses(n) # mask[j] = true iff row j was ever non‑zero
@@ -493,10 +509,12 @@ function build_and_filter_stationarity!(x, Lagrangian_terms)
 	end
 
 	# drop all rows that never lit up
-	if any(.!mask)
-		stationarity = stationarity[mask]
-		for t in Lagrangian_terms
-			t.expr = t.expr[mask]
+	if prune_zeros
+		if any(.!mask)
+			stationarity = stationarity[mask]
+			for t in Lagrangian_terms
+				t.expr = t.expr[mask]
+			end
 		end
 	end
 
@@ -524,7 +542,8 @@ function check_stationarity!(
 	objective_ii::Symbolics.Num,
 	barrier_objective_ii::Symbolics.Num,
 	λ,
-	stationarity,
+	stationarity;
+	prune_zeros = true,
 )::Bool
 
 	if priority_level == first(ordered_priority_levels)
@@ -564,14 +583,17 @@ function check_stationarity!(
 		computed = Symbolics.gradient(L, x)
 
 		# mask out always-zero entries
-		mask = .! Symbolics.iszero.(computed)
-		computed_masked = computed[mask]
-		if length(stationarity) == length(computed_masked)
-			match = all(isequal.(stationarity, computed_masked))
+		if prune_zeros
+			mask = .! Symbolics.iszero.(computed)
+			computed = computed[mask]
+		end
+
+		if length(stationarity) == length(computed)
+			match = all(isequal.(stationarity, computed))
 		else
 			println(
 				"Warning: cannot compare stationarity (length=$(length(stationarity))) ",
-				"with computed_masked (length=$(length(computed_masked))). ",
+				"with computed (length=$(length(computed))). ",
 				"Setting match = false.",
 			)
 			match = false
@@ -594,22 +616,36 @@ end
 
 "Solve GOOP." #TODO modify the following
 function solve(
-    mcp::PrimalDualSys,
-    θ;
-    solver_type = InteriorPoint(),
-    kwargs...
+	mcp::PrimalDualSys,
+	θ,
+	σ, κ, max_iterations, tolerance;
+	solver_type = InteriorPoint(),
+	kwargs...,
 )
 	# Main.@infiltrate
-    (; x, y, s, kkt_error, status) = solve(solver_type, mcp, θ; kwargs...)
+	relaxations = σ * κ .^ (0:max_iterations)
+	warmstart_sol = nothing
+	kkt_error = Inf
+	x, y, s = 0, 0, 0
+	status = nothing
+	ii = 1
+	while kkt_error > tolerance && ii < max_iterations
+		θ_augmented = vcat(θ, relaxations[ii]) # relaxation parameter σ for inner inequalities
+		(; x, y, s, kkt_error, status) = solve(solver_type, mcp, θ_augmented, warmstart_sol; kwargs...)
+		status === :solved ? warmstart_sol = (; x, y, s) : warmstart_sol = nothing
+		println("Iteration $ii: relaxation[ii] = $(relaxations[ii]), kkt_error = $kkt_error, status = $status")
+		ii += 1
+	end
 
-    # Unpack primals per-player for ease of access later.
-	# Main.@infiltrate
-    end_dims = cumsum(mcp.dims.x)
-    primals = map(1:num_players(game)) do ii
-        (ii == 1) ? x[1:end_dims[ii]] : x[(end_dims[ii - 1] + 1):end_dims[ii]]
-    end
+	# Unpack primals per-player for ease of access later.
+	private_primals = mcp.dims.private_primals
+	num_players = length(private_primals)
+	primals = [
+		ii > 1 ? x[(1:private_primals[ii][1]) .+ sum(sum(private_primals[jj]) for jj ∈ 1:(ii-1))] :
+		x[1:private_primals[ii][1]] for ii in 1:num_players
+	]
 
-    (; primals, variables = (; x, y, s), kkt_error, status)
+	(; primals, variables = (; x, y, s), kkt_error, status)
 end
 
 # struct ParametricQuasiGOOP{T1, T2, T3, T4, T5, T6, T7, T8}

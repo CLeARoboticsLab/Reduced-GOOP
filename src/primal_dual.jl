@@ -7,6 +7,8 @@ struct PrimalDualSys{T1, T2}
 	unconstrained_dimension::Int
 	"Dimension of constrained variable."
 	constrained_dimension::Int
+	"Game dimensions"
+	dims::NamedTuple
 end
 
 "Helper function to create a 'PrimalDualSys' object from K_symbolic, z_symbolic and bounds"
@@ -35,7 +37,8 @@ function PrimalDualSys(
 		H_symbolic,
 		x_symbolic,
 		y_symbolic,
-		θ_symbolic;
+		θ_symbolic,
+		dims;
 		backend_options
 	)
 end
@@ -46,7 +49,8 @@ function PrimalDualSys(
 	H_symbolic::Vector{Symbolics.Num},
 	x_symbolic::Vector{Symbolics.Num},
 	y_symbolic::Vector{Symbolics.Num},
-	θ_symbolic::Vector{Symbolics.Num};
+	θ_symbolic::Vector{Symbolics.Num},
+	dims::NamedTuple;
 	backend_options = (;),
 )
 	# F!(val, x, y, s; θ) computes the primal-dual system equation in-place.
@@ -104,5 +108,5 @@ function PrimalDualSys(
 		)
 	end
 
-	PrimalDualSys(F!, ∇F_z!, length(x_symbolic), length(y_symbolic)) # return struct 
+	PrimalDualSys(F!, ∇F_z!, length(x_symbolic), length(y_symbolic), dims) # return struct 
 end
