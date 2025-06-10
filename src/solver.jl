@@ -64,7 +64,8 @@ function solve(
 
 	# Main solver loop.
     if isnothing(warmstart_sol)
-        x = @something(x₀, 0.5ones(mcp.unconstrained_dimension)) # zeros(mcp.unconstrained_dimension)
+		Main.@infiltrate
+        x = @something(x₀, ones(mcp.unconstrained_dimension)) # zeros(mcp.unconstrained_dimension) #how is the size 3391?
         y = @something(y₀, ones(mcp.constrained_dimension))
         s = @something(s₀, ones(mcp.constrained_dimension))
     else
@@ -72,6 +73,8 @@ function solve(
         y = warmstart_sol.y
         s = warmstart_sol.s
     end
+
+	
 
 	if ϵ₀ === :auto
 		is_warmstarted = !isnothing(x₀) && !isnothing(y₀) && !isnothing(s₀)
