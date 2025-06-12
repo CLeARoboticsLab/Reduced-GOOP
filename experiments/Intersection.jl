@@ -258,10 +258,10 @@ end
 
 function demo(; map_end = 7, lane_width = 2, verbose = false)
 	# Algorithm setting
-	σ = 1.0
-	κ = 0.1
-	max_iterations = 20
-	tolerance = 1e-4
+	σ = 20
+	κ = 0.6
+	max_iterations = 10
+	tolerance = 5e-2
 	relaxation_mode = :standard
 
 	num_players = 2

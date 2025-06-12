@@ -37,7 +37,7 @@ function solve(
 	::InteriorPoint,
 	mcp::PrimalDualSys,
 	θ::AbstractVector{<:Real},
-    warmstart_sol;
+	warmstart_sol;
 	x₀ = nothing,
 	y₀ = nothing,
 	s₀ = nothing,
@@ -51,6 +51,27 @@ function solve(
 	verbose = false,
 	linear_solve_algorithm = UMFPACKFactorization(),
 )
+
+	# Hardcode# hard code 
+	slack_dims = [
+		43:46,
+		47:110,
+		203:209,
+		210:223,
+		440:467,
+		468:523,
+		########
+		951:957,
+		958:1027,
+		1126:1153,
+		1154:1209,
+		1483:1486,
+		1487:1494,
+	]
+	slack_dims = mapreduce(vcat, slack_dims) do dim
+		collect(dim)
+	end
+
 	# Set up common memory.
 	∇F = mcp.∇F_z!.result_buffer
 	F = zeros(mcp.unconstrained_dimension + 2mcp.constrained_dimension)
@@ -58,23 +79,23 @@ function solve(
 	δx = @view δz[1:(mcp.unconstrained_dimension)]
 	δy =
 		@view δz[(mcp.unconstrained_dimension+1):(mcp.unconstrained_dimension+mcp.constrained_dimension)]
-	δs = @view δz[(mcp.unconstrained_dimension+mcp.constrained_dimension+1):end]
+	δs = @view δz[(mcp.unconstrained_dimension + mcp.constrained_dimension + 1):end]
+	δs_slack = @view δz[slack_dims]
+
+
 
 	linsolve = init(LinearProblem(∇F, δz), linear_solve_algorithm)
 
 	# Main solver loop.
-    if isnothing(warmstart_sol)
-		Main.@infiltrate
-        x = @something(x₀, ones(mcp.unconstrained_dimension)) # zeros(mcp.unconstrained_dimension) #how is the size 3391?
-        y = @something(y₀, ones(mcp.constrained_dimension))
-        s = @something(s₀, ones(mcp.constrained_dimension))
-    else
-        x = warmstart_sol.x
-        y = warmstart_sol.y
-        s = warmstart_sol.s
-    end
-
-	
+	if isnothing(warmstart_sol)
+		x = @something(x₀, ones(mcp.unconstrained_dimension)) # zeros(mcp.unconstrained_dimension) #how is the size 3391?
+		y = @something(y₀, ones(mcp.constrained_dimension))
+		s = @something(s₀, ones(mcp.constrained_dimension))
+	else
+		x = warmstart_sol.x
+		y = warmstart_sol.y
+		s = warmstart_sol.s
+	end
 
 	if ϵ₀ === :auto
 		is_warmstarted = !isnothing(x₀) && !isnothing(y₀) && !isnothing(s₀)
@@ -96,15 +117,7 @@ function solve(
 		inner_iters = 1
 		status = :solved
 
-		# if outer_iters > 1
-		# 	# θ[end] = copy(ϵ)
-        #     θ[end] = 1e-6
-		# else
-		# 	# θ = vcat(θ, copy(ϵ))
-        #     θ = vcat(θ, 1e-6)
-		# end
 		verbose && @info "Outer iteration $(outer_iters): ϵ = $ϵ, kkt_error = $kkt_error"
-		# Main.@infiltrate
 		while kkt_error > ϵ && inner_iters < max_inner_iters
 			total_iters += 1
 			# Compute the Newton step.
@@ -128,9 +141,13 @@ function solve(
 			δz .= solution.u
 
 			# Fraction to the boundary linesearch.
-			α_s = fraction_to_the_boundary_linesearch(s, δs; tol = min_stepsize)
+			augmented_s = vcat(x[slack_dims], s) # augment s with inner level barrier/preference slacks
+			augmented_δs = vcat(δs_slack, δs)
+			α_s = fraction_to_the_boundary_linesearch(augmented_s, augmented_δs; tol = min_stepsize)
 			α_y = fraction_to_the_boundary_linesearch(y, δy; tol = min_stepsize)
 
+			println("α_s = $α_s, α_y = $α_y")
+			
 			if isnan(α_s) || isnan(α_y)
 				verbose && @warn "Linesearch failed. Exiting prematurely."
 				status = :failed
