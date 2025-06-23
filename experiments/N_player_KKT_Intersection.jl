@@ -17,6 +17,7 @@ function get_setup(
 	map_end = 7,
 	lane_width = 2,
 	relaxation_mode = :standard,
+	solver = "PATH",
 )
 	state_dimension = state_dim(dynamics)
 	control_dimension = control_dim(dynamics)
@@ -39,13 +40,13 @@ function get_setup(
 		vcat(initial_state, goal_position, obstacle_position)
 	end
 
-    objectives = [
-        function (z, θ)
-            (; xs, us) =
-                unflatten_trajectory(z[Block(i)], state_dimension, control_dimension)
-            0.5*sum(sum(u .^ 2) for u in us)
-        end for i in 1:num_players
-    ]
+	objectives = [
+		function (z, θ)
+			(; xs, us) =
+				unflatten_trajectory(z[Block(i)], state_dimension, control_dimension)
+			0.5*sum(sum(u .^ 2) for u in us)
+		end for i in 1:num_players
+	]
 
 	equality_constraints = [ # private: z[Block(1)] are original private primals
 		function (z, θ)
@@ -254,6 +255,7 @@ function get_setup(
 		equality_dimensions,
 		inequality_dimensions,
 		relaxation_mode,
+		solver,
 	)
 
 	(;
@@ -267,7 +269,7 @@ function get_setup(
 	)
 end
 
-function demo(; map_end = 7, lane_width = 2, verbose = false)
+function demo(; map_end = 7, lane_width = 2, verbose = false, solver = "PATH")
 	# Algorithm setting
 	ϵ = 20
 	κ = 0.6
@@ -289,6 +291,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 		map_end,
 		lane_width,
 		relaxation_mode,
+		solver,
 	)
 
 	warmstart_solution = nothing
@@ -315,24 +318,32 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 		end
 		push!(runtime, elapsed_time)
 
-		if all([
-			string(solution[i].status) != "MCP_Solved" for i in 1:first(size(solution))
-		])
+		if all([!solution[i].solved for i in 1:first(size(solution))])
 			println("GOOP could not find a solution...moving on to the next problem")
 			return nothing
 		else
+			Main.@infiltrate
 			# Choose the solution with best complementarity residual
 			min_residual_idx = argmin(residual)
 			println("residual: ", residual[min_residual_idx])
 			println("relaxation: ", relaxation[min_residual_idx])
 			println("slacks: ", solution[min_residual_idx].slacks)
-			strategies = mapreduce(vcat, 1:num_players) do i
+			# strategies = mapreduce(vcat, 1:num_players) do i
+			# 	unflatten_trajectory(
+			# 		solution[min_residual_idx].primals[i][1:primal_dimension],
+			# 		state_dim(dynamics),
+			# 		control_dim(dynamics),
+			# 	)
+			# end
+			strategies = reduce(
+				vcat,
 				unflatten_trajectory(
-					solution[min_residual_idx].primals[i][1:primal_dimension],
+					primals[1:primal_dimension],
 					state_dim(dynamics),
 					control_dim(dynamics),
-				)
-			end
+				) for primals in solution[min_residual_idx].primals
+			)
+			
 			# Save solution
 			solution_dict = Dict(
 				"residual" => residual[min_residual_idx],
@@ -344,7 +355,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 			)
 			file_name = "intersection_"*string(now())*".jld2"
 			JLD2.save_object(
-				"./data/Intersection_closed_loop/GOOP_solution/$(file_name)",
+				"./data/Intersection_closed_loop/GOOP_solution/$(file_name)_$(solver)",
 				solution_dict,
 			)
 			# JLD2.save_object("./data/Intersection_closed_loop/GOOP_solution/intersection.jld2", solution_dict)
@@ -392,6 +403,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 		problem_data,
 	)
 
+	@info "Using solver: $solver"
 	strategy = GLMakie.@lift let
 		result = get_receding_horizon_solution($θ; warmstart_solution)
 		warmstart_solution = nothing
@@ -580,13 +592,13 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 	)
 
 	# Save img 
-	# GLMakie.save("data/Intersection_closed_loop/trajectory.png", figure)
+	GLMakie.save("data/Intersection_closed_loop/trajectory1_$(solver).png", figure)
 
 	# closed_loop + receding horizon demo
 	time_step = 2
-	while time_step < 3 #15
+	while time_step < 2 #15
 		println("time_step: ", time_step)
-		GLMakie.save("data/Intersection_closed_loop/trajectory$(time_step).png", figure)
+		GLMakie.save("data/Intersection_closed_loop/trajectory$(time_step)_$(solver).png", figure)
 		# Update the positions of the vehicles
 		println("Update initial state1")
 		θ1.val[1:state_dim(dynamics)] = first(strategy[]).xs[begin+1] # Asynchronous update: mutate p1's initial state without triggering others

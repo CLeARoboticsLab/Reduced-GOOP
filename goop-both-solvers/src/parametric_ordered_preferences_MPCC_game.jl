@@ -23,8 +23,8 @@ struct ParametricOrderedPreferencesMPCCGame{T1, T2, T3, T4, T5, T6, T7, T8, T9, 
 	"Dimension of shared inequality constraint"
 	shared_inequality_dimension::T8
 
-	"Corresponding ParametricMCP."
-	parametric_mcp::Union{PrimalDualMCP, ParametricMCP}
+	"Corresponding MCP."
+	mcp::Union{PrimalDualMCP, ParametricMCP}
 
 	"Exact complementarity constraints for convergence evaluation."
 	exact_complementarity_constraints::T9
@@ -34,6 +34,7 @@ struct ParametricOrderedPreferencesMPCCGame{T1, T2, T3, T4, T5, T6, T7, T8, T9, 
 
 	"Sum of slacks for each level"
 	private_slacks::T11
+
 end
 
 function ParametricOrderedPreferencesMPCCGame(;
@@ -86,36 +87,21 @@ function ParametricOrderedPreferencesMPCCGame(;
 
 		# Implement prioritized objective vs prioritized constraints
 		if is_prioritized_constraint[player_idx][priority_level]
-			prioritized_constraints_ii =
-				prioritized_preferences[player_idx][priority_level] # fᵢ(x,θ) ≥ 0
-			slack_dimension_ii =
-				length(prioritized_constraints_ii(dummy_primals, dummy_parameters))
+			prioritized_constraints_ii = prioritized_preferences[player_idx][priority_level] # fᵢ(x,θ) ≥ 0
+			slack_dimension_ii = length(prioritized_constraints_ii(dummy_primals, dummy_parameters))
 			primal_dimension_ii += slack_dimension_ii
 			append!(private_primals[player_idx], slack_dimension_ii)
 			inequality_dimension_ii[player_idx] += slack_dimension_ii * 2 # account for sᵢ ≥ 0
+
 		end
 
 		# Main.@infiltrate
 
 		# Define symbolic variables for primals.
-		total_dimension =
-			primal_dimension_ii +
-			inequality_dimension_ii[player_idx] +
-			equality_dimension_ii[player_idx]
-		z̃ = Symbolics.scalarize(
-			only(Symbolics.@variables(z̃[start_idx:(total_dimension+start_idx-1)])),
-		)
-		z = BlockArray(
-			z̃,
-			[
-				primal_dimension_ii,
-				inequality_dimension_ii[player_idx],
-				equality_dimension_ii[player_idx],
-			],
-		)
-		θ̃ = Symbolics.scalarize(
-			only(Symbolics.@variables(θ̃[1:augmented_parameter_dimension])),
-		)
+		total_dimension = primal_dimension_ii + inequality_dimension_ii[player_idx] + equality_dimension_ii[player_idx]
+		z̃ = Symbolics.scalarize(only(Symbolics.@variables(z̃[start_idx:(total_dimension+start_idx-1)])))
+		z = BlockArray(z̃, [primal_dimension_ii, inequality_dimension_ii[player_idx], equality_dimension_ii[player_idx]])
+		θ̃ = Symbolics.scalarize(only(Symbolics.@variables(θ̃[1:augmented_parameter_dimension])))
 		θ = BlockArray(θ̃, vcat(parameter_dimensions, [1]))
 
 		x = BlockArray(z[Block(1)], private_primals[player_idx])
@@ -123,16 +109,9 @@ function ParametricOrderedPreferencesMPCCGame(;
 		μ = z[Block(3)]
 
 		# Build symbolic expression for objective and constraints.
-		if priority_level == first(ordered_priority_levels) ||
-		   isempty(private_inner_equality_constraints)
-			push!(
-				private_inner_equality_constraints,
-				equality_constraints[player_idx](x, θ),
-			)
-			push!(
-				private_inner_inequality_constraints,
-				inequality_constraints[player_idx](x, θ),
-			)
+		if priority_level == first(ordered_priority_levels) || isempty(private_inner_equality_constraints)
+			push!(private_inner_equality_constraints, equality_constraints[player_idx](x, θ))
+			push!(private_inner_inequality_constraints, inequality_constraints[player_idx](x, θ))
 		end
 
 		if is_prioritized_constraint[player_idx][priority_level]
@@ -141,30 +120,20 @@ function ParametricOrderedPreferencesMPCCGame(;
 
 			slacks_ii = last(z[Block(1)], slack_dimension_ii)
 
-			objective_ii = sum(slacks_ii) #15
+			objective_ii = 15*sum(slacks_ii)
 
 			# auxillary constraint: fᵢ(x,θ) + sᵢ ≥ 0 
 			auxillary_constraints = prioritized_constraints_ii(x, θ) .+ slacks_ii
-			append!(
-				private_inner_inequality_constraints[player_idx],
-				auxillary_constraints,
-			)
+			append!(private_inner_inequality_constraints[player_idx], auxillary_constraints)
 
 			# auxillary constraint: sᵢ ≥ 0
 			append!(private_inner_inequality_constraints[player_idx], slacks_ii)
 
 			# store private_slacks
 			x_temp = let
-				Symbolics.scalarize(
-					only(Symbolics.@variables(z̃[1:(total_dimension+start_idx+1)])),
-				) #TODO: Check +1?
+				Symbolics.scalarize(only(Symbolics.@variables(z̃[1:(total_dimension+start_idx+1)]))) #TODO: Check +1?
 			end
-			sum_slacks = Symbolics.build_function(
-				sum(slacks_ii),
-				x_temp,
-				θ,
-				expression = Val{false},
-			)
+			sum_slacks = Symbolics.build_function(sum(slacks_ii), x_temp, θ, expression = Val{false})
 			push!(private_slacks, sum_slacks)
 		else
 			priority_objective_ii = prioritized_preferences[player_idx][priority_level]
@@ -199,40 +168,27 @@ function ParametricOrderedPreferencesMPCCGame(;
 		# Concatenate dual_nonnegativity constraints into inequality constraints.
 		append!(private_inner_inequality_constraints[player_idx], dual_nonnegativity)
 
-		# Main.@infiltrate
-
 		# Update dual dimension and primal dimension
-		dual_dimension =
-			inequality_dimension_ii[player_idx] + equality_dimension_ii[player_idx]
+		dual_dimension = inequality_dimension_ii[player_idx] + equality_dimension_ii[player_idx]
 		primal_dimension_ii += dual_dimension
 		append!(private_primals[player_idx], dual_dimension) #[30,4,68,4,151]
 
 		# Update inequality_dimension_ii, start_idx and equality_dimension_ii
-		if priority_level == last(ordered_priority_levels) ||
-		   isnothing(is_prioritized_constraint[player_idx][priority_level+1])
-			relaxed_complementarity =
-				sum(complementarity) .+ θ[augmented_parameter_dimension]
-			append!(
-				private_inner_inequality_constraints[player_idx],
-				relaxed_complementarity,
-			)
+		if priority_level == last(ordered_priority_levels) || isnothing(is_prioritized_constraint[player_idx][priority_level+1])
+			relaxed_complementarity = sum(complementarity) .+ θ[augmented_parameter_dimension]
+			append!(private_inner_inequality_constraints[player_idx], relaxed_complementarity)
 
 			inequality_dimension_ii[player_idx] += length(dual_nonnegativity) + 1 # +1 for relaxed complementarity
 
 			start_idx += primal_dimension_ii
 		else
-			append!(
-				private_inner_inequality_constraints[player_idx],
-				sum(complementarity) .+ θ[augmented_parameter_dimension],
-			)
+			append!(private_inner_inequality_constraints[player_idx], sum(complementarity) .+ θ[augmented_parameter_dimension])
 			inequality_dimension_ii[player_idx] += length(dual_nonnegativity) + 1
 		end
 		equality_dimension_ii[player_idx] += length(stationarity)
 
 		# Keep complementarity constraints for convergence evaluation.
 		append!(inner_complementarity_constraints, complementarity)
-
-		# Main.@infiltrate
 	end
 
 	# Build KKT system for each priority level for each player's own problem
@@ -257,10 +213,8 @@ function ParametricOrderedPreferencesMPCCGame(;
 			length(equality_dimensions) ==
 			length(inequality_dimensions)
 
-	shared_equality_dimension =
-		length(shared_equality_constraints(dummy_primals, dummy_parameters))
-	shared_inequality_dimension =
-		length(shared_inequality_constraints(dummy_primals, dummy_parameters))
+	shared_equality_dimension = length(shared_equality_constraints(dummy_primals, dummy_parameters))
+	shared_inequality_dimension = length(shared_inequality_constraints(dummy_primals, dummy_parameters))
 	total_dimension =
 		sum(primal_dimensions) +
 		sum(equality_dimensions) +
@@ -280,9 +234,7 @@ function ParametricOrderedPreferencesMPCCGame(;
 			shared_inequality_dimension,
 		],
 	)
-	θ̃ = Symbolics.scalarize(
-		only(Symbolics.@variables(θ̃[1:augmented_parameter_dimension])),
-	)
+	θ̃ = Symbolics.scalarize(only(Symbolics.@variables(θ̃[1:augmented_parameter_dimension])))
 	θ = BlockArray(θ̃, vcat(parameter_dimensions, [1]))
 
 	x = BlockArray(z[Block(1)], primal_dimensions)
@@ -294,14 +246,13 @@ function ParametricOrderedPreferencesMPCCGame(;
 	# Build symbolic expressions for objectives and (shared) constraints
 	# Take original primals out of x
 	trajectory_primals = [
-		i > 1 ? z[(1:private_primals[i][1]) .+ sum(primal_dimensions[1:(i-1)])] :
-		z[1:private_primals[i][1]] for i in 1:num_players
+		i > 1 ?
+		z[(1:private_primals[i][1]) .+ sum(primal_dimensions[1:(i-1)])] :
+		z[1:private_primals[i][1]]
+		for i in 1:num_players
 	]
 
-	trajectory_x = BlockArray(
-		vcat(trajectory_primals...),
-		[private_primals[i][1] for i in 1:num_players],
-	)
+	trajectory_x = BlockArray(vcat(trajectory_primals...), [private_primals[i][1] for i in 1:num_players])
 	# Block(1): z[1], ..., z[30]
 	# Block(2): z[290],...,z[319]
 	# Block(3): z[674], ..., z[703]
@@ -341,9 +292,9 @@ function ParametricOrderedPreferencesMPCCGame(;
 
 	# Build parametric (or PrimalDual) MCP.
 	if solver == "PATH" # TODO Eric: this is ugly as shit, we should do the same than we did w/ run()
-		parametric_mcp = ParametricMCP(reduce(vcat, F_symbolic), z̃, θ̃, z̲, z̅; compute_sensitivities = true)
+		mcp = ParametricMCP(reduce(vcat, F_symbolic), z̃, θ̃, z̲, z̅; compute_sensitivities = true)
 	else
-		parametric_mcp = PrimalDualMCP(reduce(vcat, F_symbolic), z̃, θ̃, z̲, z̅; compute_sensitivities = true)
+		mcp = PrimalDualMCP(reduce(vcat, F_symbolic), z̃, θ̃, z̲, z̅; compute_sensitivities = true)
 	end
 
 	# Standard relaxation mode ONLY
@@ -356,16 +307,13 @@ function ParametricOrderedPreferencesMPCCGame(;
 	# Main.@infiltrate
 
 	# Form exact complementarity constraints to evaluate convergence
-	exact_complementarity_constraints = Symbolics.build_function(
-		inner_complementarity_constraints,
-		z̃,
-		θ̃,
-		expression = Val{false},
-	)[1]
+	exact_complementarity_constraints = Symbolics.build_function(inner_complementarity_constraints, z̃, θ̃, expression = Val{false})[1]
 
 	trajectory_idx = [
-		i > 1 ? [(1:private_primals[i][1]) .+ primal_dimensions[i-1]] :
-		[1:private_primals[i][1]] for i in 1:num_players
+		i > 1 ?
+		[(1:private_primals[i][1]) .+ primal_dimensions[i-1]] :
+		[1:private_primals[i][1]]
+		for i in 1:num_players
 	]
 
 	# Return ParametricOrderedPreferencesMPCCGame
@@ -381,7 +329,7 @@ function ParametricOrderedPreferencesMPCCGame(;
 		inequality_dimensions,
 		shared_equality_dimension,
 		shared_inequality_dimension,
-		parametric_mcp,
+		mcp,
 		exact_complementarity_constraints,
 		trajectory_idx,
 		private_slacks,
@@ -405,13 +353,7 @@ function solve(
 	verbose = false,
 	return_primals = true,
 )
-	z0 = if !isnothing(initial_guess)
-		initial_guess
-	else
-		zeros(total_dim(problem))
-	end
-
-	if problem.parametric_mcp isa ParametricMCP
+	if problem.mcp isa ParametricMCP
 		z0 = if !isnothing(initial_guess)
 			initial_guess
 		else
@@ -419,7 +361,7 @@ function solve(
 		end
 
 		z, status, info = ParametricMCPs.solve(
-			problem.parametric_mcp,
+			problem.mcp,
 			parameter_value;
 			initial_guess = z0,
 			verbose = verbose,
@@ -461,14 +403,12 @@ function solve(
 
 		(; status, x, y, s, kkt_error, ϵ, outer_iters) = MixedComplementarityProblems.solve(
 			InteriorPoint(),
-			problem.parametric_mcp,
+			problem.mcp,
 			parameter_value;
 			x₀,
 			y₀,
 			s₀,
 			verbose = verbose,
-			max_inner_iters = 200, # 20
-			max_outer_iters = 50, # 50
 		)
 		z = vcat(x, y, s)
 
@@ -490,6 +430,7 @@ function solve(
 		return (; variables = z, slacks, solved, info)
 	end
 end
+
 
 function solve_relaxed_pop_game(
 	problem::ParametricOrderedPreferencesMPCCGame,
@@ -513,13 +454,12 @@ function solve_relaxed_pop_game(
 		initial_guess = zeros(total_dim(problem))
 	else
 		# warmstart duals as zeros 
-		initial_guess =
-			vcat(initial_guess, zeros(total_dim(problem) - length(initial_guess)))
+		initial_guess = vcat(initial_guess, zeros(total_dim(problem) - length(initial_guess)))
 	end
 
 	complementarity_residual = 1.0
 	converged_tolerance = 1e-6
-	PATH_tolerance = 5e-3 #2e-2
+	PATH_tolerance = 5e-2 #2e-2
 
 	relaxations = ϵ * κ .^ (0:max_iterations) # [1.0, 0.1, 0.01, ... 1e-10]
 	ii = 1
@@ -528,21 +468,48 @@ function solve_relaxed_pop_game(
 		ϵ = relaxations[ii]
 		augmented_parameters = vcat(parameters, ϵ)
 
-		solution =
-			solve(problem, augmented_parameters; PATH_tolerance, initial_guess, verbose)
+		solution = solve(problem, augmented_parameters; PATH_tolerance, initial_guess, verbose)
+
+		if verbose
+			println("ii: ", ii)
+			println("solved: ", solution.solved)
+			println("info: ", solution.info)
+			# TODO: Automate T = 30 if N = 5, T = 60 if N = 10
+			T = 42
+			solution_primals = [solution.primals[i][1:T] for i in 1:length(problem.objectives)]
+			trajectory_primals = BlockArray(vcat(solution_primals...), [T, T, T])
+			println("P1 (x) trajectory: ", trajectory_primals[Block(1)][1:6:end])
+			println("P1 (y) trajectory: ", trajectory_primals[Block(1)][2:6:end])
+			println("P2 (x) trajectory: ", trajectory_primals[Block(2)][1:6:end])
+			println("P2 (y) trajectory: ", trajectory_primals[Block(2)][2:6:end])
+			println("P3 (x) trajectory: ", trajectory_primals[Block(3)][1:6:end])
+			println("P3 (y) trajectory: ", trajectory_primals[Block(3)][2:6:end])
+			println("P1 velocity: ", trajectory_primals[Block(1)][3:6:end])
+			println("P2 velocity: ", trajectory_primals[Block(2)][3:6:end])
+			println("P3 velocity: ", trajectory_primals[Block(3)][3:6:end])
+			# println("P1 slack at level 1: ", solution.primals[1][31])
+			# println("P1 slack at level 2: ", solution.primals[1][94:113])
+			# println("P2 slack at level 1: ", solution.primals[2][31:50])
+			# println("P2 slack at level 2: ", solution.primals[2][151])
+			println("Check collision w/ each other (1-2): ",
+				sqrt.((solution_primals[1][1:6:end] .- solution_primals[2][1:6:end]) .^ 2 +
+					  (solution_primals[1][2:6:end] .- solution_primals[2][2:6:end]) .^ 2))
+			println("Check collision w/ each other (1-3): ",
+				sqrt.((solution_primals[1][1:6:end] .- solution_primals[3][1:6:end]) .^ 2 +
+					  (solution_primals[1][2:6:end] .- solution_primals[3][2:6:end]) .^ 2))
+			println("Check collision w/ each other (2-3): ",
+				sqrt.((solution_primals[2][1:6:end] .- solution_primals[3][1:6:end]) .^ 2 +
+					  (solution_primals[2][2:6:end] .- solution_primals[3][2:6:end]) .^ 2))
+		end
 
 		if !solution.solved
-			printstyled(
-				"Could not solve relaxed problem at relaxation factor $(ii).\n";
-				color = :red,
-			)
+			printstyled("Could not solve relaxed problem at relaxation factor $(ii).\n"; color = :red)
 			ii += 1
 			continue
 		end
 
 		# Check complementarity residual. Augmented_parameters should now have zero relaxation(ϵ)
-		complementarity_violations =
-			exact_complementarity_constraints(solution.variables, vcat(parameters, 0.0))
+		complementarity_violations = exact_complementarity_constraints(solution.variables, vcat(parameters, 0.0))
 		complementarity_residual = findmax(-complementarity_violations)[1]
 		println("complementarity_residual at iteration $(ii): ", complementarity_residual)
 		push!(residuals, complementarity_residual)
@@ -550,10 +517,7 @@ function solve_relaxed_pop_game(
 		push!(solutions, solution)
 
 		if complementarity_residual < tolerance
-			printstyled(
-				"Found a solution with complementarity residual less than tol=$(tolerance).\n";
-				color = :blue,
-			)
+			printstyled("Found a solution with complementarity residual less than tol=$(tolerance).\n"; color = :blue)
 			break
 		end
 

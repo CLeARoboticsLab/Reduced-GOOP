@@ -52,25 +52,26 @@ function solve(
 	linear_solve_algorithm = UMFPACKFactorization(),
 )
 
-	# Hardcode# hard code 
-	slack_dims = [
-		43:46,
-		47:110,
-		203:209,
-		210:223,
-		440:467,
-		468:523,
-		########
-		951:957,
-		958:1027,
-		1126:1153,
-		1154:1209,
-		1483:1486,
-		1487:1494,
-	]
-	slack_dims = mapreduce(vcat, slack_dims) do dim
-		collect(dim)
-	end
+	# slack_dims = [
+	# 	43:46,
+	# 	47:110,
+	# 	203:209,
+	# 	210:223,
+	# 	440:467,
+	# 	468:523,
+	# 	########
+	# 	951:957,
+	# 	958:1027,
+	# 	1126:1153,
+	# 	1154:1209,
+	# 	1483:1486,
+	# 	1487:1494,
+	# ]
+	# slack_dims = mapreduce(vcat, slack_dims) do dim
+	# 	collect(dim)
+	# end
+
+	slack_dims = mcp.dims.slack_dims
 
 	# Set up common memory.
 	∇F = mcp.∇F_z!.result_buffer
@@ -118,6 +119,7 @@ function solve(
 		status = :solved
 
 		verbose && @info "Outer iteration $(outer_iters): ϵ = $ϵ, kkt_error = $kkt_error"
+		# Main.@infiltrate
 		while kkt_error > ϵ && inner_iters < max_inner_iters
 			total_iters += 1
 			# Compute the Newton step.
@@ -127,6 +129,7 @@ function solve(
 			mcp.∇F_z!(∇F, x, y, s; θ, ϵ)
 			@assert all(.!isnan.(F)) "Found NaN in F - aborting!"
 			@assert all(.!isnan.(∇F)) "Found NaN in ∇F - aborting!"
+			println("condition number of ∇F = $(cond(collect(∇F),2))")
 			linsolve.A = ∇F + tol * I
 			linsolve.b = -F
 			solution = solve!(linsolve)
@@ -160,6 +163,9 @@ function solve(
 			@. y += α_y * δy
 
 			kkt_error = norm(F, Inf)
+
+			println("KKT error = $kkt_error")
+
 			inner_iters += 1
 		end
 
