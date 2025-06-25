@@ -4,7 +4,7 @@ function get_problem_for_experiment(
     ::Type{ParametricOrderedPreferencesMPCCGame},
     experiment::HighwayExperiment;
     relaxation_mode = :standard,
-    solver = "PATH"
+    solver = "PATH",
 )
     (;
         objectives,
@@ -80,7 +80,11 @@ function run(
 
     if isnothing(problem)
         # Get the problem modeled as a ParametricOrderedPreferencesMPCCGame
-        problem = get_problem_for_experiment(ParametricOrderedPreferencesMPCCGame, experiment; solver)
+        problem = get_problem_for_experiment(
+            ParametricOrderedPreferencesMPCCGame,
+            experiment;
+            solver,
+        )
     end
 
     warmstart_solution = nothing
@@ -89,21 +93,26 @@ function run(
     (; num_players, dynamics, planning_horizon) = experiment
 
     # Run the experiment
-    @showprogress desc = "Running problem instances using GOOP..." for i_sample in 1:num_samples
+    @showprogress desc = "Running problem instances using GOOP..." for i_sample in
+                                                                       1:num_samples
+
         @info "Solving problem instance #$i_sample..."
 
         # Load problem data
-        (; θ, initial_states) = load_problem_parameters(problems_folder, "rfp_$i_sample.jld2")
+        (; θ, initial_states) =
+            load_problem_parameters(problems_folder, "rfp_$i_sample.jld2")
 
         # Generate multiple equilibrium solutions
         @showprogress desc = "    Using different initial guesses..." for i_version in
                                                                           1:warmstart_samples
+
             @info "        Using GOOP with warmstart solution $i_version..."
 
             # initial guess is all zeros
             if i_version > 1
                 # using a random control sequence
-                warmstart_x = [[initial_states[1]], [initial_states[2]], [initial_states[3]]]
+                warmstart_x =
+                    [[initial_states[1]], [initial_states[2]], [initial_states[3]]]
                 warmstart_u = [[], [], []]
                 warmstart_solution = []
 
@@ -135,7 +144,7 @@ function run(
                     max_iterations,
                     tolerance,
                     warmstart_solution,
-                    verbose
+                    verbose,
                 )
             end
             push!(runtime, elapsed_time)
@@ -225,7 +234,8 @@ function check_equilibrium(experiment, θ, strategy; num_perturb::Int = 20, tol 
             @info "   Checking x*...@perturbation #$ll, player #$kk"
 
             perturbed_z_block = []
-            check_inequality, check_shared_equality, check_shared_inequality = false, false, false
+            check_inequality, check_shared_equality, check_shared_inequality =
+                false, false, false
             while !(check_inequality && check_shared_equality && check_shared_inequality)
                 # Step 1: Perturb control sequence u by ω = rand(dist, n_size) and generate perturbed trajectory x
                 for i in 1:(planning_horizon - 1)
@@ -254,13 +264,18 @@ function check_equilibrium(experiment, θ, strategy; num_perturb::Int = 20, tol 
                     all(shared_equality_constraints(perturbed_z, θ_blocked) .== 0.0)
 
                 # Initialize perturbed trajectory for next iteration
-                perturbed_x = [[strategy[1].xs[1]], [strategy[2].xs[1]], [strategy[3].xs[1]]]
+                perturbed_x =
+                    [[strategy[1].xs[1]], [strategy[2].xs[1]], [strategy[3].xs[1]]]
                 perturbed_u = [[], [], []]
             end
 
             # Step 3: Check if f₃(x*, θ) < f₃(x, θ) in the neighborhood of x*
-            f₃_star = sum(max.(0, -prioritized_preferences[kk][1](goop_z[Block(kk)], θ_blocked)))
-            f₃ = sum(max.(0, -prioritized_preferences[kk][1](perturbed_z_block, θ_blocked)))
+            f₃_star = sum(
+                max.(0, -prioritized_preferences[kk][1](goop_z[Block(kk)], θ_blocked)),
+            )
+            f₃ = sum(
+                max.(0, -prioritized_preferences[kk][1](perturbed_z_block, θ_blocked)),
+            )
             if f₃_star < f₃
                 @info "    f₃(x*, θ) < f₃(x, θ) in the neighborhood of x* for player #$kk"
             elseif isapprox(f₃_star, f₃, atol = tol)
@@ -268,9 +283,18 @@ function check_equilibrium(experiment, θ, strategy; num_perturb::Int = 20, tol 
                 @info "    |f₃(x*, θ) - f₃(x, θ)| = $(abs(f₃_star - f₃))"
 
                 # Step 4: Check if f₂(x*, θ) > f₂(x, θ) in the neighborhood of x*
-                f₂_star =
-                    sum(max.(0, -prioritized_preferences[kk][2](goop_z[Block(kk)], θ_blocked)))
-                f₂ = sum(max.(0, -prioritized_preferences[kk][2](perturbed_z_block, θ_blocked)))
+                f₂_star = sum(
+                    max.(
+                        0,
+                        -prioritized_preferences[kk][2](goop_z[Block(kk)], θ_blocked),
+                    ),
+                )
+                f₂ = sum(
+                    max.(
+                        0,
+                        -prioritized_preferences[kk][2](perturbed_z_block, θ_blocked),
+                    ),
+                )
 
                 @info begin
                     if f₂_star < f₂
@@ -312,10 +336,18 @@ function get_receding_horizon_solution(
     max_iterations,
     tolerance,
     warmstart_solution,
-    verbose
+    verbose,
 )
-    (; relaxation, solution, residual) =
-        solve_relaxed_pop_game(problem, warmstart_solution, θ; ϵ, κ, max_iterations, tolerance, verbose)
+    (; relaxation, solution, residual) = solve_relaxed_pop_game(
+        problem,
+        warmstart_solution,
+        θ;
+        ϵ,
+        κ,
+        max_iterations,
+        tolerance,
+        verbose,
+    )
 
     if all([!solution[i].solved for i in 1:first(size(solution))])
         return nothing

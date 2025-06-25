@@ -6,4 +6,4 @@ end
 function save_plot(file, fig)
     mkpath(dirname(file))
     CairoMakie.save(file, fig)
-end 
+end

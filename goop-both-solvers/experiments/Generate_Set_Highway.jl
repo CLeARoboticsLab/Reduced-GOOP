@@ -1,4 +1,7 @@
-function get_problem_for_experiment(::Type{ParametricGameClassifier}, experiment::HighwayExperiment)    
+function get_problem_for_experiment(
+    ::Type{ParametricGameClassifier},
+    experiment::HighwayExperiment,
+)
     (;
         objectives,
         equality_constraints,
@@ -36,16 +39,16 @@ function generate_samples(num_samples = 10; problem = nothing)
     inspection_needed_problems_folder = "./data/inspection_needed/problems/"
 
     experiment = HighwayExperiment()
-    
+
     if isnothing(problem)
         problem = get_problem_for_experiment(ParametricGameClassifier, experiment)
     end
 
     Random.seed!(123)
-    
+
     samples = []
     num_relaxably_feasible, num_trivially_feasible = 0, 0
-    
+
     obstacle_position = [0.25, 0.15]
 
     while num_relaxably_feasible < num_samples
@@ -82,11 +85,7 @@ function generate_samples(num_samples = 10; problem = nothing)
 
         # Classify problem instance
         @info "Classifying problem..."
-        solution = classify_game(
-            problem,
-            θ;
-            return_primals = true
-        )
+        solution = classify_game(problem, θ; return_primals = true)
 
         # Define data for saving
         saved_data = Dict(
@@ -104,11 +103,14 @@ function generate_samples(num_samples = 10; problem = nothing)
             @info "Infeasible problem...moving on to the next problem"
             continue
 
-        # 2. If sol with positive objective, this is a relaxably feasible problem and goes to "Relaxably Feasible Set" 
+            # 2. If sol with positive objective, this is a relaxably feasible problem and goes to "Relaxably Feasible Set" 
         elseif any(x -> x > 0, solution.objectives)
             num_relaxably_feasible += 1
             @info "Relaxably feasible problem...saving the instance #$num_relaxably_feasible"
-            file_name = joinpath(relaxably_feasible_problems_folder, "rfp_$num_relaxably_feasible.jld2")
+            file_name = joinpath(
+                relaxably_feasible_problems_folder,
+                "rfp_$num_relaxably_feasible.jld2",
+            )
 
             # 3. If sol with zero objective, this is a trivially feasible problem and goes to "Trivially Feasible Set"
         elseif all(x -> isapprox(x, 0.0; atol = 1e-4), solution.objectives)
@@ -121,11 +123,15 @@ function generate_samples(num_samples = 10; problem = nothing)
             end
 
             @info "Trivially feasible problem...saving the instance #$num_trivially_feasible"
-            file_name = joinpath(trivially_feasible_problems_folder, "tfp_$num_trivially_feasible.jld2")
+            file_name = joinpath(
+                trivially_feasible_problems_folder,
+                "tfp_$num_trivially_feasible.jld2",
+            )
 
         else
             @info "Inspection needed for this problem..."
-            file_name = joinpath(inspection_needed_problems_folder, "inspection_needed.jld2")
+            file_name =
+                joinpath(inspection_needed_problems_folder, "inspection_needed.jld2")
         end
 
         @info solution.objectives

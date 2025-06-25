@@ -70,14 +70,21 @@ function ParametricGameClassifier(;
     function set_up_classifier(priority_level, player_idx)
         # Account for slack variables in the primal dimension at each priority level
         prioritized_constraints_ii = prioritized_preferences[player_idx][priority_level]
-        slack_dimension_ii = length(prioritized_constraints_ii(dummy_primals, dummy_parameters))
+        slack_dimension_ii =
+            length(prioritized_constraints_ii(dummy_primals, dummy_parameters))
         primal_dimension_ii += slack_dimension_ii
         append!(private_primals[player_idx], slack_dimension_ii)
 
         # Define symbolic variables for primals.
-        z̃ = Symbolics.scalarize(only(Symbolics.@variables(z̃[start_idx : primal_dimension_ii + start_idx - 1])))
+        z̃ = Symbolics.scalarize(
+            only(
+                Symbolics.@variables(z̃[start_idx:(primal_dimension_ii + start_idx - 1)])
+            ),
+        )
         x = BlockArray(z̃, private_primals[player_idx])
-        θ̃ = Symbolics.scalarize(only(Symbolics.@variables(θ̃[1:sum(parameter_dimensions)])))
+        θ̃ = Symbolics.scalarize(
+            only(Symbolics.@variables(θ̃[1:sum(parameter_dimensions)])),
+        )
         θ = BlockArray(θ̃, parameter_dimensions)
 
         # Define symbolic variables for the slack variables.
@@ -89,7 +96,10 @@ function ParametricGameClassifier(;
         # Append auxillary constraints into inequality constraints: fᵢ(x,θ) + sᵢ ≥ 0 , sᵢ ≥ 0
         auxillary_constraints = prioritized_constraints_ii(x, θ) .+ slacks_ii
         if priority_level == 1
-            push!(inequality_constraints_w_preferences, inequality_constraints[player_idx](x, θ))
+            push!(
+                inequality_constraints_w_preferences,
+                inequality_constraints[player_idx](x, θ),
+            )
         end
         append!(inequality_constraints_w_preferences[player_idx], auxillary_constraints)
         append!(inequality_constraints_w_preferences[player_idx], slacks_ii)
@@ -140,14 +150,14 @@ function ParametricGameClassifier(;
     # Define symbolic variables for this MCP.
     z̃ = Symbolics.scalarize(only(Symbolics.@variables(z̃[1:total_dimension])))
     z = BlockArray(
-        Symbolics.scalarize(z̃), 
+        Symbolics.scalarize(z̃),
         [
             sum(primal_dimensions),
             sum(equality_dimensions),
             sum(inequality_dimensions),
             shared_equality_dimension,
             shared_inequality_dimension,
-        ]
+        ],
     )
     x = BlockArray(z[Block(1)], primal_dimensions)
     μ = BlockArray(z[Block(2)], equality_dimensions)
@@ -161,21 +171,24 @@ function ParametricGameClassifier(;
 
     # Retrieve trajectory_x 
     trajectory_primals = [x[Block(i)][1:private_primals[i][1]] for i in 1:num_players]
-    trajectory_x = BlockArray(vcat(trajectory_primals...), [private_primals[i][1] for i in 1:num_players])
+    trajectory_x = BlockArray(
+        vcat(trajectory_primals...),
+        [private_primals[i][1] for i in 1:num_players],
+    )
 
     # Build symbolic expressions for objectives and constraints for all players
     # (and shared constraints).
     fs = slacks_as_objectives
     gs = equality_constraints_encoded
     hs = inequality_constraints_w_preferences
-    g̃ = shared_equality_constraints(trajectory_x,θ)
-    h̃ = shared_inequality_constraints(trajectory_x,θ)
+    g̃ = shared_equality_constraints(trajectory_x, θ)
+    h̃ = shared_inequality_constraints(trajectory_x, θ)
 
     # Main.@infiltrate
 
     # Build Lagrangians for all players.
     Ls = map(zip(1:N, fs, gs, hs)) do (i, f, g, h)
-        f - μ[Block(i)]' * g - λ[Block(i)]' * h - μₛ' * g̃ - λₛ' * h̃ 
+        f - μ[Block(i)]' * g - λ[Block(i)]' * h - μₛ' * g̃ - λₛ' * h̃
     end
 
     # Build F = [∇ₓLs, gs, hs, g̃, h̃]'.
@@ -213,7 +226,8 @@ function ParametricGameClassifier(;
     )
 
     # Define callable objectives
-    callable_objectives = Symbolics.build_function(slacks_as_objectives, z̃, θ̃, expression=Val{false})[1]
+    callable_objectives =
+        Symbolics.build_function(slacks_as_objectives, z̃, θ̃, expression = Val{false})[1]
 
     ParametricGameClassifier(
         slacks_as_objectives,
@@ -280,7 +294,9 @@ function classify_game(
     objectives = problem.callable_objectives(z, parameter_value)
 
     if return_primals
-        primals = blocks(BlockArray(z[1:sum(problem.primal_dimensions)], problem.primal_dimensions))
+        primals = blocks(
+            BlockArray(z[1:sum(problem.primal_dimensions)], problem.primal_dimensions),
+        )
         return (; primals, variables = z, objectives, solved, info)
     else
         return (; variables = z, objectives, solved, info)

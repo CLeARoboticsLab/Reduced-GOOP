@@ -3,7 +3,8 @@ module QuasiGOOP
 using LinearAlgebra
 
 using ParametricMCPs: ParametricMCPs, ParametricMCP
-using MixedComplementarityProblems: MixedComplementarityProblems, PrimalDualMCP, InteriorPoint
+using MixedComplementarityProblems:
+    MixedComplementarityProblems, PrimalDualMCP, InteriorPoint
 using Symbolics: Symbolics
 using BlockArrays: BlockArrays, BlockArray, Block, blocks, blocksizes
 using SparseArrays: SparseArrays

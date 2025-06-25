@@ -3,7 +3,8 @@ module OrderedPreferences
 using LinearAlgebra
 
 using ParametricMCPs: ParametricMCPs, ParametricMCP # Kept so old modules still compile
-using MixedComplementarityProblems: MixedComplementarityProblems, PrimalDualMCP, InteriorPoint
+using MixedComplementarityProblems:
+    MixedComplementarityProblems, PrimalDualMCP, InteriorPoint
 using Symbolics: Symbolics
 using BlockArrays: BlockArrays, BlockArray, Block, blocks
 using DelimitedFiles: readdlm

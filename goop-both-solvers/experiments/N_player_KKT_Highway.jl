@@ -55,15 +55,19 @@ function HighwayExperiment(;
             # Consider variable number of objective levels
             # TODO PHM: Check that this doesn't significantly slow things down
             index = min(i, length(blocksizes(z)))
-            (; xs, us) =
-                unflatten_trajectory(z[Block(index)], state_dimension, control_dimension)
+            (; xs, us) = unflatten_trajectory(
+                z[Block(index)],
+                state_dimension,
+                control_dimension,
+            )
             0.5 * sum(sum(u .^ 2) for u in us)
         end for i in 1:num_players
     ]
 
     equality_constraints = [
         function (z, θ)
-            (; xs, us) = unflatten_trajectory(z[Block(1)], state_dimension, control_dimension)
+            (; xs, us) =
+                unflatten_trajectory(z[Block(1)], state_dimension, control_dimension)
             (; initial_state) = unflatten_parameters(θ[Block(i)])
             initial_state_constraint = xs[1] - initial_state
             dynamics_constraints = mapreduce(vcat, 2:length(xs)) do k
@@ -78,7 +82,8 @@ function HighwayExperiment(;
             (; lb, ub) = control_bounds(dynamics)
             lb_mask = findall(!isinf, lb)
             ub_mask = findall(!isinf, ub)
-            (; xs, us) = unflatten_trajectory(z[Block(1)], state_dimension, control_dimension)
+            (; xs, us) =
+                unflatten_trajectory(z[Block(1)], state_dimension, control_dimension)
             vcat(
                 # control bounds (box)
                 mapreduce(vcat, us) do u
@@ -88,7 +93,8 @@ function HighwayExperiment(;
                 # stay within the playing field (for planar_double_integrator)
                 mapreduce(vcat, 1:length(xs)) do k
                     px, py, vx, vy = xs[k]
-                    position_constraints = vcat(px + 1.0, -px + 1.0, py + 0.2, -py + 0.2)
+                    position_constraints =
+                        vcat(px + 1.0, -px + 1.0, py + 0.2, -py + 0.2)
                     vcat(position_constraints)
                 end,
             )
@@ -99,17 +105,26 @@ function HighwayExperiment(;
         [
             # reach the goal.
             function (z, θ)
-                (; xs, us) = unflatten_trajectory(z[Block(1)], state_dimension, control_dimension)
+                (; xs, us) = unflatten_trajectory(
+                    z[Block(1)],
+                    state_dimension,
+                    control_dimension,
+                )
                 (; goal_position) = unflatten_parameters(θ[Block(1)]) # Player 1 θ[Block(i)]
                 xs[end][1] - goal_position[1] # px[end] ≥ 0.9
             end,
 
             # Speed limit
             function (z, θ)
-                (; xs, us) = unflatten_trajectory(z[Block(1)], state_dimension, control_dimension)
+                (; xs, us) = unflatten_trajectory(
+                    z[Block(1)],
+                    state_dimension,
+                    control_dimension,
+                )
                 mapreduce(vcat, 1:length(xs)) do k
                     px, py, vx, vy = xs[k]
-                    velocity_constraints = vcat(vx + 0.2, -vx + 0.2, vy + 0.2, -vy + 0.2)
+                    velocity_constraints =
+                        vcat(vx + 0.2, -vx + 0.2, vy + 0.2, -vy + 0.2)
                     vcat(velocity_constraints)
                 end
             end,
@@ -117,17 +132,26 @@ function HighwayExperiment(;
         [
             # Speed limit
             function (z, θ)
-                (; xs, us) = unflatten_trajectory(z[Block(1)], state_dimension, control_dimension)
+                (; xs, us) = unflatten_trajectory(
+                    z[Block(1)],
+                    state_dimension,
+                    control_dimension,
+                )
                 mapreduce(vcat, 1:length(xs)) do k
                     px, py, vx, vy = xs[k]
-                    velocity_constraints = vcat(vx + 0.2, -vx + 0.2, vy + 0.2, -vy + 0.2)
+                    velocity_constraints =
+                        vcat(vx + 0.2, -vx + 0.2, vy + 0.2, -vy + 0.2)
                     vcat(velocity_constraints)
                 end
             end,
 
             # reach the goal.
             function (z, θ)
-                (; xs, us) = unflatten_trajectory(z[Block(1)], state_dimension, control_dimension)
+                (; xs, us) = unflatten_trajectory(
+                    z[Block(1)],
+                    state_dimension,
+                    control_dimension,
+                )
                 (; goal_position) = unflatten_parameters(θ[Block(2)]) # Player 2
                 xs[end][1] - goal_position[1] # px[end] ≥ 0.9
             end,
@@ -135,17 +159,26 @@ function HighwayExperiment(;
         [
             # Speed limit
             function (z, θ)
-                (; xs, us) = unflatten_trajectory(z[Block(1)], state_dimension, control_dimension)
+                (; xs, us) = unflatten_trajectory(
+                    z[Block(1)],
+                    state_dimension,
+                    control_dimension,
+                )
                 mapreduce(vcat, 1:length(xs)) do k
                     px, py, vx, vy = xs[k]
-                    velocity_constraints = vcat(vx + 0.2, -vx + 0.2, vy + 0.2, -vy + 0.2)
+                    velocity_constraints =
+                        vcat(vx + 0.2, -vx + 0.2, vy + 0.2, -vy + 0.2)
                     vcat(velocity_constraints)
                 end
             end,
 
             # reach the goal.
             function (z, θ)
-                (; xs, us) = unflatten_trajectory(z[Block(1)], state_dimension, control_dimension)
+                (; xs, us) = unflatten_trajectory(
+                    z[Block(1)],
+                    state_dimension,
+                    control_dimension,
+                )
                 (; goal_position) = unflatten_parameters(θ[Block(3)]) # Player 3
                 xs[end][1] - goal_position[1] # px[end] ≥ 0.9
             end,
@@ -166,7 +199,8 @@ function HighwayExperiment(;
 
     function shared_inequality_constraints(z, θ)
         trajectories = map(
-            i -> unflatten_trajectory(z[Block(i)], state_dimension, control_dimension),
+            i ->
+                unflatten_trajectory(z[Block(i)], state_dimension, control_dimension),
             1:num_players,
         )
         xs = map(trajectory -> trajectory.xs, trajectories)
@@ -182,12 +216,17 @@ function HighwayExperiment(;
         end
     end
 
-    equality_dimensions =
-        [length(equality_constraints[i](dummy_primals, dummy_parameters)) for i in 1:num_players]
-    inequality_dimensions =
-        [length(inequality_constraints[i](dummy_primals, dummy_parameters)) for i in 1:num_players]
+    equality_dimensions = [
+        length(equality_constraints[i](dummy_primals, dummy_parameters)) for
+        i in 1:num_players
+    ]
+    inequality_dimensions = [
+        length(inequality_constraints[i](dummy_primals, dummy_parameters)) for
+        i in 1:num_players
+    ]
 
-    shared_equality_dimension = length(shared_equality_constraints(dummy_primals, dummy_parameters))
+    shared_equality_dimension =
+        length(shared_equality_constraints(dummy_primals, dummy_parameters))
     shared_inequality_dimension =
         length(shared_inequality_constraints(dummy_primals, dummy_parameters))
 
@@ -349,11 +388,16 @@ function plot_strategies(
         color = :black,
         linestyle = :dash,
     )
-    fig[2, 1:2] = CairoMakie.Legend(fig, ax2, framevisible = false, orientation = :horizontal)
+    fig[2, 1:2] =
+        CairoMakie.Legend(fig, ax2, framevisible = false, orientation = :horizontal)
 
     # Visualize vertical speed
-    ax3 =
-        CairoMakie.Axis(fig[1, 2]; xlabel = "time step", ylabel = "speed", title = "Vertical Speed")
+    ax3 = CairoMakie.Axis(
+        fig[1, 2];
+        xlabel = "time step",
+        ylabel = "speed",
+        title = "Vertical Speed",
+    )
     CairoMakie.scatterlines!(
         ax3,
         0:(planning_horizon - 1),
@@ -427,7 +471,8 @@ function plot_strategies(
         color = :black,
         linestyle = :dash,
     )
-    fig[2, 1] = CairoMakie.Legend(fig, ax4, framevisible = false, orientation = :horizontal)
+    fig[2, 1] =
+        CairoMakie.Legend(fig, ax4, framevisible = false, orientation = :horizontal)
 
     save_plot(joinpath(folder, "distance_$filename_base"), fig)
 end

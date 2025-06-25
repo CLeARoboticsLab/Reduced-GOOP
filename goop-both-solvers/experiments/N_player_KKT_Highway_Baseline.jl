@@ -1,6 +1,10 @@
 using Dates
 
-function get_problem_for_experiment(::Type{ParametricGamePenalty}, experiment::HighwayExperiment; α)
+function get_problem_for_experiment(
+    ::Type{ParametricGamePenalty},
+    experiment::HighwayExperiment;
+    α,
+)
     (;
         num_players,
         objectives,
@@ -17,7 +21,8 @@ function get_problem_for_experiment(::Type{ParametricGamePenalty}, experiment::H
     ) = experiment
 
     num_levels = length(prioritized_preferences)
-    penalty_weights = [[Float64(α^i) for i in (num_levels - 1):-1:0] for _ in 1:num_players]
+    penalty_weights =
+        [[Float64(α^i) for i in (num_levels - 1):-1:0] for _ in 1:num_players]
 
     # TODO PHM: It might be nice to do
     # ParametricGamePenalty(; penalty_weights, experiment...)
@@ -78,11 +83,17 @@ function run(
     (; dynamics, planning_horizon) = experiment
 
     # Run the baseline experiment
-    @showprogress desc = "Running problem instances using baseline..." for i_sample in 1:num_samples
+    @showprogress desc = "Running problem instances using baseline..." for i_sample in
+                                                                           1:num_samples
+
         @info "Solving problem instance #$i_sample..."
 
-        @showprogress desc = "    Using different penalty weight factors α..." for (i_version, α) in
-                                                                                   enumerate(alfas)
+        @showprogress desc = "    Using different penalty weight factors α..." for (
+            i_version,
+            α,
+        ) in enumerate(
+            alfas,
+        )
             @info "        Using baseline with penalty weight factor α = $α (#$i_version)..."
 
             if isnothing(problem)
@@ -95,7 +106,12 @@ function run(
 
             # Measure run time
             elapsed_time = @elapsed begin
-                result = get_receding_horizon_solution(problem, θ, planning_horizon, dynamics;)
+                result = get_receding_horizon_solution(
+                    problem,
+                    θ,
+                    planning_horizon,
+                    dynamics;
+                )
             end
             push!(runtime, elapsed_time)
 
@@ -120,7 +136,10 @@ function run(
 
             # Save not-converged instances
             if !isempty(not_converged)
-                file = joinpath(data_folder, "rfp_$(i_sample)_$(i_version)_not_converged.jld2")
+                file = joinpath(
+                    data_folder,
+                    "rfp_$(i_sample)_$(i_version)_not_converged.jld2",
+                )
                 save_object(file, not_converged)
                 not_converged = []
             end

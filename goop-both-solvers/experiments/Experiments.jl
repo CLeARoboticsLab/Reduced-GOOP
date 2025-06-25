@@ -1,6 +1,7 @@
 module Experiments
 
-using TrajectoryGamesBase: AbstractDynamics, unflatten_trajectory, state_dim, control_dim, control_bounds
+using TrajectoryGamesBase:
+    AbstractDynamics, unflatten_trajectory, state_dim, control_dim, control_bounds
 using TrajectoryGamesExamples: UnicycleDynamics, planar_double_integrator
 using BlockArrays, JLD2, ProgressMeter, Distributions, Random, BenchmarkTools
 using CairoMakie: CairoMakie

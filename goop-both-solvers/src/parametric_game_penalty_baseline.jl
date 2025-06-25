@@ -1,5 +1,5 @@
 "Generic description of a constrained parametric game problem."
-struct ParametricGamePenalty{T1,T2,T3,T4,T5,T6,T7,T8, T9}
+struct ParametricGamePenalty{T1,T2,T3,T4,T5,T6,T7,T8,T9}
     "Objective functions for all players"
     objectives::T1
     "Equality constraints for all players"
@@ -43,7 +43,7 @@ function ParametricGamePenalty(;
     parameter_dimensions,
     shared_equality_dimension,
     shared_inequality_dimension,
-    penalty_weights
+    penalty_weights,
 )
     @assert !isnothing(equality_constraints)
     @assert !isnothing(inequality_constraints)
@@ -74,15 +74,22 @@ function ParametricGamePenalty(;
     function set_up_penalty(priority_level, player_idx)
         # Account for slack variables in the primal dimension at each priority level
         prioritized_constraints_ii = prioritized_preferences[player_idx][priority_level]
-        slack_dimension_ii = length(prioritized_constraints_ii(dummy_primals, dummy_parameters))
+        slack_dimension_ii =
+            length(prioritized_constraints_ii(dummy_primals, dummy_parameters))
         primal_dimension_ii += slack_dimension_ii
         append!(private_primals[player_idx], slack_dimension_ii)
 
         # Set up symbolic variables and reformulate the preferences as penalty terms in the objective functions.
         # Define symbolic variables for primals.
-        z̃ = Symbolics.scalarize(only(Symbolics.@variables(z̃[start_idx : primal_dimension_ii + start_idx - 1])))
+        z̃ = Symbolics.scalarize(
+            only(
+                Symbolics.@variables(z̃[start_idx:(primal_dimension_ii + start_idx - 1)])
+            ),
+        )
         x = BlockArray(z̃, private_primals[player_idx])
-        θ̃ = Symbolics.scalarize(only(Symbolics.@variables(θ̃[1:sum(parameter_dimensions)])))
+        θ̃ = Symbolics.scalarize(
+            only(Symbolics.@variables(θ̃[1:sum(parameter_dimensions)])),
+        )
         θ = BlockArray(θ̃, parameter_dimensions)
 
         # Define symbolic variables for the slack variables.
@@ -90,23 +97,35 @@ function ParametricGamePenalty(;
 
         # Define objective with penalty terms.
         if priority_level == 1
-            append!(objectives_w_penalty, penalty_weights[player_idx][num_levels]*objectives[player_idx](x, θ))
+            append!(
+                objectives_w_penalty,
+                penalty_weights[player_idx][num_levels]*objectives[player_idx](x, θ),
+            )
         end
-        objectives_w_penalty[player_idx] += penalty_weights[player_idx][priority_level]*sum(slacks_ii)
+        objectives_w_penalty[player_idx] +=
+            penalty_weights[player_idx][priority_level]*sum(slacks_ii)
 
         # Append auxillary constraints into inequality constraints: fᵢ(x,θ) + sᵢ ≥ 0 , sᵢ ≥ 0
         auxillary_constraints = prioritized_constraints_ii(x, θ) .+ slacks_ii
         if priority_level == 1
-            push!(inequality_constraints_w_preferences, inequality_constraints[player_idx](x, θ))
+            push!(
+                inequality_constraints_w_preferences,
+                inequality_constraints[player_idx](x, θ),
+            )
         end
         append!(inequality_constraints_w_preferences[player_idx], auxillary_constraints)
         append!(inequality_constraints_w_preferences[player_idx], slacks_ii)
 
         # Store sum_slacks
         x_temp = let
-            Symbolics.scalarize(only(Symbolics.@variables(z̃[1:primal_dimension_ii+start_idx-1])))
+            Symbolics.scalarize(
+                only(Symbolics.@variables(z̃[1:(primal_dimension_ii + start_idx - 1)])),
+            )
         end
-        push!(sum_slacks, Symbolics.build_function(sum(slacks_ii), x_temp, θ, expression=Val{false}))
+        push!(
+            sum_slacks,
+            Symbolics.build_function(sum(slacks_ii), x_temp, θ, expression = Val{false}),
+        )
 
         # Define equality constraints
         if priority_level == 1
@@ -151,14 +170,14 @@ function ParametricGamePenalty(;
     # Define symbolic variables for this MCP.
     z̃ = Symbolics.scalarize(only(Symbolics.@variables(z̃[1:total_dimension])))
     z = BlockArray(
-        Symbolics.scalarize(z̃), 
+        Symbolics.scalarize(z̃),
         [
             sum(primal_dimensions),
             sum(equality_dimensions),
             sum(inequality_dimensions),
             shared_equality_dimension,
             shared_inequality_dimension,
-        ]
+        ],
     )
     x = BlockArray(z[Block(1)], primal_dimensions)
     μ = BlockArray(z[Block(2)], equality_dimensions)
@@ -172,19 +191,22 @@ function ParametricGamePenalty(;
 
     # Retrieve trajectory_x 
     trajectory_primals = [x[Block(i)][1:private_primals[i][1]] for i in 1:num_players]
-    trajectory_x = BlockArray(vcat(trajectory_primals...), [private_primals[i][1] for i in 1:num_players])
+    trajectory_x = BlockArray(
+        vcat(trajectory_primals...),
+        [private_primals[i][1] for i in 1:num_players],
+    )
 
     # Build symbolic expressions for objectives and constraints for all players
     # (and shared constraints).
     fs = objectives_w_penalty
     gs = equality_constraints_encoded
     hs = inequality_constraints_w_preferences
-    g̃ = shared_equality_constraints(trajectory_x,θ)
-    h̃ = shared_inequality_constraints(trajectory_x,θ)
+    g̃ = shared_equality_constraints(trajectory_x, θ)
+    h̃ = shared_inequality_constraints(trajectory_x, θ)
 
     # Build Lagrangians for all players.
     Ls = map(zip(1:N, fs, gs, hs)) do (i, f, g, h)
-        f - μ[Block(i)]' * g - λ[Block(i)]' * h - μₛ' * g̃ - λₛ' * h̃ 
+        f - μ[Block(i)]' * g - λ[Block(i)]' * h - μₛ' * g̃ - λₛ' * h̃
     end
 
     # Build F = [∇ₓLs, gs, hs, g̃, h̃]'.
@@ -284,12 +306,12 @@ function solve_penalty(
     solved = string(status) == "MCP_Solved"
 
     # Compute slacks for each preference
-    slacks = vcat(
-        map(sum_slacks -> sum_slacks(z, parameter_value), problem.sum_slacks)
-    )
+    slacks = vcat(map(sum_slacks -> sum_slacks(z, parameter_value), problem.sum_slacks))
 
     if return_primals
-        primals = blocks(BlockArray(z[1:sum(problem.primal_dimensions)], problem.primal_dimensions))
+        primals = blocks(
+            BlockArray(z[1:sum(problem.primal_dimensions)], problem.primal_dimensions),
+        )
         return (; primals, variables = z, slacks, solved, info)
     else
         return (; variables = z, slacks, solved, info)
