@@ -7,7 +7,7 @@ end
 
 # Overload of Symbolics.gradient for Lagrangian_term
 function Symbolics.gradient(f::Lagrangian_term, x::AbstractVector{<:Symbolics.Num})
-	if f.deriv_order > 2
+	if f.deriv_order > 1 # 1: drop terms, if 2 or higher: keep terms
 		return Lagrangian_term(zero.(x), f.duals, f.deriv_order + 1)
 	end
 
@@ -109,6 +109,8 @@ function ParametricOrderedPreferencesMPCCGame(;
 	# Initialize symbolic expression for player's private constraints.
 	private_inner_equality_constraints = Vector{Symbolics.Num}[]
 	private_inner_inequality_constraints = Vector{Symbolics.Num}[]
+	# quasi_eq_constraints = Vector{Symbolics.Num}[]
+	# quasi_ineq_constraints = Vector{Symbolics.Num}[]
 	Lagrangian_terms = Lagrangian_term[]
 	F_ii = Constraints_ii(num_levels, num_players)
 
@@ -121,253 +123,6 @@ function ParametricOrderedPreferencesMPCCGame(;
 	start_idx = 1
 
 	# Main.@infiltrate
-
-	# function set_up_level(priority_level, player_idx)
-
-	# 	# Implement prioritized objective vs prioritized constraints
-	# 	if is_prioritized_constraint[player_idx][priority_level]
-	# 		prioritized_constraints_ii =
-	# 			prioritized_preferences[player_idx][priority_level] # fᵢ(x,θ) ≥ 0
-	# 		slack_dimension_ii =
-	# 			length(prioritized_constraints_ii(dummy_primals, dummy_parameters))
-	# 		primal_dimension_ii += slack_dimension_ii
-	# 		append!(private_primals[player_idx], slack_dimension_ii)
-	# 		inequality_dimension_ii[player_idx] += slack_dimension_ii * 2 # account for sᵢ ≥ 0
-	# 	end
-
-	# 	# Main.@infiltrate
-
-	# 	# Define symbolic variables for primals.
-	# 	total_dimension =
-	# 		primal_dimension_ii +
-	# 		inequality_dimension_ii[player_idx] +
-	# 		equality_dimension_ii[player_idx]
-	# 	z̃ = Symbolics.scalarize(
-	# 		only(Symbolics.@variables(z̃[start_idx:(total_dimension+start_idx-1)])),
-	# 	)
-	# 	z = BlockArray(
-	# 		z̃,
-	# 		[
-	# 			primal_dimension_ii,
-	# 			inequality_dimension_ii[player_idx],
-	# 			equality_dimension_ii[player_idx],
-	# 		],
-	# 	)
-	# 	θ̃ = Symbolics.scalarize(
-	# 		only(Symbolics.@variables(θ̃[1:augmented_parameter_dimension])),
-	# 	)
-	# 	θ = BlockArray(θ̃, vcat(parameter_dimensions, [1]))
-
-	# 	x = BlockArray(z[Block(1)], private_primals[player_idx])
-	# 	λ = z[Block(2)]
-	# 	μ = z[Block(3)]
-
-	# 	# Build symbolic expression for objective and constraints.
-	# 	if priority_level == first(ordered_priority_levels) ||
-	# 	   isempty(private_inner_equality_constraints)
-	# 		push!(
-	# 			private_inner_equality_constraints,
-	# 			equality_constraints[player_idx](x, θ),
-	# 		)
-	# 		push!(
-	# 			private_inner_inequality_constraints,
-	# 			inequality_constraints[player_idx](x, θ),
-	# 		)
-
-	# 		# Build Lagrangian terms for equality and inequality constraints.
-	# 		push!(
-	# 			F_ii[player_idx].inequalities[priority_level],
-	# 			Lagrangian_term(inequality_constraints[player_idx](x, θ), nothing, 0),
-	# 		)
-	# 		push!(
-	# 			F_ii[player_idx].equalities[priority_level],
-	# 			Lagrangian_term(equality_constraints[player_idx](x, θ), nothing, 0),
-	# 		)
-	# 	end
-
-	# 	if is_prioritized_constraint[player_idx][priority_level]
-
-	# 		# Main.@infiltrate
-
-	# 		slacks_ii = last(z[Block(1)], slack_dimension_ii)
-
-	# 		objective_ii = 15sum(slacks_ii) #15
-
-	# 		# auxillary constraints: fᵢ(x,θ) + sᵢ ≥ 0, sᵢ ≥ 0
-	# 		auxillary_constraints = prioritized_constraints_ii(x, θ) .+ slacks_ii
-	# 		append!(
-	# 			private_inner_inequality_constraints[player_idx],
-	# 			vcat(auxillary_constraints, slacks_ii),
-	# 		)
-
-	# 		push!(
-	# 			F_ii[player_idx].inequalities[priority_level],
-	# 			Lagrangian_term(vcat(auxillary_constraints, slacks_ii), nothing, 0),
-	# 		)
-
-	# 		# store private_slacks
-	# 		x_temp = let
-	# 			Symbolics.scalarize(
-	# 				only(Symbolics.@variables(z̃[1:(total_dimension+start_idx+1)])),
-	# 			) #TODO: Check +1?
-	# 		end
-	# 		sum_slacks = Symbolics.build_function(
-	# 			sum(slacks_ii),
-	# 			x_temp,
-	# 			θ,
-	# 			expression = Val{false},
-	# 		)
-	# 		push!(private_slacks, sum_slacks)
-	# 	else
-	# 		priority_objective_ii = prioritized_preferences[player_idx][priority_level]
-	# 		objective_ii = priority_objective_ii(x, θ)[1] # convert from Vector{Num} to Symbolics.Num 
-	# 	end
-
-	# 	h_ii = private_inner_inequality_constraints[player_idx] # 64
-	# 	if isempty(h_ii)
-	# 		h_ii = Symbolics.Num[]
-	# 	end
-
-	# 	g_ii = private_inner_equality_constraints[player_idx] # 28
-	# 	if isempty(g_ii)
-	# 		g_ii = Symbolics.Num[]
-	# 	end
-
-	# 	# Original GOOP: Lagrangian.
-	# 	L = objective_ii - λ' * h_ii - μ' * g_ii
-
-	# 	# Original GOOP: Stationary constraints (# ∇ₓL = 0)
-	# 	original_stationarity = Symbolics.expand.(Symbolics.gradient(L, x))
-
-	# 	Main.@infiltrate
-
-	# 	# Quasi-GOOP: Build Lagrangian function via assigning duals to each Lagrangian_term
-	# 	push!(
-	# 		Lagrangian_terms,
-	# 		Lagrangian_term(objective_ii, nothing, 0),
-	# 	)
-	# 	add_lagrangian_terms!(
-	# 		Lagrangian_terms,
-	# 		F_ii[player_idx].inequalities[priority_level],
-	# 		λ,
-	# 		priority_level,
-	# 		:inequalities,
-	# 	)
-	# 	add_lagrangian_terms!(
-	# 		Lagrangian_terms,
-	# 		F_ii[player_idx].equalities[priority_level],
-	# 		μ,
-	# 		priority_level,
-	# 		:equalities,
-	# 	)
-
-	# 	Main.@infiltrate
-
-	# 	# Quasi-GOOP: Compute stationarity conditions.
-	# 	prune_zeros = false
-	# 	stationarity = build_and_filter_stationarity!(x, Lagrangian_terms; prune_zeros) # Lagrangian_terms updated in_place
-	# 	stationarity = Symbolics.expand.(stationarity)
-	# 	F_ii[player_idx].stationarity[priority_level] = copy(Lagrangian_terms)
-	# 	empty!(Lagrangian_terms)
-
-	# 	Main.@infiltrate
-
-	# 	# Compare stationarity
-	# 	match = all(isequal.(stationarity, original_stationarity))
-	# 	println("Check stationarity at level $priority_level = $match")
-
-	# 	## Prepare for next priority level ##
-	# 	Main.@infiltrate
-
-	# 	# Original GOOP: Concatenate stationary constraint into equality constraints.
-	# 	append!(private_inner_equality_constraints[player_idx], stationarity)
-
-	# 	# Quasi-GOOP: equalities and stationarity become equality constraints for next priority level. 
-	# 	for kk in 1:length(F_ii[player_idx].equalities[priority_level])
-	# 		let
-	# 			expr = F_ii[player_idx].equalities[priority_level][kk].expr
-	# 			push!(Lagrangian_terms, Lagrangian_term(expr, nothing, 0))
-	# 		end
-	# 	end
-	# 	for kk in 1:length(F_ii[player_idx].stationarity[priority_level])
-	# 		let
-	# 			expr = F_ii[player_idx].stationarity[priority_level][kk].expr
-	# 			deriv_order =
-	# 				F_ii[player_idx].stationarity[priority_level][kk].deriv_order
-	# 			push!(Lagrangian_terms, Lagrangian_term(expr, nothing, deriv_order))
-	# 		end
-	# 	end
-	# 	append!(F_ii[player_idx].equalities[priority_level+1], Lagrangian_terms)
-	# 	empty!(Lagrangian_terms)
-
-	# 	Main.@infiltrate
-
-	# 	# Original GOOP: Complementarity constraints from inequality constraints.
-	# 	complementarity = -h_ii .* λ
-
-	# 	# Original GOOP: Dual nonnegativity constraints
-	# 	dual_nonnegativity = λ
-
-	# 	# Original GOOP: Concatenate dual_nonnegativity constraints into inequality constraints.
-	# 	append!(private_inner_inequality_constraints[player_idx], dual_nonnegativity)
-
-	# 	# Quasi-GOOP: inequalities and dual nonnegativity constraints become inequality constraints for next priority level.
-	# 	for kk in 1:length(F_ii[player_idx].inequalities[priority_level])
-	# 		let
-	# 			expr = F_ii[player_idx].inequalities[priority_level][kk].expr
-	# 			push!(Lagrangian_terms, Lagrangian_term(expr, nothing, 0))
-	# 		end
-	# 	end
-	# 	push!(Lagrangian_terms, Lagrangian_term(dual_nonnegativity, nothing, 0))
-	# 	append!(F_ii[player_idx].inequalities[priority_level+1], Lagrangian_terms)
-	# 	empty!(Lagrangian_terms)
-
-	# 	Main.@infiltrate
-
-	# 	# Update dual dimension and primal dimension # TODO: Differentiate between original GOOP and Quasi-GOOP
-	# 	dual_dimension =
-	# 		inequality_dimension_ii[player_idx] + equality_dimension_ii[player_idx]
-	# 	primal_dimension_ii += dual_dimension
-	# 	append!(private_primals[player_idx], dual_dimension) #[30,4,68,4,151]
-
-	# 	# Update inequality_dimension_ii, start_idx and equality_dimension_ii
-	# 	if priority_level == last(ordered_priority_levels) ||
-	# 	   isnothing(is_prioritized_constraint[player_idx][priority_level+1])
-	# 		relaxed_complementarity =
-	# 			sum(complementarity) .+ θ[augmented_parameter_dimension]
-	# 		append!(
-	# 			private_inner_inequality_constraints[player_idx],
-	# 			relaxed_complementarity,
-	# 		)
-
-	# 		inequality_dimension_ii[player_idx] += length(dual_nonnegativity) + 1 # +1 for relaxed complementarity
-
-	# 		# Quasi GOOP: Add complementarity constraints to inequality constraints
-	# 		push!(Lagrangian_terms, Lagrangian_term(Symbolics.Num[relaxed_complementarity], nothing, 0))
-	# 		append!(F_ii[player_idx].inequalities[priority_level+1], Lagrangian_terms)
-	# 		empty!(Lagrangian_terms)
-
-	# 		start_idx += primal_dimension_ii
-	# 	else
-	# 		append!(
-	# 			private_inner_inequality_constraints[player_idx],
-	# 			sum(complementarity) .+ θ[augmented_parameter_dimension],
-	# 		)
-
-	# 		inequality_dimension_ii[player_idx] += length(dual_nonnegativity) + 1
-
-	# 		# Quasi GOOP: Add complementarity constraints to inequality constraints
-	# 		push!(Lagrangian_terms, Lagrangian_term(Symbolics.Num[sum(complementarity) .+ θ[augmented_parameter_dimension]], nothing, 0))
-	# 		append!(F_ii[player_idx].inequalities[priority_level+1], Lagrangian_terms)
-	# 		empty!(Lagrangian_terms)
-	# 	end
-	# 	equality_dimension_ii[player_idx] += length(stationarity)
-
-	# 	# Keep complementarity constraints for convergence evaluation.
-	# 	append!(inner_complementarity_constraints, complementarity)
-
-	# 	Main.@infiltrate
-	# end
 
 	function set_up_level(priority_level, player_idx)
 		########## 1. PRIORITY & DIMENSION SETUP ##########
@@ -401,7 +156,8 @@ function ParametricOrderedPreferencesMPCCGame(;
 		########## 4. PRIORITIZED OBJECTIVE OR CONSTRAINTS ##########
 		if is_pc
 			slacks = last(z[Block(1)], slack_dim)
-			objective_ii = 15sum(slacks)
+			objective_ii = sum(slacks)
+			println("Objective at level $priority_level for player $player_idx = ", objective_ii)
 
 			aux_constraints = prioritized_preferences[player_idx][priority_level](x, θ) .+ slacks
 			append!(private_inner_inequality_constraints[player_idx], vcat(aux_constraints, slacks))
@@ -414,22 +170,29 @@ function ParametricOrderedPreferencesMPCCGame(;
 			objective_ii = prioritized_preferences[player_idx][priority_level](x, θ)[1]
 		end
 
+		# Main.@infiltrate
+
 		########## 5. ORIGINAL GOOP: Lagrangian & Stationarity ##########
 		h_ii = isempty(private_inner_inequality_constraints[player_idx]) ? Symbolics.Num[] : private_inner_inequality_constraints[player_idx]
 		g_ii = isempty(private_inner_equality_constraints[player_idx]) ? Symbolics.Num[] : private_inner_equality_constraints[player_idx]
 		L = objective_ii - λ' * h_ii - μ' * g_ii
 		original_stationarity = Symbolics.expand.(Symbolics.gradient(L, x))
 
+		# Main.@infiltrate
+
 		########## 6. QUASI-GOOP: Structured Lagrangian ##########
 		push!(Lagrangian_terms, Lagrangian_term(objective_ii, nothing, 0))
 		add_lagrangian_terms!(Lagrangian_terms, F_ii[player_idx].inequalities[priority_level], λ, priority_level, :inequalities)
 		add_lagrangian_terms!(Lagrangian_terms, F_ii[player_idx].equalities[priority_level], μ, priority_level, :equalities)
 
-		stationarity = Symbolics.expand.(build_and_filter_stationarity!(x, Lagrangian_terms; prune_zeros = false))
+		stationarity = Symbolics.expand.(build_and_filter_stationarity!(x, Lagrangian_terms; prune_zeros = true))
 		F_ii[player_idx].stationarity[priority_level] = copy(Lagrangian_terms)
 		empty!(Lagrangian_terms)
 
-		println("Check stationarity at level $priority_level = ", all(isequal.(stationarity, original_stationarity)))
+		# Main.@infiltrate
+		length(stationarity) == length(original_stationarity) ?
+			println("Check stationarity at level $priority_level = ", all(isequal.(stationarity, original_stationarity))) :
+				println("Stationarity at level $priority_level does not match original GOOP stationarity.")
 
 		########## 7. PROPAGATE EQUALITIES ##########
 		append!(private_inner_equality_constraints[player_idx], stationarity)
@@ -454,7 +217,13 @@ function ParametricOrderedPreferencesMPCCGame(;
 		append!(F_ii[player_idx].inequalities[priority_level+1], Lagrangian_terms)
 		empty!(Lagrangian_terms)
 
-		########## 9. FINAL COMPLEMENTARITY (LAST LEVEL CHECK) ##########
+		########## Update dual dimension and primal dimension ##########
+		# TODO: Differentiate between original GOOP and Quasi-GOOP
+		dual_dimension = inequality_dimension_ii[player_idx] + equality_dimension_ii[player_idx]
+		primal_dimension_ii += dual_dimension
+		append!(private_primals[player_idx], dual_dimension) #[30,4,68,4,151]
+
+		########## 10. FINAL COMPLEMENTARITY (LAST LEVEL CHECK) ##########
 		is_last_level = priority_level == last(ordered_priority_levels) || isnothing(is_prioritized_constraint[player_idx][priority_level+1])
 		relaxed_comp = sum(complementarity) .+ θ[augmented_parameter_dimension]
 
@@ -468,10 +237,10 @@ function ParametricOrderedPreferencesMPCCGame(;
 			start_idx += primal_dimension_ii
 		end
 
-		equality_dimension_ii[player_idx] += length(stationarity)
+		equality_dimension_ii[player_idx] += length(stationarity) # stationarity here to use quasi GOOP
 		append!(inner_complementarity_constraints, complementarity)
-	end
 
+	end
 
 	# Build KKT system for each priority level for each player's own problem
 	for player in 1:num_players
@@ -483,12 +252,26 @@ function ParametricOrderedPreferencesMPCCGame(;
 		end
 	end
 
-	Main.@infiltrate
-
-	# Check quasi GOOP against original GOOP
-	
+	# Main.@infiltrate
 
 	# Use quasi GOOP to build the parametric game
+	use_quasi = true
+	if use_quasi
+		for player in 1:num_players
+			# Equality constraints: group and sum
+			eq_sum = group_and_sum_exprs_by_length(F_ii[player].equalities[end])
+
+			# Inequality constraints: flatten
+			ineq_flat = vcat((term.expr for term in F_ii[player].inequalities[end])...)
+
+			# Sanity checks
+			@assert all(isequal.(eq_sum, private_inner_equality_constraints[player]))
+			@assert all(isequal.(ineq_flat, private_inner_inequality_constraints[player]))
+		end
+	end
+	# Main.@infiltrate
+
+
 
 	# Set up for parametric game
 	primal_dimensions = map(x->sum(x), private_primals)
@@ -562,7 +345,7 @@ function ParametricOrderedPreferencesMPCCGame(;
 
 	# Build F = [∇ₓLs, gs, hs, g̃, h̃].
 	∇ₓLs = map(zip(Ls, blocks(x))) do (L, xᵢ)
-		Symbolics.gradient(L, xᵢ)
+		Symbolics.gradient(L, xᵢ) # TODO: drop terms here too?
 	end
 	F_symbolic = [reduce(vcat, ∇ₓLs), reduce(vcat, gs), reduce(vcat, hs), g̃, h̃]
 
@@ -583,7 +366,7 @@ function ParametricOrderedPreferencesMPCCGame(;
 	]
 
 	# Build parametric (or PrimalDual) MCP.
-	if solver == "PATH" # TODO Eric: this is ugly as shit, we should do the same than we did w/ run()
+	if solver == "PATH"
 		parametric_mcp = ParametricMCP(
 			reduce(vcat, F_symbolic),
 			z̃,
@@ -908,3 +691,23 @@ function build_and_filter_stationarity!(x, Lagrangian_terms; prune_zeros = true)
 
 	stationarity
 end
+
+
+function group_and_sum_exprs_by_length(terms::Vector{Lagrangian_term})
+	grouped = Dict{Int, Vector{Symbolics.Num}}()
+
+	for term in terms
+		len = length(term.expr)
+		if haskey(grouped, len)
+			grouped[len] .+= term.expr
+		else
+			grouped[len] = copy(term.expr)
+		end
+	end
+
+	# Expand each grouped sum and vertically concatenate into a single vector
+	return vcat([Symbolics.expand.(grouped[k]) for k in sort(collect(keys(grouped)))]...)
+end
+
+
+
