@@ -191,8 +191,8 @@ function ParametricOrderedPreferencesMPCCGame(;
 
 		# Main.@infiltrate
 		length(stationarity) == length(original_stationarity) ?
-			println("Check stationarity at level $priority_level = ", all(isequal.(stationarity, original_stationarity))) :
-				println("Stationarity at level $priority_level does not match original GOOP stationarity.")
+		println("Check stationarity at level $priority_level = ", all(isequal.(stationarity, original_stationarity))) :
+		println("Stationarity at level $priority_level does not match original GOOP stationarity.")
 
 		########## 7. PROPAGATE EQUALITIES ##########
 		append!(private_inner_equality_constraints[player_idx], stationarity)
@@ -269,9 +269,6 @@ function ParametricOrderedPreferencesMPCCGame(;
 			@assert all(isequal.(ineq_flat, private_inner_inequality_constraints[player]))
 		end
 	end
-	# Main.@infiltrate
-
-
 
 	# Set up for parametric game
 	primal_dimensions = map(x->sum(x), private_primals)
@@ -338,6 +335,13 @@ function ParametricOrderedPreferencesMPCCGame(;
 	g̃ = shared_equality_constraints(trajectory_x, θ)
 	h̃ = shared_inequality_constraints(trajectory_x, θ)
 
+	if length(g̃) == 1 && g̃[1] == 0 && eltype(g̃) == Int
+		g̃ = Symbolics.Num[0]
+	end
+	if length(h̃) == 1 && h̃[1] == 0 && eltype(h̃) == Int
+		h̃ = Symbolics.Num[0]
+	end
+
 	# Build Lagrangian for all players.
 	Ls = map(zip(1:num_players, fs, gs, hs)) do (i, f, g, h)
 		f - μ[Block(i)]' * g - λ[Block(i)]' * h - μₛ' * g̃ - λₛ' * h̃
@@ -345,13 +349,27 @@ function ParametricOrderedPreferencesMPCCGame(;
 
 	# Build F = [∇ₓLs, gs, hs, g̃, h̃].
 	∇ₓLs = map(zip(Ls, blocks(x))) do (L, xᵢ)
-		Symbolics.gradient(L, xᵢ) # TODO: drop terms here too?
+		Symbolics.gradient(L, xᵢ)
 	end
-	F_symbolic = [reduce(vcat, ∇ₓLs), reduce(vcat, gs), reduce(vcat, hs), g̃, h̃]
+
+	# Build Lagrangian for quasi GOOP
+	priority_level = length(ordered_priority_levels) + 1
+	quasi_∇ₓLs = map(1:num_players) do i
+		empty!(Lagrangian_terms)
+		push!(Lagrangian_terms, Lagrangian_term(fs[i], nothing, 0))
+		add_lagrangian_terms!(Lagrangian_terms, F_ii[i].equalities[priority_level], μ[Block(i)], priority_level, :equalities)
+		add_lagrangian_terms!(Lagrangian_terms, F_ii[i].inequalities[priority_level], λ[Block(i)], priority_level, :inequalities)
+		push!(Lagrangian_terms, Lagrangian_term(g̃, μₛ, 0))
+		push!(Lagrangian_terms, Lagrangian_term(h̃, λₛ, 0))
+
+		Symbolics.expand.(build_and_filter_stationarity!(x[Block(i)], Lagrangian_terms; prune_zeros = false))
+	end
+
+	F_symbolic = [reduce(vcat, quasi_∇ₓLs), reduce(vcat, gs), reduce(vcat, hs), g̃, h̃]
 
 	# Set lower and upper bounds for z.
 	z̲ = [
-		fill(-Inf, sum(primal_dimensions))
+		fill(-Inf, sum(primal_dimensions)) #length(F_symbolic[1])
 		fill(-Inf, sum(equality_dimensions))
 		fill(0, sum(inequality_dimensions))
 		fill(-Inf, shared_equality_dimension)
@@ -364,6 +382,9 @@ function ParametricOrderedPreferencesMPCCGame(;
 		fill(Inf, shared_equality_dimension)
 		fill(Inf, shared_inequality_dimension)
 	]
+	# Main.@infiltrate
+	@info "MiCP total dimension: $(length(z̃))"
+	@info "sum(iszero.(vcat(F_symbolic...))): $(sum(iszero.(vcat(F_symbolic...))))"
 
 	# Build parametric (or PrimalDual) MCP.
 	if solver == "PATH"
@@ -560,6 +581,20 @@ function solve_relaxed_pop_game(
 			vcat(initial_guess, zeros(total_dim(problem) - length(initial_guess)))
 	end
 
+	# warmstart initial_guess slacks TODO: automate this
+	slack_dims = [43:46
+		139:145
+		363:390
+		995:1001
+		1100:1127
+		1402:1405
+	]
+	slack_dims = mapreduce(vcat, slack_dims) do dim
+		collect(dim)
+	end
+	initial_guess[slack_dims] .= 1.0
+
+
 	complementarity_residual = 1.0
 	converged_tolerance = 1e-6
 	PATH_tolerance = 5e-3 #2e-2
@@ -607,13 +642,14 @@ function solve_relaxed_pop_game(
 			break
 		end
 
-		## Update initial_guess
+		# Update initial_guess
 		# initial_guess = zeros(total_dim(problem))
 		# if complementarity_residual < 2.0 * tolerance
-		#     for i in 1:length(problem.objectives)
-		#         initial_guess[first(problem.trajectory_idx[i])] = solution.variables[first(problem.trajectory_idx[i])]
-		#     end
+		# 	for i in 1:length(problem.objectives)
+		# 		initial_guess[first(problem.trajectory_idx[i])] = solution.variables[first(problem.trajectory_idx[i])]
+		# 	end
 		# end
+		initial_guess = solution.variables
 
 		# Begin next iteration
 		ii += 1
@@ -692,7 +728,6 @@ function build_and_filter_stationarity!(x, Lagrangian_terms; prune_zeros = true)
 	stationarity
 end
 
-
 function group_and_sum_exprs_by_length(terms::Vector{Lagrangian_term})
 	grouped = Dict{Int, Vector{Symbolics.Num}}()
 
@@ -709,5 +744,10 @@ function group_and_sum_exprs_by_length(terms::Vector{Lagrangian_term})
 	return vcat([Symbolics.expand.(grouped[k]) for k in sort(collect(keys(grouped)))]...)
 end
 
-
-
+function save_data_to_file(filename::String, data::Vector, priority_level::Int, player_idx::Int)
+	open("$filename.txt", "w") do io
+		for elem in data
+			println(io, elem)
+		end
+	end
+end

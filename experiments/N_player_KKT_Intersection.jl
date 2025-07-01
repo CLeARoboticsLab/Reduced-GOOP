@@ -322,7 +322,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, solver = "PATH")
             println("GOOP could not find a solution...moving on to the next problem")
             return nothing
         else
-            Main.@infiltrate
+            # Main.@infiltrate
             # Choose the solution with best complementarity residual
             min_residual_idx = argmin(residual)
             println("residual: ", residual[min_residual_idx])
