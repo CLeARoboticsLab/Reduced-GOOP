@@ -7,7 +7,8 @@ end
 
 # Overload of Symbolics.gradient for Lagrangian_term
 function Symbolics.gradient(f::Lagrangian_term, x::AbstractVector{<:Symbolics.Num})
-	if f.deriv_order > 1 # 1: drop terms, if 2 or higher: keep terms
+	if f.deriv_order > 1 # 1: drop terms for quasiGOOP
+		# Main.@infiltrate
 		return Lagrangian_term(zero.(x), f.duals, f.deriv_order + 1)
 	end
 
@@ -35,7 +36,7 @@ end
 Constraints_ii(num_levels::Int, num_players::Int) =
 	[Constraints_ii{Lagrangian_term}(num_levels) for _ in 1:num_players]
 
-struct ParametricOrderedPreferencesMPCCGame{T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11}
+struct ParametricOrderedPreferencesMPCCGame{T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12}
 	"Objective functions for all players"
 	objectives::T1
 	"Equality constraints for all players"
@@ -71,6 +72,9 @@ struct ParametricOrderedPreferencesMPCCGame{T1, T2, T3, T4, T5, T6, T7, T8, T9, 
 
 	"Sum of slacks for each level"
 	private_slacks::T11
+
+	"Slack indices for each level"
+	slack_indices::T12
 end
 
 function ParametricOrderedPreferencesMPCCGame(;
@@ -185,11 +189,20 @@ function ParametricOrderedPreferencesMPCCGame(;
 		add_lagrangian_terms!(Lagrangian_terms, F_ii[player_idx].inequalities[priority_level], λ, priority_level, :inequalities)
 		add_lagrangian_terms!(Lagrangian_terms, F_ii[player_idx].equalities[priority_level], μ, priority_level, :equalities)
 
+		quasi_L = Symbolics.Num(Lagrangian_terms[1].expr) # Start with the first term (i.e., objective_ii)
+		for term in Iterators.drop(Lagrangian_terms, 1)
+			quasi_L -= sum(term.expr .* term.duals)
+		end
+		println("Difference between original GOOP and quasi GOOP Lagrangian: ",
+			Symbolics.expand(quasi_L - L))
+
+		# priority_level == 3 && Main.@infiltrate
 		stationarity = Symbolics.expand.(build_and_filter_stationarity!(x, Lagrangian_terms; prune_zeros = true))
 		F_ii[player_idx].stationarity[priority_level] = copy(Lagrangian_terms)
 		empty!(Lagrangian_terms)
 
 		# Main.@infiltrate
+
 		length(stationarity) == length(original_stationarity) ?
 		println("Check stationarity at level $priority_level = ", all(isequal.(stationarity, original_stationarity))) :
 		println("Stationarity at level $priority_level does not match original GOOP stationarity.")
@@ -252,8 +265,6 @@ function ParametricOrderedPreferencesMPCCGame(;
 		end
 	end
 
-	# Main.@infiltrate
-
 	# Use quasi GOOP to build the parametric game
 	use_quasi = true
 	if use_quasi
@@ -269,6 +280,13 @@ function ParametricOrderedPreferencesMPCCGame(;
 			@assert all(isequal.(ineq_flat, private_inner_inequality_constraints[player]))
 		end
 	end
+
+	# Inner slack indices
+    offsets = cumsum([0; map(sum, private_primals[1:(end - 1)])])
+    all_ranges = mapreduce(vcat, enumerate(private_primals)) do (i, v)
+        compute_slack_ranges(v, offsets[i])
+    end
+    slack_indices = mapreduce(r -> collect(r), vcat, all_ranges)
 
 	# Set up for parametric game
 	primal_dimensions = map(x->sum(x), private_primals)
@@ -446,6 +464,7 @@ function ParametricOrderedPreferencesMPCCGame(;
 		exact_complementarity_constraints,
 		trajectory_idx,
 		private_slacks,
+		slack_indices,
 	)
 end
 
@@ -563,7 +582,7 @@ function solve_relaxed_pop_game(
 	κ = 0.1,
 	max_iterations = 10,
 	tolerance = 1e-7,
-	verbose = false,
+	verbose = false, 
 )
 	solutions = []
 	residuals = []
@@ -576,24 +595,12 @@ function solve_relaxed_pop_game(
 	if isnothing(initial_guess)
 		initial_guess = zeros(total_dim(problem))
 	else
-		# warmstart duals as zeros 
-		initial_guess =
-			vcat(initial_guess, zeros(total_dim(problem) - length(initial_guess)))
+		# warmstart duals as zeros
+		initial_guess = vcat(initial_guess, zeros(total_dim(problem) - length(initial_guess)))
 	end
 
-	# warmstart initial_guess slacks TODO: automate this
-	slack_dims = [43:46
-		139:145
-		363:390
-		995:1001
-		1100:1127
-		1402:1405
-	]
-	slack_dims = mapreduce(vcat, slack_dims) do dim
-		collect(dim)
-	end
-	initial_guess[slack_dims] .= 1.0
-
+	# warmstart initial_guess slacks
+	initial_guess[problem.slack_indices] .= 1.0
 
 	complementarity_residual = 1.0
 	converged_tolerance = 1e-6
@@ -723,6 +730,7 @@ function build_and_filter_stationarity!(x, Lagrangian_terms; prune_zeros = true)
 				t.expr = t.expr[mask]
 			end
 		end
+		# stationarity = filter(!iszero, collect(stationarity)) # filter out all zero entries
 	end
 
 	stationarity
@@ -744,7 +752,14 @@ function group_and_sum_exprs_by_length(terms::Vector{Lagrangian_term})
 	return vcat([Symbolics.expand.(grouped[k]) for k in sort(collect(keys(grouped)))]...)
 end
 
-function save_data_to_file(filename::String, data::Vector, priority_level::Int, player_idx::Int)
+function compute_slack_ranges(v, offset::Int = 0)
+	cs = cumsum(v)
+	n_range = (length(cs) - 1) ÷ 2
+
+	[offset+cs[2*i-1]+1:offset+cs[2*i] for i in 1:n_range]
+end
+
+function save_data_to_file(filename::String, data)
 	open("$filename.txt", "w") do io
 		for elem in data
 			println(io, elem)
