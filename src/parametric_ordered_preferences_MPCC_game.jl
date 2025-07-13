@@ -7,8 +7,8 @@ end
 
 # Overload of Symbolics.gradient for Lagrangian_term
 function Symbolics.gradient(f::Lagrangian_term, x::AbstractVector{<:Symbolics.Num})
-	if f.deriv_order > 1 # 1: drop terms for quasiGOOP
-		# Main.@infiltrate
+	if f.deriv_order > 1 # 1: drop terms for quasiGOOP, # ≥2: keep terms for GOOP
+		Main.@infiltrate
 		return Lagrangian_term(zero.(x), f.duals, f.deriv_order + 1)
 	end
 
@@ -193,6 +193,8 @@ function ParametricOrderedPreferencesMPCCGame(;
 		for term in Iterators.drop(Lagrangian_terms, 1)
 			quasi_L -= sum(term.expr .* term.duals)
 		end
+		Main.@infiltrate
+
 		println("Difference between original GOOP and quasi GOOP Lagrangian: ",
 			Symbolics.expand(quasi_L - L))
 
@@ -200,8 +202,6 @@ function ParametricOrderedPreferencesMPCCGame(;
 		stationarity = Symbolics.expand.(build_and_filter_stationarity!(x, Lagrangian_terms; prune_zeros = true))
 		F_ii[player_idx].stationarity[priority_level] = copy(Lagrangian_terms)
 		empty!(Lagrangian_terms)
-
-		# Main.@infiltrate
 
 		length(stationarity) == length(original_stationarity) ?
 		println("Check stationarity at level $priority_level = ", all(isequal.(stationarity, original_stationarity))) :
@@ -282,11 +282,11 @@ function ParametricOrderedPreferencesMPCCGame(;
 	end
 
 	# Inner slack indices
-    offsets = cumsum([0; map(sum, private_primals[1:(end - 1)])])
-    all_ranges = mapreduce(vcat, enumerate(private_primals)) do (i, v)
-        compute_slack_ranges(v, offsets[i])
-    end
-    slack_indices = mapreduce(r -> collect(r), vcat, all_ranges)
+	offsets = cumsum([0; map(sum, private_primals[1:(end-1)])])
+	all_ranges = mapreduce(vcat, enumerate(private_primals)) do (i, v)
+		compute_slack_ranges(v, offsets[i])
+	end
+	slack_indices = mapreduce(r -> collect(r), vcat, all_ranges)
 
 	# Set up for parametric game
 	primal_dimensions = map(x->sum(x), private_primals)
@@ -382,6 +382,9 @@ function ParametricOrderedPreferencesMPCCGame(;
 
 		Symbolics.expand.(build_and_filter_stationarity!(x[Block(i)], Lagrangian_terms; prune_zeros = false))
 	end
+
+	# TODO: compare Lagrangian function for quasi GOOP with the original GOOP
+
 
 	F_symbolic = [reduce(vcat, quasi_∇ₓLs), reduce(vcat, gs), reduce(vcat, hs), g̃, h̃]
 
@@ -485,18 +488,14 @@ function solve(
 	verbose = false,
 	return_primals = true,
 )
-	z0 = if !isnothing(initial_guess)
-		initial_guess
-	else
-		zeros(total_dim(problem))
-	end
-
 	if problem.parametric_mcp isa ParametricMCP
 		z0 = if !isnothing(initial_guess)
 			initial_guess
 		else
 			zeros(total_dim(problem))
 		end
+
+		# Main.@infiltrate
 
 		z, status, info = ParametricMCPs.solve(
 			problem.parametric_mcp,
@@ -534,6 +533,9 @@ function solve(
 		unconstrained_indices = findall(isinf, lower_bounds)
 		constrained_indices = findall(!isinf, lower_bounds)
 
+		# initial_guess[problem.slack_indices] .= 1.0
+		# Main.@infiltrate
+
 		x₀ = initial_guess[unconstrained_indices]
 		# The dual variables must be positive
 		y₀ = clamp.(initial_guess[constrained_indices], 1, Inf)
@@ -548,8 +550,12 @@ function solve(
 				y₀,
 				s₀,
 				verbose = verbose,
+				tol = 1e-4, # 1e-4
 				max_inner_iters = 200, # 20
 				max_outer_iters = 50, # 50
+				tightening_rate = 0.05, # 0.1
+				loosening_rate = 0.25, # 0.5
+				min_stepsize = 5e-5, # 1e-4
 			)
 		z = vcat(x, y, s)
 
@@ -582,7 +588,7 @@ function solve_relaxed_pop_game(
 	κ = 0.1,
 	max_iterations = 10,
 	tolerance = 1e-7,
-	verbose = false, 
+	verbose = false,
 )
 	solutions = []
 	residuals = []
@@ -756,7 +762,7 @@ function compute_slack_ranges(v, offset::Int = 0)
 	cs = cumsum(v)
 	n_range = (length(cs) - 1) ÷ 2
 
-	[offset+cs[2*i-1]+1:offset+cs[2*i] for i in 1:n_range]
+	[(offset+cs[2*i-1]+1):(offset+cs[2*i]) for i in 1:n_range]
 end
 
 function save_data_to_file(filename::String, data)
