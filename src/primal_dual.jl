@@ -1,68 +1,36 @@
-""" Store key elements of the primal-dual KKT system for a MCP composed of
-functions G(.) and H(.) such that
-                             0 = G(x, y; θ)
-                             0 ≤ H(x, y; θ) ⟂ y ≥ 0.
+""" Maintain callable functions to compute the KKT error for a GOOP problem
+and its Jacobian with respect to all the (primal and dual) decision variables.
+Also keeps track of several types of variables (preference slacks, interior
+point slacks, and inequality constraint duals) that must satisfy nonnegativity
+constraints that are not explicitly included in the KKT system.
 
-The primal-dual system arises when we introduce slack variable `s` and set
-                             G(x, y; θ)     = 0
-                             H(x, y; θ) - s = 0
-                             s ⦿ y - ϵ      = 0
-for some ϵ > 0. Define the function `F(x, y, s; θ, ϵ)` to return the left
-hand side of this system of equations.
+The KKT system is parameterized by a vector θ and a scalar ϵ > 0 which
+controls the complementarity relaxation of the interior point scheme.
+
+TODO (@Jingqi/@DongHo): Please flesh this comment out with more of the math,
+or with a pointer to a LaTeX derivation somewhere in this repository.
 """
 
-struct PrimalDualSys{T1,T2}
-    "A callable function that computes F!(val, x, λ; θ, μ) in-place for 'val'"
+struct GOOPKKTSystem{T1,T2,T3,T4,T5}
+    "A callable function that computes F!(val, z; θ, ϵ) in-place for 'val'"
     F!::T1
-    "A callable function that computes ∇F!(val, x, λ; θ, μ) in-place for 'val'"
+    "A callable function that computes ∇F!(val, z; θ, ϵ) in-place for 'val'"
     ∇F_z!::T2
-    "Dimension of unconstrained variable."
-    unconstrained_dimension::Int
-    "Dimension of constrained variable."
-    constrained_dimension::Int
-    "Game dimensions"
-    dims::NamedTuple
+    "Coordinates of z associated to preference slacks"
+    preference_slack_dims::T3
+    "Coordinates of z associated to interior point slacks"
+    interior_point_slack_dims::T4
+    "Coordinates of z associated to inequality constraint duals"
+    inequality_constraint_dual_dims::T5
 end
 
-"Helper function to create a 'PrimalDualSys' object from K_symbolic, z_symbolic and bounds"
-function PrimalDualSys(
-    K_symbolic::Vector{Symbolics.Num},
+function GOOPKKTSystem(
+    F::Vector{Symbolics.Num},
     z_symbolic::Vector{Symbolics.Num},
     θ_symbolic::Vector{Symbolics.Num},
-    lower_bounds::Vector,
-    upper_bounds::Vector,
-    dims::NamedTuple;
-    backend_options = (;),
-)
-    # All upper bounds are Inf, and lower bounds are either -Inf or 0.
-    @assert all(isinf.(upper_bounds)) && all(isinf.(lower_bounds) .|| lower_bounds .== 0)
-
-    unconstrained_indices = findall(isinf, lower_bounds)
-    constrained_indices = findall(!isinf, lower_bounds)
-
-    G_symbolic = K_symbolic[unconstrained_indices]
-    H_symbolic = K_symbolic[constrained_indices]
-    x_symbolic = z_symbolic[unconstrained_indices]
-    y_symbolic = z_symbolic[constrained_indices]
-
-    PrimalDualSys(
-        G_symbolic,
-        H_symbolic,
-        x_symbolic,
-        y_symbolic,
-        θ_symbolic,
-        dims;
-        backend_options,
-    )
-end
-
-function PrimalDualSys(
-    G_symbolic::Vector{Symbolics.Num},
-    H_symbolic::Vector{Symbolics.Num},
-    x_symbolic::Vector{Symbolics.Num},
-    y_symbolic::Vector{Symbolics.Num},
-    θ_symbolic::Vector{Symbolics.Num},
-    dims::NamedTuple;
+    preference_slack_dims,
+    interior_point_slack_dims,
+    inequality_constraint_dual_dims;
     backend_options = (;),
 )
     # F!(val, x, y, s; θ) computes the primal-dual system equation in-place.
@@ -120,5 +88,5 @@ function PrimalDualSys(
         )
     end
 
-    PrimalDualSys(F!, ∇F_z!, length(x_symbolic), length(y_symbolic), dims) # return struct 
+    PrimalDualSys(F!, ∇F_z!, length(x_symbolic), length(y_symbolic), dims) # return struct
 end
