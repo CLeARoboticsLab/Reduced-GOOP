@@ -25,15 +25,23 @@ struct GOOPKKTSystem{T1,T2,T3,T4,T5}
 end
 
 function GOOPKKTSystem(
-    F::Vector{Symbolics.Num},
-    z_symbolic::Vector{Symbolics.Num},
-    θ_symbolic::Vector{Symbolics.Num},
-    ϵ_symbolic::Symbolics.Num,
+    F_symbolic::Vector{T},
+    z_symbolic::Vector{T},
+    θ_symbolic::Vector{T},
     preference_slack_dims,
     interior_point_slack_dims,
     inequality_constraint_dual_dims;
     backend_options = (;),
-)
+) where {T<:Union{SymbolicTracingUtils.FD.Node,SymbolicTracingUtils.Symbolics.Num}}
+    if T == SymbolicTracingUtils.FD.Node
+        backend = SymbolicTracingUtils.FastDifferentiationBackend()
+    else
+        @assert T === SymbolicTracingUtils.Symbolics.Num
+        backend = SymbolicTracingUtils.SymbolicsBackend()
+    end
+
+    ϵ_symbolic = only(SymbolicTracingUtils.make_variables(backend, :ϵ, 1))
+
     F! = let
         _F! = SymbolicTracingUtils.build_function(
             F_symbolic,
