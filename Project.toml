@@ -24,7 +24,7 @@ TrajectoryGamesExamples = "ff3fa34c-8d8f-519c-b5bc-31760c52507a"
 
 [compat]
 BenchmarkTools = "1.6.0"
-BlockArrays = "0.16.43"
+BlockArrays = "0.16.43, 1"
 CairoMakie = "0.12.18"
 GLMakie = "0.10.18"
 JLD2 = "0.5.13"
