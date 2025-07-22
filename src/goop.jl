@@ -93,7 +93,7 @@ function generate_slacked_kkt_system(
             preference_slack = only(
                 SymbolicTracingUtils.make_variables(
                     backend,
-                    :s($player)($length(goop.preferences[player])),
+                    Symbol("s_$(player)_$(length(goop.preferences[player]))"),
                     1,
                 ),
             )
@@ -101,7 +101,7 @@ function generate_slacked_kkt_system(
 
             ip_slack = SymbolicTracingUtils.make_variables(
                 backend,
-                :σ($player)($length(goop.preferences[player])),
+                Symbol("σ_$(player)_$(length(goop.preferences[player]))"),
                 1 + goop.shared_inequality_dims,
             )
             push!(σ, ip_slack)
@@ -109,7 +109,7 @@ function generate_slacked_kkt_system(
             dual = only(
                 SymbolicTracingUtils.make_variables(
                     backend,
-                    :μ($player)($length(goop.preferences[player])),
+                    Symbol("μ_$(player)_$(length(goop.preferences[player]))"),
                     1,
                 ),
             )
@@ -136,7 +136,7 @@ function generate_slacked_kkt_system(
             # Highest priority is a cost.
             ip_slack = SymbolicTracingUtils.make_variables(
                 backend,
-                :σ($player)($length(goop.preferences[player])),
+                Symbol("σ_$(player)_$(length(goop.preferences[player]))"),
                 goop.shared_inequality_dims,
             )
             push!(σ, ip_slack)
@@ -167,13 +167,13 @@ function generate_slacked_kkt_system(
         )
     end
 
-
-    GOOPKKTSystem(
-        F,
-        z,
-        θ,
-        preference_slack_dims,
-        interior_point_slack_dims,
-        inequality_constraint_dual_dims,
-    )
+    # TODO!
+    # GOOPKKTSystem(
+    #     F,
+    #     z,
+    #     θ,
+    #     preference_slack_dims,
+    #     interior_point_slack_dims,
+    #     inequality_constraint_dual_dims,
+    # )
 end
