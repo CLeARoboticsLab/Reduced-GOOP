@@ -8,7 +8,7 @@ end
 # Overload of Symbolics.gradient for Lagrangian_term
 function Symbolics.gradient(f::Lagrangian_term, x::AbstractVector{<:Symbolics.Num})
 	if f.deriv_order > 1 # 1: drop terms for quasiGOOP, # ≥2: keep terms for GOOP
-		Main.@infiltrate
+		# Main.@infiltrate
 		return Lagrangian_term(zero.(x), f.duals, f.deriv_order + 1)
 	end
 
@@ -170,13 +170,13 @@ function ParametricOrderedPreferencesMPCCGame(;
 			push!(dims, ψ_dim_ii)
 		end
 
-		Main.@infiltrate
+		# Main.@infiltrate
 
 
 		total_dim = sum(dims)
 
 		if priority_level == 1
-			Main.@infiltrate
+			# Main.@infiltrate
 			z̃_sym = Symbolics.@variables z̃[start_idx:(start_idx+total_dim-1)] # TODO: for priority_level > 1
 			z̃ = Symbolics.scalarize(only(z̃_sym))
 			z = BlockArray(z̃, dims)
@@ -187,7 +187,7 @@ function ParametricOrderedPreferencesMPCCGame(;
 			λ = z[Block(4)]
 			μ = z[Block(5)]
 		else
-			Main.@infiltrate
+			# Main.@infiltrate
 			x̃_sym = Symbolics.@variables z̃[1:primal_dimensions[player_idx]]
 			x = Symbolics.scalarize(only(x̃_sym))
 
@@ -207,7 +207,7 @@ function ParametricOrderedPreferencesMPCCGame(;
 		θ̃ = Symbolics.scalarize(only(Symbolics.@variables(θ̃[1:augmented_parameter_dimension])))
 		θ = BlockArray(θ̃, vcat(parameter_dimensions, [1]))
 
-		Main.@infiltrate
+		# Main.@infiltrate
 
 		if priority_level == first(ordered_priority_levels) || isempty(private_inner_equality_constraints)
 			push!(private_inner_equality_constraints, equality_constraints[player_idx](x, θ))
@@ -229,7 +229,7 @@ function ParametricOrderedPreferencesMPCCGame(;
 			objective_ii = prioritized_preferences[player_idx][priority_level](x, θ)[1]
 		end
 
-		Main.@infiltrate
+		# Main.@infiltrate
 
 		########## 4. INITIAL CONSTRAINTS ##########
 		ϵ = θ[augmented_parameter_dimension]
@@ -237,7 +237,7 @@ function ParametricOrderedPreferencesMPCCGame(;
 			append!(G_ii, private_inner_equality_constraints[player_idx])
 			append!(H_ii, private_inner_inequality_constraints[player_idx])
 		end
-		Main.@infiltrate
+		# Main.@infiltrate
 
 		########## 5. ORIGINAL GOOP: Lagrangian & Stationarity ##########
 		h_ii = isempty(H_ii) ? Symbolics.Num[] : H_ii
@@ -252,7 +252,7 @@ function ParametricOrderedPreferencesMPCCGame(;
 		end
 		append!(G_ii, stationarity)
 
-		Main.@infiltrate
+		# Main.@infiltrate
 
 		########## Update dual dimension and primal dimension ##########
 		# dual_dimension = inequality_dimension_ii[player_idx] + equality_dimension_ii[player_idx]
@@ -269,7 +269,7 @@ function ParametricOrderedPreferencesMPCCGame(;
 		# Form the KKT system
 
 		if priority_level > 1
-			Main.@infiltrate
+			# Main.@infiltrate
 			# TODO
 		end
 		K_ii = [G_ii; H_ii .- s̃; s̃ .* λ .- ϵ]
@@ -279,7 +279,7 @@ function ParametricOrderedPreferencesMPCCGame(;
 
 
 
-		Main.@infiltrate
+		# Main.@infiltrate
 
 		start_idx = start_idx + total_dim
 
@@ -309,7 +309,7 @@ function ParametricOrderedPreferencesMPCCGame(;
 		end
 	end
 
-	Main.@infiltrate
+	# Main.@infiltrate
 
 	# Use quasi GOOP to build the parametric game
 	# use_quasi = true

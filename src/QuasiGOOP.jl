@@ -17,6 +17,9 @@ using JLD2, BenchmarkTools
 include("parametric_ordered_preferences_MPCC_game.jl") # TODO: change file name to reflect quasi goop
 export ParametricOrderedPreferencesMPCCGame, solve_relaxed_pop_game, total_dim
 
+include("parametric_optimization_problem.jl")
+export ParametricOptimizationProblem, solve, total_dim
+
 # include("primal_dual.jl")
 # include("quasi_goop.jl")
 # include("solver.jl")
