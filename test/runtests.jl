@@ -2,6 +2,7 @@ using Test: @testset, @test
 
 using QuasiGOOP
 using ParametricMCPs: ParametricMCPs
+using LinearAlgebra: I, norm
 
 
 @testset "Bilevel Equality-Constrained Quadratic Program" begin
