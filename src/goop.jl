@@ -73,99 +73,105 @@ function generate_slacked_kkt_system(
     function construct_player_kkt_conditions(
         preferences,
         is_prioritized_constraint;
-        inner_kkt_conditions = nothing,
+        inner_kkt_system = nothing,
     )
-        # TODO! Incorporate below as base case.
+        @assert length(preferences) == length(is_prioritized_constraint)
+
+        # Base case is the inner-most layer.
+        if length(preferences) == 1
+            @assert isnothing(inner_kkt_system)
+
+            h = only(preferences)(x, θ)
+            f =
+                isnothing(goop.shared_equality_constraint) ? nothing :
+                goop.shared_equality_constraint(x, θ)
+            g =
+                isnothing(goop.shared_inequality_constraint) ? nothing :
+                goop.shared_inequality_constraint(x, θ)
+
+            if only(is_prioritized_constraint)
+                # Highest priority is a constraint.
+                preference_slack = only(
+                    SymbolicTracingUtils.make_variables(
+                        backend,
+                        Symbol("s_$(player)_$(length(goop.preferences[player]))"),
+                        1,
+                    ),
+                )
+                push!(s, preference_slack)
+
+                ip_slack = SymbolicTracingUtils.make_variables(
+                    backend,
+                    Symbol("σ_$(player)_$(length(goop.preferences[player]))"),
+                    1 + goop.shared_inequality_dims,
+                )
+                push!(σ, ip_slack)
+
+                dual = only(
+                    SymbolicTracingUtils.make_variables(
+                        backend,
+                        Symbol("μ_$(player)_$(length(goop.preferences[player]))"),
+                        1,
+                    ),
+                )
+                push!(μ, dual)
+
+                L =
+                    preference_slack - dual * (h - preference_slack) -
+                    (isnothing(f) ? 0 : λ̃' * f) - (isnothing(g) ? 0 : μ̃' * g)
+                ∇L = Symbolics.gradient(vcat(x[Block(player)], preference_slack))
+                F = Vector{symbolic_type}(
+                    filter!(
+                        !isnothing,
+                        [
+                            ∇L
+                            h - preference_slack - first(ip_slack)
+                            f
+                            (isnothing(g) ? g : g - ip_slack[2:end])
+                        ],
+                    ),
+                )
+
+                return F
+            else
+                # Highest priority is a cost.
+                ip_slack = SymbolicTracingUtils.make_variables(
+                    backend,
+                    Symbol("σ_$(player)_$(length(goop.preferences[player]))"),
+                    goop.shared_inequality_dims,
+                )
+                push!(σ, ip_slack)
+
+                L = h - (isnothing(f) ? 0 : λ̃' * f) - (isnothing(g) ? 0 : μ̃' * g)
+                ∇L = Symbolics.gradient(x[Block(player)])
+                F = Vector{symbolic_type}(
+                    filter!(
+                        !isnothing,
+                        [
+                            ∇L
+                            f
+                            (isnothing(g) ? g : g - ip_slack)
+                        ],
+                    ),
+                )
+
+                return F
+            end
+        end
+
+
     end
 
     # Handle the inner-most layer separately for each player.
-    inner_kkt_systems = map(1:(goop.num_players)) do player
-        h = last(goop.preferences[player])(x, θ)
-        f =
-            isnothing(goop.shared_equality_constraint) ? nothing :
-            goop.shared_equality_constraint(x, θ)
-        g =
-            isnothing(goop.shared_inequality_constraint) ? nothing :
-            goop.shared_inequality_constraint(x, θ)
 
-        if last(goop.is_prioritized_constraint[player])
-            # Highest priority is a constraint.
-            preference_slack = only(
-                SymbolicTracingUtils.make_variables(
-                    backend,
-                    Symbol("s_$(player)_$(length(goop.preferences[player]))"),
-                    1,
-                ),
-            )
-            push!(s, preference_slack)
-;2
-            ip_slack = SymbolicTracingUtils.make_variables(
-                backend,
-                Symbol("σ_$(player)_$(length(goop.preferences[player]))"),
-                1 + goop.shared_inequality_dims,
-            )
-            push!(σ, ip_slack)
-
-            dual = only(
-                SymbolicTracingUtils.make_variables(
-                    backend,
-                    Symbol("μ_$(player)_$(length(goop.preferences[player]))"),
-                    1,
-                ),
-            )
-            push!(μ, dual)
-
-            L =
-                preference_slack - dual * (h - preference_slack) -
-                (isnothing(f) ? 0 : λ̃' * f) - (isnothing(g) ? 0 : μ̃' * g)
-            ∇L = Symbolics.gradient(vcat(x[Block(player)], preference_slack))
-            F = Vector{symbolic_type}(
-                filter!(
-                    !isnothing,
-                    [
-                        ∇L
-                        h - preference_slack - first(ip_slack)
-                        f
-                        (isnothing(g) ? g : g - ip_slack[2:end])
-                    ],
-                ),
-            )
-
-            return F
-        else
-            # Highest priority is a cost.
-            ip_slack = SymbolicTracingUtils.make_variables(
-                backend,
-                Symbol("σ_$(player)_$(length(goop.preferences[player]))"),
-                goop.shared_inequality_dims,
-            )
-            push!(σ, ip_slack)
-
-            L = h - (isnothing(f) ? 0 : λ̃' * f) - (isnothing(g) ? 0 : μ̃' * g)
-            ∇L = Symbolics.gradient(x[Block(player)])
-            F = Vector{symbolic_type}(
-                filter!(
-                    !isnothing,
-                    [
-                        ∇L
-                        f
-                        (isnothing(g) ? g : g - ip_slack)
-                    ],
-                ),
-            )
-
-            return F
-        end
-    end
-
-    # Recursively generate the rest of the KKT conditions for each player.
-    F = mapreduce(vcat, 1:(goop.num_players)) do player
-        construct_player_kkt_conditions(
-            goop.preferences[player],
-            goop.is_prioritized_constraint[player];
-            inner_kkt_conditions = nothing,
-        )
-    end
+    # # Recursively generate the rest of the KKT conditions for each player.
+    # F = mapreduce(vcat, 1:(goop.num_players)) do player
+    #     construct_player_kkt_conditions(
+    #         goop.preferences[player],
+    #         goop.is_prioritized_constraint[player];
+    #         inner_kkt_conditions = nothing,
+    #     )
+    # end
 
     # TODO!
     # GOOPKKTSystem(
