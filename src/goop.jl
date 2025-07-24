@@ -98,7 +98,7 @@ function generate_slacked_kkt_system(
                 ),
             )
             push!(s, preference_slack)
-
+;2
             ip_slack = SymbolicTracingUtils.make_variables(
                 backend,
                 Symbol("σ_$(player)_$(length(goop.preferences[player]))"),
@@ -159,7 +159,7 @@ function generate_slacked_kkt_system(
     end
 
     # Recursively generate the rest of the KKT conditions for each player.
-    F = mapreduce(vcat, 1:goop.num_players) do player
+    F = mapreduce(vcat, 1:(goop.num_players)) do player
         construct_player_kkt_conditions(
             goop.preferences[player],
             goop.is_prioritized_constraint[player];
