@@ -73,6 +73,7 @@ function generate_slacked_kkt_system(
     function construct_player_kkt_conditions(
         preferences,
         is_prioritized_constraint;
+        player,
         inner_kkt_system = nothing,
     )
         @assert length(preferences) == length(is_prioritized_constraint)
@@ -119,7 +120,7 @@ function generate_slacked_kkt_system(
                 L =
                     preference_slack - dual * (h - preference_slack) -
                     (isnothing(f) ? 0 : λ̃' * f) - (isnothing(g) ? 0 : μ̃' * g)
-                ∇L = Symbolics.gradient(vcat(x[Block(player)], preference_slack))
+                ∇L = Symbolics.gradient(L, vcat(x[Block(player)], preference_slack))
                 F = Vector{symbolic_type}(
                     filter!(
                         !isnothing,
@@ -143,7 +144,7 @@ function generate_slacked_kkt_system(
                 push!(σ, ip_slack)
 
                 L = h - (isnothing(f) ? 0 : λ̃' * f) - (isnothing(g) ? 0 : μ̃' * g)
-                ∇L = Symbolics.gradient(x[Block(player)])
+                ∇L = Symbolics.gradient(L, x[Block(player)])
                 F = Vector{symbolic_type}(
                     filter!(
                         !isnothing,
@@ -158,8 +159,6 @@ function generate_slacked_kkt_system(
                 return F
             end
         end
-
-
     end
 
     # Handle the inner-most layer separately for each player.
