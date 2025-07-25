@@ -243,15 +243,16 @@ function generate_slacked_kkt_system(
         construct_player_kkt_conditions(
             goop.preferences[player],
             goop.is_prioritized_constraint[player];
-            player
+            player,
         )
     end
 
     # Pack all variables together.
     z = vcat(x, s, λ̃, μ̃, σ, μ, ψ)
-    preference_slack_dims = nothing # TODO!
-    interior_point_slack_dims = nothing # TODO!
-    inequality_constraint_dual_dims = nothing # TODO!
+    idx = blockedrange(length.([x, s, λ̃, μ̃, σ, μ, ψ]))
+    preference_slack_dims = idx[Block(2)]
+    interior_point_slack_dims = idx[Block(5)]
+    inequality_constraint_dual_dims = vcat(idx[Block(4)], idx[Block(6)])
 
     GOOPKKTSystem(
         F,
