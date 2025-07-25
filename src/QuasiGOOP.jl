@@ -5,6 +5,7 @@ using SymbolicTracingUtils: SymbolicTracingUtils
 using Symbolics: Symbolics
 using BlockArrays: BlockArrays, BlockArray, Block, blocks, blocksizes
 using SparseArrays: SparseArrays
+using InvertedIndices: Not
 using LinearAlgebra: LinearAlgebra, I, norm, eigvals
 using LinearSolve: LinearSolve
 using SciMLBase: SciMLBase
