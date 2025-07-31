@@ -1,0 +1,23 @@
+name: test
+on: [push, pull_request]
+jobs:
+  tests:
+    name: test
+    runs-on: ${{ matrix.os }}
+    env:
+      PATH_LICENSE_STRING: "2830898829&Courtesy&&&USR&45321&5_1_2021&1000&PATH&GEN&31_12_2025&0_0_0&6000&0_0"
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+        arch:
+          - x64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+      - uses: julia-actions/cache@v2
+      - uses: julia-actions/julia-runtest@v1
+        with:
+          prefix: "xvfb-run"
