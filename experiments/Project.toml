@@ -1,0 +1,9 @@
+[deps]
+BlockArrays = "8e7c35d0-a365-5155-bbbb-fb81a777f24e"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+ParametricMCPs = "9b992ff8-05bb-4ea1-b9d2-5ef72d82f7ad"
+QuasiGOOP = "48e8ddca-bd20-452f-8ba0-e6bfbdc6f25c"
+Symbolics = "0c5d862f-8b57-4792-8d23-62f2024744c7"
+
+[sources]
+QuasiGOOP = {path = ".."}

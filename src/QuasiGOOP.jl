@@ -11,8 +11,11 @@ using LinearSolve: LinearSolve
 using SciMLBase: SciMLBase
 using SymbolicTracingUtils: SymbolicTracingUtils
 using JLD2: JLD2
+using ParametricMCPs
 
 include("goop_kkt_system.jl")
 include("goop.jl")
+
+include("parametric_optimization_problem.jl")
 
 end # module QuasiGOOP

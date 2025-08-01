@@ -1,0 +1,10 @@
+module ExamplesQP
+using QuasiGOOP
+
+using ParametricMCPs
+using LinearAlgebra: I, norm, pinv
+using Symbolics
+using BlockArrays: BlockArrays, BlockArray, Block, blocks, blocksizes
+
+include("trilevel_QP.jl")
+end

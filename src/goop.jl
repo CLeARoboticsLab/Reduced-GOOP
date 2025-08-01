@@ -1,23 +1,23 @@
-Base.@kwdef struct ParametricGOOP
+Base.@kwdef struct ParametricGOOP{T1, T2, T3, T4, T5}
 	"Vector of callable preference functions for each player, called via h(x, θ)."
-	preferences::Vector{Vector{Function}}
+	preferences::Vector{Vector{T1}}
 
 	"Booleans to indicate if each preference is a constraint, i.e. h(x, θ) ≥ 0."
 	is_prioritized_constraint::Vector{Vector{Bool}}
 
 	"Equality and inequality constraints."
-	equality_constraints::Union{Nothing, Function} = nothing
-	inequality_constraints::Union{Nothing, Function} = nothing
+	equality_constraints::T2 = nothing
+	inequality_constraints::T3 = nothing
 
 	"Shared equality and inequality constraints."
-	shared_equality_constraint::Union{Nothing, Function} = nothing
-	shared_inequality_constraint::Union{Nothing, Function} = nothing
+	shared_equality_constraint::T4 = nothing
+	shared_inequality_constraint::T5 = nothing
 
 	"Dimensions for all relevant quantities."
 	primal_dims::Vector{Int}
 	parameter_dims::Int
-	equality_dims::Int = 0
-	inequality_dims::Int = 0
+	equality_dims::Vector{Int}
+	inequality_dims::Vector{Int}
 	shared_equality_dims::Int = 0
 	shared_inequality_dims::Int = 0
 
@@ -36,12 +36,14 @@ function ParametricGOOP(
 	shared_equality_constraint,
 	shared_inequality_constraint,
 )
-	primal_dims = BlockArrays.blocksizes(x)
+	primal_dims = [length(x)] #BlockArrays.blocksizes(x)
 	parameter_dims = length(θ)
-	equality_dims =
-		isnothing(equality_constraints) ? 0 : equality_constraints(x, θ)
-	inequality_dims =
-		isnothing(inequality_constraints) ? 0 : inequality_constraints(x, θ)
+	equality_dims = map(equality_constraints) do f
+		isnothing(f) ? 0 : length(f(x, θ))
+	end
+	inequality_dims = map(inequality_constraints) do g
+		isnothing(g) ? 0 : length(g(x, θ))
+	end
 	shared_equality_dims =
 		isnothing(shared_equality_constraint) ? 0 : shared_equality_constraint(x, θ)
 	shared_inequality_dims =
@@ -69,24 +71,29 @@ function generate_slacked_kkt_system(
 	goop::ParametricGOOP;
 	backend = SymbolicTracingUtils.SymbolicsBackend(),
 )
+
 	# Symbolic variables for all primals, parameters, and duals for shared constraints.
 	x =
 		SymbolicTracingUtils.make_variables(backend, :x, sum(goop.primal_dims)) |>
 		to_blockvector(goop.primal_dims)
 	θ = SymbolicTracingUtils.make_variables(backend, :θ, goop.parameter_dims)
 	λ̃ = SymbolicTracingUtils.make_variables(backend, :λ̃, goop.shared_equality_dims)
-	μ̃ = SymbolicTracingUtils.make_variables(backend, :μ̃, goop.shared_inequality_dims)
+	γ̃ = SymbolicTracingUtils.make_variables(backend, :γ̃, goop.shared_inequality_dims)
 	symbolic_type = eltype(x)
 
 	# Keep track of all the preference (s) and interior point (σ) slacks we create.
 	s = []
 	σ = []
 
-	# Keep track of all inequality constraint duals (μ) that we create.
-	μ = []
+	# Keep track of all equality constraint duals (λ̂) that we create.
+	Λ = []
 
-	# Keep track of all lower level policy constraint duals (ψ) that we create.
-	ψ = []
+	# Keep track of all inequality constraint duals (γ̂) that we create.
+	Γ = []
+	# TODO: For debugging sake, keep track of preference slacks, interior point slacks, and inequality constraint duals separately.
+
+	# Keep track of all lower level policy constraint duals (ψ̂) that we create.
+	Ψ = []
 
 	# Recursive function to construct a player's KKT conditions.
 	function construct_player_kkt_conditions(
@@ -97,17 +104,39 @@ function generate_slacked_kkt_system(
 		@assert length(preferences) == length(is_prioritized_constraint)
 		level = 1 + length(goop.preferences[player]) - length(preferences)
 
+		f = isnothing(goop.equality_constraints[player]) ? nothing :
+			goop.equality_constraints[player](x, θ)
+		g = isnothing(goop.inequality_constraints[player]) ? nothing :
+			goop.inequality_constraints[player](x, θ)
+
+		λ = SymbolicTracingUtils.make_variables(
+			backend,
+			Symbol("λ_$(player)_$(level)"),
+			goop.equality_dims[player],
+		)
+		push!(Λ, λ...)
+
+		γ = SymbolicTracingUtils.make_variables(
+			backend,
+			Symbol("γ_$(player)_$(level)"),
+			goop.inequality_dims[player],
+		)
+		push!(Γ, γ...)
+
+		# TODO: Shared constraints do not belong to recursion here
+		# fₛ =
+		# 	isnothing(goop.shared_equality_constraint) ? nothing :
+		# 	goop.shared_equality_constraint(x, θ)
+		# gₛ =
+		# 	isnothing(goop.shared_inequality_constraint) ? nothing :
+		# 	goop.shared_inequality_constraint(x, θ)
+
 		# Base case is the inner-most layer.
 		if length(preferences) == 1
 			h = only(preferences)(x, θ)
-			f =
-				isnothing(goop.shared_equality_constraint) ? nothing :
-				goop.shared_equality_constraint(x, θ)
-			g =
-				isnothing(goop.shared_inequality_constraint) ? nothing :
-				goop.shared_inequality_constraint(x, θ)
 
 			if only(is_prioritized_constraint)
+				@assert false
 				# Highest priority is a constraint.
 				preference_slack = only(
 					SymbolicTracingUtils.make_variables(
@@ -136,7 +165,7 @@ function generate_slacked_kkt_system(
 
 				L =
 					preference_slack - dual * (h - preference_slack) -
-					(isnothing(f) ? 0 : λ̃' * f) - (isnothing(g) ? 0 : μ̃' * g)
+					(isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g)
 				∇L = Symbolics.gradient(L, vcat(x[Block(player)], preference_slack))
 				F = Vector{symbolic_type}(
 					filter!(
@@ -152,15 +181,9 @@ function generate_slacked_kkt_system(
 
 				return (; F, π = ∇L)
 			else
-				# Highest priority is a cost.
-				ip_slack = SymbolicTracingUtils.make_variables(
-					backend,
-					Symbol("σ_$(player)_$(level)"),
-					goop.shared_inequality_dims,
-				)
-				push!(σ, ip_slack)
+				# Highest priority is a cost. 
 
-				L = h - (isnothing(f) ? 0 : λ̃' * f) - (isnothing(g) ? 0 : μ̃' * g)
+				L = h - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g)
 				∇L = Symbolics.gradient(L, x[Block(player)])
 				F = Vector{symbolic_type}(
 					filter!(
@@ -168,7 +191,7 @@ function generate_slacked_kkt_system(
 						[
 							∇L
 							f
-							(isnothing(g) ? g : g - ip_slack)
+							(isnothing(g) ? nothing : g - ip_slack)
 						],
 					),
 				)
@@ -185,14 +208,15 @@ function generate_slacked_kkt_system(
 		)
 		h = first(preferences)(x, θ)
 
-		ψ̃ = SymbolicTracingUtils.make_variables(
+		ψ = SymbolicTracingUtils.make_variables(
 			backend,
 			Symbol("ψ_$(player)_$(level)"),
 			length(π),
 		)
-		push!(ψ, ψ̃...)
+		push!(Ψ, ψ...)
 
 		if first(is_prioritized_constraint)
+			@assert false
 			# Highest priority is a constraint.
 			preference_slack = only(
 				SymbolicTracingUtils.make_variables(
@@ -230,7 +254,7 @@ function generate_slacked_kkt_system(
 			primals = vcat(x[Block(player)], preference_slack)
 			# ∇π_player_primals = Symbolics.jacobian(π, primals)
 			# ∇π_other_primals = Symbolics.jacobian(π, x[Block.(Not(player))])
-			# ∇π_lower_duals = Symbolics.jacobian(π, vcat(λ̃, μ̃, μ, ψ))
+			# ∇π_lower_duals = Symbolics.jacobian(π, vcat(λ̃, γ̃, γ, ψ))
 			# ∇lower_duals_player_primals = -[∇π_other_primals
 
 			∇L = Symbolics.gradient(L̃ - ψ' * π, primals) #- (∇π_primals' + \nabla∇π_lower_duals') * ψ̃
@@ -243,19 +267,19 @@ function generate_slacked_kkt_system(
 			return (; F = F̃, π = ∇L)
 		else
 			# Highest priority is a cost.
-			L = h - ψ̃' * π
+			L = h - ψ' * π - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g)
 			∇L = Symbolics.gradient(L, x[Block(player)])
 			F̃ = [
 				∇L
 				F
 			]
 
-			return (; F = F̃, π = ∇L)
+			return (; F = F̃, π = vcat(∇L, π))
 		end
 	end
 
 	# Recursively generate the rest of the KKT conditions for each player.
-	F = mapreduce(vcat, 1:(goop.num_players)) do player
+	F_π_pair = mapreduce(vcat, 1:(goop.num_players)) do player
 		construct_player_kkt_conditions(
 			goop.preferences[player],
 			goop.is_prioritized_constraint[player];
@@ -263,19 +287,30 @@ function generate_slacked_kkt_system(
 		)
 	end
 
-	# Pack all variables together.
-	z = vcat(x, s, λ̃, μ̃, σ, μ, ψ)
-	idx = blockedrange(length.([x, s, λ̃, μ̃, σ, μ, ψ]))
-	preference_slack_dims = idx[Block(2)]
-	interior_point_slack_dims = idx[Block(5)]
-	inequality_constraint_dual_dims = vcat(idx[Block(4)], idx[Block(6)])
-
-	GOOPKKTSystem(
-		F,
-		z,
-		θ,
-		preference_slack_dims,
-		interior_point_slack_dims,
-		inequality_constraint_dual_dims,
+	# Filter out zeros 
+	F = Vector{symbolic_type}(
+		filter(!iszero, F_π_pair.F),
 	)
+
+	# Pack all variables together.
+	# z = vcat(x, s, λ̃, γ̃, σ, γ, ψ)
+
+	z = Vector{symbolic_type}(
+		vcat(x, Λ, Ψ),
+	)
+	# idx = blockedrange(length.([x, s, λ̃, γ̃, σ, γ, ψ]))
+	# preference_slack_dims = idx[Block(2)]
+	# interior_point_slack_dims = idx[Block(5)]
+	# inequality_constraint_dual_dims = vcat(idx[Block(4)], idx[Block(6)])
+
+	# GOOPKKTSystem(
+	# 	F,
+	# 	z,
+	# 	θ,
+	# 	preference_slack_dims,
+	# 	interior_point_slack_dims,
+	# 	inequality_constraint_dual_dims,
+	# )
+
+    (; F, z, θ)
 end

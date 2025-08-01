@@ -1,5 +1,7 @@
 using QuasiGOOP
 
+using ParametricMCPs: ParametricMCPs
+
 using LinearAlgebra: I, norm, pinv
 
 using Symbolics
@@ -45,7 +47,7 @@ h(x, θ) = []
 dummy_primals = zeros(n + m + n + m)
 dummy_parameters = [0.0]
 
-problem = ParametricOptimizationProblem(;
+problem = QuasiGOOP.ParametricOptimizationProblem(;
 	objective = f,
 	equality_constraint = g,
 	inequality_constraint = h,
@@ -55,7 +57,7 @@ problem = ParametricOptimizationProblem(;
 	inequality_dimension = 0,
 )
 
-(; primals, variables, status, info) = solve(problem, [0])
+(; primals, variables, status, info) = QuasiGOOP.solve(problem, [0])
 @show status
 println("Primal solution: $primals")
 println("Variables: $variables")
@@ -130,19 +132,62 @@ dummy_parameters = [0.0]
 # append!(equality_constraints, π_2) # π₂(x,y)
 # #TODO μ₂
 
-quasi_problem = ParametricOptimizationProblem(;
-	objective = new_f,
-	equality_constraint = new_g,
-	inequality_constraint = h,
-	parameter_dimension = 1,
-	primal_dimension = length(dummy_primals),
-	equality_dimension = length(new_g(dummy_primals, dummy_parameters)),
-	inequality_dimension = 0,
+J₁(x, θ) = 0.5x[1:n]'*Q₁*x[1:n] + c₁'*x[1:n]
+J₂(x, θ) = 0.5x[1:n]'*Q₂*x[1:n] + c₂'*x[1:n]
+J₃(x, θ) = 0.5x[1:n]'*Q₃*x[1:n] + c₃'*x[1:n]
+g(x, θ) = A₃*x[1:n] .- b₃
+
+x = zeros(n) #zeros(n+2n+m+n+m+m)
+θ = 0.0
+
+
+GOOP_trial1 = QuasiGOOP.ParametricGOOP(
+	x,
+	θ;
+	preferences = [[J₁, J₂, J₃]],
+	is_prioritized_constraint = [[false, false, false]],
+	equality_constraints = [g],
+	inequality_constraints = [nothing],
+	shared_equality_constraint = nothing,
+	shared_inequality_constraint = nothing,
 )
 
-(; primals, variables, status, info) = solve(quasi_problem, [0])
+(; F, z, θ) = QuasiGOOP.generate_slacked_kkt_system(GOOP_trial1)
+F = vcat(F, zeros(length(z) - length(F))) # TODO: (DH) cross-check with David
+z̲ = fill(-Inf, length(z))
+z̅ = fill(Inf, length(z))
+parameter_value = zeros(length(θ))
+
+parametric_mcp = ParametricMCPs.ParametricMCP(F, z, θ, z̲, z̅; compute_sensitivities = false)
+z_sol, status, info = ParametricMCPs.solve(
+	parametric_mcp,
+	parameter_value;
+	initial_guess = zeros(length(z)),
+	verbose = false,
+	cumulative_iteration_limit = 100000,
+	proximal_perturbation = 1e-2,
+	use_basics = true,
+	use_start = true,
+)
 @show status
-println("v2 Primal solution: $primals")
-println("v2 Variables: $variables")
-println("v2 Objective: $(f(primals, 0))")
-println("# Primals: $(length(primals))")
+println("v2 Primal solution: $(z_sol[1:n])")
+println("v2 Variables: $(z_sol)")
+println("v2 Objective: $(f(z_sol[1:n], 0))")
+
+
+# quasi_problem = ParametricOptimizationProblem(;
+# 	objective = new_f,
+# 	equality_constraint = F,
+# 	inequality_constraint = h,
+# 	parameter_dimension = 1,
+# 	primal_dimension = length(dummy_primals),
+# 	equality_dimension = length(new_g(dummy_primals, dummy_parameters)),
+# 	inequality_dimension = 0,
+# )
+
+# (; primals, variables, status, info) = solve(quasi_problem, [0])
+# @show status
+# println("v2 Primal solution: $primals")
+# println("v2 Variables: $variables")
+# println("v2 Objective: $(f(primals, 0))")
+# println("# Primals: $(length(primals))")
