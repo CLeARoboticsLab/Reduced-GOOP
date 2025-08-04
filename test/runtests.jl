@@ -3,85 +3,103 @@ using Test: @testset, @test
 using QuasiGOOP
 using ParametricMCPs: ParametricMCPs
 using LinearAlgebra: I, norm
+using Symbolics
+using BlockArrays: BlockArrays, BlockArray, Block, blocks, blocksizes
 
-@testset "Bilevel Equality-Constrained Quadratic Program" begin
-    """
-     Upper-level problem:
-       min_{x, y} (1/2)x' Q₁ x + (1/2)y' R₁ y + x'Sy + c'x
-       subject to:
-    	   A₁x + B₁y = b₁
-    	   y ∈ argmin_{y} (1/2)y' Q₂ y + d' y
-    			 subject to: A₂x + B₂y = b₂
+@testset "Trilevel Equality-Constrained Quadratic Program" begin
+	""" Upper-level problem:
+	min_{x} (1/2)x' Q₁ x + c₁'x
+	subject to:
+		x ∈ argmin_{x} (1/2)x' Q₂ x + c₂' x
+						  subject to: x ∈ argmin_{x} (1/2)x' Q₃ x + c₃' x
+														A₃x = b₃
+	"""
+	n = 4 # x dimension
+	m = 2 # equality dimension
 
-    """
-    # Upper level objective
-    Q₁ = I(2)
-    R₁ = 2I(2)
-    S = I(2)
-    c = [0.0, 0.0]
-    # Upper-level constraints
-    A₁ = I(2)
-    B₁ = I(2)
-    b₁ = [1.0, 1.0]
-    # Lower-level objective
-    Q₂ = I(2)
-    d = [-1.0, -1.0]
-    # Lower-level constraints
-    A₂ = 2I(2)
-    B₂ = I(2)
-    b₂ = [0.5, 1.0]
+	# Problem data
+	Q₁ = I(n)
+	c₁ = [1.0, 0.0, -1.0, 2.0]
+	Q₂ = 2I(n) # [0 0 0 0; 0 1 0 0; 0 0 2 0; 0 0 0 1]
+	c₂ = [-1.0, 2.0, 0.0, 1.0]
+	Q₃ = 3I(n) #[1 0 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 0]
+	c₃ = [0.5, -0.5, 1.0, 0.0]
+	A₃ = [1 0 1 1; 0 1 1 0]
+	b₃ = [1.0, 2.0]
 
-    function J₁(z, θ)
-        x = z[1:2]
-        y = z[3:4]
-        0.5 * x' * Q₁ * x + 0.5 * y' * R₁ * y + x' * S * y + c' * x
-    end
+	##### ORIGINAL GOOP VERSION ######
 
-    function J₂(z, θ)
-        y = z[3:4]
-        0.5 * y' * Q₂ * y + d' * y
-    end
+	f(x, θ) = 0.5x[1:n]'*Q₁*x[1:n] + c₁'*x[1:n]
 
-    function g₁(z, θ)
-        x = z[1:2]
-        y = z[3:4]
-        A₁ * x + B₁ * y - b₁
-    end
+	g(x, θ) = [
+		Q₂ * x[1:n] .+ c₂ - A₃'*x[(n+1):(n+m)] - Q₃'*x[(n+m+1):(n+m+n)]; # Q₂x + c₂ - A₃'μ₂₁ - Q₃'μ₂₂ = 0
+		A₃*x[(n+m+1):(n+m+n)]; # A₃μ₂₂ = 0
+		Q₃ * x[1:n] .+ c₃ - A₃'*x[(n+m+n+1):(n+m+n+m)]; # Q₃x + c₃ - A₃'μ₃ = 0
+		A₃*x[1:n] .- b₃ # A₃x - b₃ = 0
+	]
+	h(x, θ) = []
 
-    function g₂(z, θ)
-        x = z[1:2]
-        y = z[3:4]
-        A₂ * x + B₂ * y - b₂
-    end
+	dummy_primals = zeros(n + m + n + m)
+	dummy_parameters = [0.0]
 
-    # Build ParametricGOOP
-    preferences = [[J₁, J₂]]
-    is_prioritized_constraint = [[false, false]]
+	problem = QuasiGOOP.ParametricOptimizationProblem(;
+		objective = f,
+		equality_constraint = g,
+		inequality_constraint = h,
+		parameter_dimension = 1,
+		primal_dimension = length(dummy_primals),
+		equality_dimension = length(g(dummy_primals, dummy_parameters)),
+		inequality_dimension = 0,
+	)
 
-    shared_equality_constraint(z, θ) = [0]
-    shared_inequality_constraint(z, θ) = [0]
+	(; primals, variables, status, info) = QuasiGOOP.solve(problem, [0])
+    orig_primals = primals[1:n]
+    orig_objective = f(orig_primals, 0)
 
-    equality_constraints = [[g₁, g₂]]
-    inequality_constraints = [0]
+	##### NEW VERSION ######
+	dummy_primals = zeros(n+2n+m+n+m+m)
+	dummy_parameters = [0.0]
 
-    # problem = QuasiGOOP.ParametricGOOP(;
-    # 	preferences,
-    # 	is_prioritized_constraint,
-    # 	equality_constraints,
-    # 	inequality_constraints,
-    # 	shared_equality_constraint,
-    # 	shared_inequality_constraint,
-    # 	primal_dims = [[2, 2]],
-    # 	parameter_dims = [1],
-    #   equality_dimensions = [[2, 2]],
-    #   inequality_dimensions = [1],
-    # 	shared_equality_dims = [1],
-    # 	shared_inequality_dims = [1],
-    # 	num_players = length(preferences),
-    # )
+	J₁(x, θ) = 0.5x[1:n]'*Q₁*x[1:n] + c₁'*x[1:n]
+	J₂(x, θ) = 0.5x[1:n]'*Q₂*x[1:n] + c₂'*x[1:n]
+	J₃(x, θ) = 0.5x[1:n]'*Q₃*x[1:n] + c₃'*x[1:n]
+	new_g(x, θ) = A₃*x[1:n] .- b₃
 
-    # sol = solve(problem; verbose= true)
-    # @test isapprox(sol.primals[1], [-0.5, 0.0, 1.5, 1.0]) # [-0.5, 0.0, 1.5, 1.0, 2.5, 2.0, -0.75, -0.50, 0.50, 0.0] (x, y, μ₁, ψ₁, μ₂)
-    # @test isapprox(J₁(sol.primals[1], 0), 3.625)
-    @test true
+	x = zeros(n) #zeros(n+2n+m+n+m+m)
+	θ = 0.0
+
+
+	GOOP_trial1 = QuasiGOOP.ParametricGOOP(
+		x,
+		θ;
+		preferences = [[J₁, J₂, J₃]],
+		is_prioritized_constraint = [[false, false, false]],
+		equality_constraints = [new_g],
+		inequality_constraints = [nothing],
+		shared_equality_constraint = nothing,
+		shared_inequality_constraint = nothing,
+	)
+
+	(; F, z, θ) = QuasiGOOP.generate_slacked_kkt_system(GOOP_trial1)
+	F = vcat(F, zeros(length(z) - length(F))) # TODO: (DH) cross-check with David
+	z̲ = fill(-Inf, length(z))
+	z̅ = fill(Inf, length(z))
+	parameter_value = zeros(length(θ))
+
+	parametric_mcp = ParametricMCPs.ParametricMCP(F, z, θ, z̲, z̅; compute_sensitivities = false)
+	z_sol, status, info = ParametricMCPs.solve(
+		parametric_mcp,
+		parameter_value;
+		initial_guess = zeros(length(z)),
+		verbose = false,
+		cumulative_iteration_limit = 100000,
+		proximal_perturbation = 1e-2,
+		use_basics = true,
+		use_start = true,
+	)
+    new_primals = z_sol[1:n]
+    new_objective = f(new_primals, 0)
+
+	@test isapprox(orig_primals, new_primals, atol = 1e-6)
+	@test isapprox(orig_objective, new_objective, atol = 1e-6)
 end

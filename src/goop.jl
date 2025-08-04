@@ -90,8 +90,7 @@ function generate_slacked_kkt_system(
 
 	# Keep track of all inequality constraint duals (γ̂) that we create.
 	Γ = []
-	# TODO: For debugging sake, keep track of preference slacks, interior point slacks, and inequality constraint duals separately.
-
+    
 	# Keep track of all lower level policy constraint duals (ψ̂) that we create.
 	Ψ = []
 
