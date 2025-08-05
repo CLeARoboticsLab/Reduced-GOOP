@@ -53,8 +53,8 @@ using BlockArrays: BlockArrays, BlockArray, Block, blocks, blocksizes
 	)
 
 	(; primals, variables, status, info) = QuasiGOOP.solve(problem, [0])
-    orig_primals = primals[1:n]
-    orig_objective = f(orig_primals, 0)
+	orig_primals = primals[1:n]
+	orig_objective = f(orig_primals, 0)
 
 	##### NEW VERSION ######
 	dummy_primals = zeros(n+2n+m+n+m+m)
@@ -80,25 +80,16 @@ using BlockArrays: BlockArrays, BlockArray, Block, blocks, blocksizes
 		shared_inequality_constraint = nothing,
 	)
 
-	(; F, z, θ) = QuasiGOOP.generate_slacked_kkt_system(GOOP_trial1)
-	F = vcat(F, zeros(length(z) - length(F))) # TODO: (DH) cross-check with David
-	z̲ = fill(-Inf, length(z))
-	z̅ = fill(Inf, length(z))
-	parameter_value = zeros(length(θ))
-
-	parametric_mcp = ParametricMCPs.ParametricMCP(F, z, θ, z̲, z̅; compute_sensitivities = false)
-	z_sol, status, info = ParametricMCPs.solve(
-		parametric_mcp,
+	GOOP_kkt_system = QuasiGOOP.generate_slacked_kkt_system(GOOP_trial1)
+	parameter_value = [0, 0]
+	(; status, z, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters) = QuasiGOOP.solve(
+		QuasiGOOP.InteriorPoint(),
+		GOOP_kkt_system,
 		parameter_value;
-		initial_guess = zeros(length(z)),
-		verbose = false,
-		cumulative_iteration_limit = 100000,
-		proximal_perturbation = 1e-2,
-		use_basics = true,
-		use_start = true,
+		z₀ = nothing,
 	)
-    new_primals = z_sol[1:n]
-    new_objective = f(new_primals, 0)
+	new_primals = x[1:n]
+	new_objective = f(new_primals, 0)
 
 	@test isapprox(orig_primals, new_primals, atol = 1e-6)
 	@test isapprox(orig_objective, new_objective, atol = 1e-6)

@@ -16,7 +16,7 @@ we typically decrease ϵ by a factor of 0.1 or 0.2, with smaller values chosen
 when the previous subproblem is solved in fewer iterations.
 
 Positional arguments:
-	- `mcp::PrimalDualMCP`: the mixed complementarity problem to solve.
+	- `mcp::GOOPKKTSystem`: the mixed complementarity problem to solve. #TODO: FIX LATER
 	- `θ::AbstractVector{<:Real}`: the parameter vector.
 
 Keyword arguments:
@@ -31,16 +31,13 @@ Keyword arguments:
 	- `loosening_rate::Real = 0.5`: the rate at which to loosen the tolerance.
 	- `min_stepsize::Real = 1e-2`: the minimum step size for the linesearch.
 	- `verbose::Bool = false`: whether to print debug information.
-	- `linear_solve_algorithm::LinearSolve.SciMLLinearSolveAlgorithm`: the linear solve algorithm to use. Any solver from `LinearSolve.jl` can be used.
+	- `linear_solve_algorithm::LinearSolve.SciMLLinearSolveAlgorithm`: the linear solve algorithm to use. Any solver from `LinearSolve.jl` that can handle nonsquare system can be used.
 """
 function solve(
     ::InteriorPoint,
-    mcp::PrimalDualSys,
-    θ::AbstractVector{<:Real},
-    warmstart_sol;
-    x₀ = nothing,
-    y₀ = nothing,
-    s₀ = nothing,
+    mcp::GOOPKKTSystem,
+    θ::AbstractVector{<:Real};
+    z₀ = nothing,
     tol = 1e-4,
     ϵ₀ = :auto,
     max_inner_iters = 20,
@@ -49,55 +46,35 @@ function solve(
     loosening_rate = 0.5,
     min_stepsize = 1e-4,
     verbose = false,
-    linear_solve_algorithm = UMFPACKFactorization(),
+    linear_solve_algorithm = LinearSolve.KrylovJL_LSMR(), # KrylovJL_CRAIGMR() for non-square KKT systems
 )
-
-    # slack_dims = [
-    # 	43:46,
-    # 	47:110,
-    # 	203:209,
-    # 	210:223,
-    # 	440:467,
-    # 	468:523,
-    # 	########
-    # 	951:957,
-    # 	958:1027,
-    # 	1126:1153,
-    # 	1154:1209,
-    # 	1483:1486,
-    # 	1487:1494,
-    # ]
-    # slack_dims = mapreduce(vcat, slack_dims) do dim
-    # 	collect(dim)
-    # end
-
-    slack_dims = mcp.dims.slack_dims
+    z = @something(z₀, begin
+        z = zeros(mcp.variable_dimension)
+        z[mcp.preference_slack_dims] .= 1.0
+        z[mcp.interior_point_slack_dims] .= 1.0
+        z[mcp.inequality_constraint_dual_dims] .= 1.0
+        z
+    end)
+    
+    x = @view z[Not(vcat(mcp.preference_slack_dims, mcp.interior_point_slack_dims, mcp.inequality_constraint_dual_dims))]
+    s = @view z[mcp.preference_slack_dims]
+    σ = @view z[mcp.interior_point_slack_dims]
+    γ = @view z[mcp.inequality_constraint_dual_dims]
 
     # Set up common memory.
     ∇F = mcp.∇F_z!.result_buffer
-    F = zeros(mcp.unconstrained_dimension + 2mcp.constrained_dimension)
-    δz = zeros(mcp.unconstrained_dimension + 2mcp.constrained_dimension)
-    δx = @view δz[1:(mcp.unconstrained_dimension)]
-    δy =
-        @view δz[(mcp.unconstrained_dimension + 1):(mcp.unconstrained_dimension + mcp.constrained_dimension)]
-    δs = @view δz[(mcp.unconstrained_dimension + mcp.constrained_dimension + 1):end]
-    δs_slack = @view δz[slack_dims]
+    F = zeros(mcp.kkt_dimension)
+    δz = zeros(mcp.variable_dimension)
+    δx = @view δz[Not(vcat(mcp.preference_slack_dims, mcp.interior_point_slack_dims, mcp.inequality_constraint_dual_dims))]
+    δs = @view δz[mcp.preference_slack_dims]
+    δσ = @view δz[mcp.interior_point_slack_dims]
+    δγ = @view δz[mcp.inequality_constraint_dual_dims]
 
     linsolve = init(LinearProblem(∇F, δz), linear_solve_algorithm)
 
     # Main solver loop.
-    if isnothing(warmstart_sol)
-        x = @something(x₀, ones(mcp.unconstrained_dimension)) # zeros(mcp.unconstrained_dimension) #how is the size 3391?
-        y = @something(y₀, ones(mcp.constrained_dimension))
-        s = @something(s₀, ones(mcp.constrained_dimension))
-    else
-        x = warmstart_sol.x
-        y = warmstart_sol.y
-        s = warmstart_sol.s
-    end
-
     if ϵ₀ === :auto
-        is_warmstarted = !isnothing(x₀) && !isnothing(y₀) && !isnothing(s₀)
+        is_warmstarted = !isnothing(z₀)
         if is_warmstarted
             ϵ = tol
         else
@@ -123,8 +100,8 @@ function solve(
             # Compute the Newton step.
             # TODO: Can add some adaptive regularization.
             # TODO: use a linear operator with a lazy gradient computation here.
-            mcp.F!(F, x, y, s; θ, ϵ)
-            mcp.∇F_z!(∇F, x, y, s; θ, ϵ)
+            mcp.F!(F, z; θ, ϵ)
+            mcp.∇F_z!(∇F, z; θ, ϵ)
             @assert all(.!isnan.(F)) "Found NaN in F - aborting!"
             @assert all(.!isnan.(∇F)) "Found NaN in ∇F - aborting!"
             println("condition number of ∇F = $(cond(collect(∇F),2))")
@@ -142,27 +119,24 @@ function solve(
             δz .= solution.u
 
             # Fraction to the boundary linesearch.
-            augmented_s = vcat(x[slack_dims], s) # augment s with inner level barrier/preference slacks
-            augmented_δs = vcat(δs_slack, δs)
-            α_s = fraction_to_the_boundary_linesearch(
-                augmented_s,
-                augmented_δs;
-                tol = min_stepsize,
-            )
-            α_y = fraction_to_the_boundary_linesearch(y, δy; tol = min_stepsize)
 
-            println("α_s = $α_s, α_y = $α_y")
+            α_s = fraction_to_the_boundary_linesearch(s, δs; tol = min_stepsize)
+            α_σ = fraction_to_the_boundary_linesearch(σ, δσ; tol = min_stepsize, max_stepsize = α_s)
+            α_γ = fraction_to_the_boundary_linesearch(γ, δγ; tol = min_stepsize)
 
-            if isnan(α_s) || isnan(α_y)
+            println("α_s = $α_s, α_σ = $α_σ, α_γ = $α_γ")
+
+            if isnan(α_s) || isnan(α_γ) || isnan(α_σ)
                 verbose && @warn "Linesearch failed. Exiting prematurely."
                 status = :failed
                 break
             end
 
             # Update variables accordingly.
-            @. x += α_s * δx
-            @. s += α_s * δs
-            @. y += α_y * δy
+            @. x += α_σ * δx
+            @. s += α_σ * δs
+            @. σ += α_σ * δσ
+            @. γ += α_γ * δγ
 
             kkt_error = norm(F, Inf)
 
@@ -188,14 +162,14 @@ function solve(
         status = :failed
     end
 
-    (; status, x, y, s, kkt_error, ϵ, outer_iters, total_iters)
+    (; status, z, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters)
 end
 
 """Helper function to compute the step size `α` which solves:
 				   α* = max(α ∈ [0, 1] : v + α δ ≥ (1 - τ) v).
 """
-function fraction_to_the_boundary_linesearch(v, δ; τ = 0.995, decay = 0.5, tol = 1e-4)
-    α = 1.0
+function fraction_to_the_boundary_linesearch(v, δ; max_stepsize = 1.0, τ = 0.995, decay = 0.5, tol = 1e-4)
+    α = max_stepsize
     while any(@. v + α * δ < (1 - τ) * v)
         if α < tol
             return NaN

@@ -83,15 +83,15 @@ function generate_slacked_kkt_system(
 
 	# Keep track of all the preference (s) and interior point (σ) slacks we create.
 	s = []
-	σ = []
+	Σ = []
 
-	# Keep track of all equality constraint duals (λ̂) that we create.
+	# Keep track of all equality constraint duals (λ) that we create.
 	Λ = []
 
-	# Keep track of all inequality constraint duals (γ̂) that we create.
+	# Keep track of all inequality constraint duals (γ) that we create.
 	Γ = []
-    
-	# Keep track of all lower level policy constraint duals (ψ̂) that we create.
+
+	# Keep track of all lower level policy constraint duals (ψ) that we create.
 	Ψ = []
 
 	# Recursive function to construct a player's KKT conditions.
@@ -141,7 +141,7 @@ function generate_slacked_kkt_system(
 					SymbolicTracingUtils.make_variables(
 						backend,
 						Symbol("s_$(player)_$(level)"),
-						1,
+						1, 
 					),
 				)
 				push!(s, preference_slack)
@@ -292,24 +292,24 @@ function generate_slacked_kkt_system(
 	)
 
 	# Pack all variables together.
-	# z = vcat(x, s, λ̃, γ̃, σ, γ, ψ)
+	# z = vcat(x, s, Σ, Λ, Γ, Ψ, λ̃, γ̃,)
 
 	z = Vector{symbolic_type}(
 		vcat(x, Λ, Ψ),
 	)
-	# idx = blockedrange(length.([x, s, λ̃, γ̃, σ, γ, ψ]))
-	# preference_slack_dims = idx[Block(2)]
-	# interior_point_slack_dims = idx[Block(5)]
-	# inequality_constraint_dual_dims = vcat(idx[Block(4)], idx[Block(6)])
+	idx = blockedrange(length.([x, s, Σ, Λ, Γ, Ψ, λ̃, γ̃,]))
+	preference_slack_dims = idx[Block(2)]
+	interior_point_slack_dims = idx[Block(3)]
+	inequality_constraint_dual_dims = vcat(idx[Block(5)], idx[Block(7)])
 
-	# GOOPKKTSystem(
-	# 	F,
-	# 	z,
-	# 	θ,
-	# 	preference_slack_dims,
-	# 	interior_point_slack_dims,
-	# 	inequality_constraint_dual_dims,
-	# )
+	GOOPKKTSystem(
+		F,
+		z,
+		θ,
+		preference_slack_dims,
+		interior_point_slack_dims,
+		inequality_constraint_dual_dims,
+	)
 
-    (; F, z, θ)
+    # (; F, z, θ)
 end
