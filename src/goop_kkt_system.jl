@@ -32,6 +32,7 @@ function GOOPKKTSystem(
 	F_symbolic::Vector{T},
 	z_symbolic::Vector{T},
 	θ_symbolic::Vector{T},
+	ϵ_symbolic::T,
 	preference_slack_dims,
 	interior_point_slack_dims,
 	inequality_constraint_dual_dims;
@@ -43,8 +44,6 @@ function GOOPKKTSystem(
 		@assert T === SymbolicTracingUtils.Symbolics.Num
 		backend = SymbolicTracingUtils.SymbolicsBackend()
 	end
-
-	ϵ_symbolic = only(SymbolicTracingUtils.make_variables(backend, :ϵ, 1))
 
 	F! = let
 		_F! = SymbolicTracingUtils.build_function(

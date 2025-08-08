@@ -36,7 +36,7 @@ function ParametricGOOP(
 	shared_equality_constraint,
 	shared_inequality_constraint,
 )
-	primal_dims = [length(x)] #BlockArrays.blocksizes(x)
+	primal_dims = [length(x)] #TODO: BlockArrays.blocksizes(x)
 	parameter_dims = length(θ)
 	equality_dims = map(equality_constraints) do f
 		isnothing(f) ? 0 : length(f(x, θ))
@@ -71,15 +71,31 @@ function generate_slacked_kkt_system(
 	goop::ParametricGOOP;
 	backend = SymbolicTracingUtils.SymbolicsBackend(),
 )
+	# NOTE FOR LATER: 
+	# 0807: Do we need to account for previous preference slacks when we take gradient of Lagrangian function at upper levels?
+	# 		Different relaxations for different preferences is already handled
+	# 		x \argmin_{x̃, s} x̃ st ...
 
 	# Symbolic variables for all primals, parameters, and duals for shared constraints.
 	x =
 		SymbolicTracingUtils.make_variables(backend, :x, sum(goop.primal_dims)) |>
 		to_blockvector(goop.primal_dims)
 	θ = SymbolicTracingUtils.make_variables(backend, :θ, goop.parameter_dims)
-	λ̃ = SymbolicTracingUtils.make_variables(backend, :λ̃, goop.shared_equality_dims)
-	γ̃ = SymbolicTracingUtils.make_variables(backend, :γ̃, goop.shared_inequality_dims)
+	ϵ = only(SymbolicTracingUtils.make_variables(backend, :ϵ, 1))
+
+	λₛ = SymbolicTracingUtils.make_variables(backend, :λₛ, goop.shared_equality_dims)
+	γₛ = SymbolicTracingUtils.make_variables(backend, :γₛ, goop.shared_inequality_dims)
+	σₛ = SymbolicTracingUtils.make_variables(backend, :σₛ, goop.shared_inequality_dims)
+
 	symbolic_type = eltype(x)
+
+	fₛ =
+		isnothing(goop.shared_equality_constraint) ? nothing :
+		goop.shared_equality_constraint(x, θ)
+	gₛ =
+		isnothing(goop.shared_inequality_constraint) ? nothing :
+		goop.shared_inequality_constraint(x, θ)
+
 
 	# Keep track of all the preference (s) and interior point (σ) slacks we create.
 	s = []
@@ -122,13 +138,20 @@ function generate_slacked_kkt_system(
 		)
 		push!(Γ, γ...)
 
-		# TODO: Shared constraints do not belong to recursion here
-		# fₛ =
-		# 	isnothing(goop.shared_equality_constraint) ? nothing :
-		# 	goop.shared_equality_constraint(x, θ)
-		# gₛ =
-		# 	isnothing(goop.shared_inequality_constraint) ? nothing :
-		# 	goop.shared_inequality_constraint(x, θ)
+		# Shared constraints are not supported at this point.
+		if !isnothing(goop.shared_equality_constraint) || !isnothing(goop.shared_inequality_constraint)
+			error("Shared constraints are not supported at this level.")
+		end
+		# # Shared constraints exist at every level. https://github.com/CLeARoboticsLab/Quasi-GOOP/issues/6
+		# Option (1): Share the multipliers only at all players' innermost levels, but let successive outer levels have their own separate multipliers for all players.
+
+
+		σ = SymbolicTracingUtils.make_variables(
+			backend,
+			Symbol("σ_$(player)_$(level)"),
+			goop.inequality_dims[player],
+		)
+		push!(Σ, σ...)
 
 		# Base case is the inner-most layer.
 		if length(preferences) == 1
@@ -137,43 +160,43 @@ function generate_slacked_kkt_system(
 			if only(is_prioritized_constraint)
 				@assert false
 				# Highest priority is a constraint.
-				preference_slack = only(
-					SymbolicTracingUtils.make_variables(
-						backend,
-						Symbol("s_$(player)_$(level)"),
-						1, 
-					),
-				)
-				push!(s, preference_slack)
-
-				ip_slack = SymbolicTracingUtils.make_variables(
+				preference_slack = SymbolicTracingUtils.make_variables(
 					backend,
-					Symbol("σ_$(player)_$(level)"),
-					1 + goop.shared_inequality_dims,
+					Symbol("s_$(player)_$(level)"),
+					length(h), # get the right dimension
 				)
-				push!(σ, ip_slack...)
+				push!(s, preference_slack...)
 
-				dual = only(
-					SymbolicTracingUtils.make_variables(
-						backend,
-						Symbol("μ_$(player)_$(level)"),
-						1,
-					),
+				σₚ = SymbolicTracingUtils.make_variables(
+					backend,
+					Symbol("σₚ_$(player)_$(level)"),
+					length(h),
 				)
-				push!(μ, dual)
+				push!(Σ, σₚ...)
+
+				γₚ = SymbolicTracingUtils.make_variables(
+					backend,
+					Symbol("γₚ_$(player)_$(level)"),
+					length(h),
+				)
+				push!(Γ, γₚ...)
 
 				L =
-					preference_slack - dual * (h - preference_slack) -
-					(isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g)
+					sum(preference_slack) - γₚ' * (h .+ preference_slack) -
+					(isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
+					(isnothing(fₛ) ? 0 : λₛ' * fₛ) - (isnothing(gₛ) ? 0 : γₛ' * gₛ)
+
 				∇L = Symbolics.gradient(L, vcat(x[Block(player)], preference_slack))
 				F = Vector{symbolic_type}(
 					filter!(
 						!isnothing,
 						[
 							∇L
-							h - preference_slack - first(ip_slack)
+							h .+ preference_slack .- σₚ
 							f
-							(isnothing(g) ? g : g - ip_slack[2:end])
+							(isnothing(g) ? g : g .- σ)
+							(isnothing(g) ? nothing : σ .* γ .- ϵ)
+							σₚ .* γₚ .- ϵ
 						],
 					),
 				)
@@ -181,8 +204,8 @@ function generate_slacked_kkt_system(
 				return (; F, π = ∇L)
 			else
 				# Highest priority is a cost. 
-
-				L = h - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g)
+				L = h - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
+					(isnothing(fₛ) ? 0 : λₛ' * fₛ) - (isnothing(gₛ) ? 0 : γₛ' * gₛ)
 				∇L = Symbolics.gradient(L, x[Block(player)])
 				F = Vector{symbolic_type}(
 					filter!(
@@ -190,7 +213,8 @@ function generate_slacked_kkt_system(
 						[
 							∇L
 							f
-							(isnothing(g) ? nothing : g - ip_slack)
+							(isnothing(g) ? nothing : g .- σ)
+							(isnothing(g) ? nothing : σ .* γ .- ϵ)
 						],
 					),
 				)
@@ -217,61 +241,81 @@ function generate_slacked_kkt_system(
 		if first(is_prioritized_constraint)
 			@assert false
 			# Highest priority is a constraint.
-			preference_slack = only(
-				SymbolicTracingUtils.make_variables(
-					backend,
-					Symbol("s_$(player)_$(level)"),
-					1,
-				),
+			preference_slack = SymbolicTracingUtils.make_variables(
+				backend,
+				Symbol("s_$(player)_$(level)"),
+				length(h),
 			)
-			push!(s, preference_slack)
+			push!(s, preference_slack...)
 
-			ip_slack = only(
-				SymbolicTracingUtils.make_variables(
-					backend,
-					Symbol("σ_$(player)_$(level)"),
-					1,
-				),
+			σₚ = SymbolicTracingUtils.make_variables(
+				backend,
+				Symbol("σₚ_$(player)_$(level)"),
+				length(h),
 			)
-			push!(σ, ip_slack)
+			push!(Σ, σₚ...)
 
-			dual = only(
-				SymbolicTracingUtils.make_variables(
-					backend,
-					Symbol("μ_$(player)_$(level)"),
-					1,
-				),
+			γₚ = SymbolicTracingUtils.make_variables(
+				backend,
+				Symbol("γₚ_$(player)_$(level)"),
+				length(h),
 			)
-			push!(μ, dual)
+			push!(Γ, γₚ...)
+
+			λ̃ₛ = SymbolicTracingUtils.make_variables(
+				backend,
+				Symbol("λ̃ₛ_$(player)_$(level)"),
+				goop.shared_equality_dims,
+			)
+			push!(Λ, λ̃ₛ...)
+
+			γ̃ₛ = SymbolicTracingUtils.make_variables(
+				backend,
+				Symbol("γ̃ₛ_$(player)_$(level)"),
+				goop.shared_inequality_dims,
+			)
+			push!(Γ, γ̃ₛ...)
 
 			# Form partial Lagrangian at this stage.
-			L̃ = preference_slack - dual * (h - preference_slack)
+			L = sum(preference_slack) - γₚ' * (h .+ preference_slack) -
+				- ψ' * π - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g)
+			- (isnothing(fₛ) ? 0 : λ̃ₛ' * fₛ) - (isnothing(gₛ) ? 0 : γ̃ₛ' * gₛ)
 
-			# Calculate derivative of lower level policy, treating lower multipliers
-			# as implicit functions of top level variables.
-			# TODO: Check this! Probably made a mistake.
-			primals = vcat(x[Block(player)], preference_slack)
-			# ∇π_player_primals = Symbolics.jacobian(π, primals)
-			# ∇π_other_primals = Symbolics.jacobian(π, x[Block.(Not(player))])
-			# ∇π_lower_duals = Symbolics.jacobian(π, vcat(λ̃, γ̃, γ, ψ))
-			# ∇lower_duals_player_primals = -[∇π_other_primals
-
-			∇L = Symbolics.gradient(L̃ - ψ' * π, primals) #- (∇π_primals' + \nabla∇π_lower_duals') * ψ̃
+			∇L = Symbolics.gradient(L, vcat(x[Block(player)], preference_slack))
 			F̃ = [
 				∇L
-				h - preference_slack - ip_slack
+				h .+ preference_slack .- σₚ
+				σₚ .* γₚ .- ϵ
+				(isnothing(g) ? nothing : σ .* γ .- ϵ)
+				(isnothing(gₛ) ? nothing : σₛ .* γ̃ₛ .- ϵ) # Note: same slacks (not duals) for all levels
 				F
 			]
 
 			return (; F = F̃, π = ∇L)
 		else
-			# Highest priority is a cost.
-			L = h - ψ' * π - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g)
+			# Current priority is a cost.
+			# ip_slack = SymbolicTracingUtils.make_variables(
+			# 	backend,
+			# 	Symbol("σ_$(player)_$(level)"),
+			# 	goop.inequality_dims[player],
+			# )
+			# push!(Σ, ip_slack...)
+
+			L = h - ψ' * π - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
+				(isnothing(fₛ) ? 0 : λ̃ₛ' * fₛ) - (isnothing(gₛ) ? 0 : γ̃ₛ' * gₛ)
 			∇L = Symbolics.gradient(L, x[Block(player)])
-			F̃ = [
-				∇L
-				F
-			]
+			F̃ = Vector{symbolic_type}(
+				filter!(
+					!isnothing,
+					[
+						∇L
+						#(isnothing(g) ? nothing : g - σ) # TODO: Isn't this repeated at other levels?
+						(isnothing(g) ? nothing : σ .* γ .- ϵ)
+						(isnothing(gₛ) ? nothing : σₛ .* γ̃ₛ .- ϵ)
+						F
+					],
+				),
+			)
 
 			return (; F = F̃, π = vcat(∇L, π))
 		end
@@ -286,30 +330,37 @@ function generate_slacked_kkt_system(
 		)
 	end
 
-	# Filter out zeros 
+	# Filter out zeros
 	F = Vector{symbolic_type}(
-		filter(!iszero, F_π_pair.F),
+		filter!(!iszero && !isnothing,
+			vcat(
+				F_π_pair.F,
+				fₛ,
+				(isnothing(gₛ) ? nothing : gₛ .- σₛ),
+				(isnothing(gₛ) ? nothing : σₛ .* γₛ .- ϵ),
+			),
+		),
 	)
 
 	# Pack all variables together.
-	# z = vcat(x, s, Σ, Λ, Γ, Ψ, λ̃, γ̃,)
-
 	z = Vector{symbolic_type}(
-		vcat(x, Λ, Ψ),
+		vcat(x, s, Σ, Λ, Γ, Ψ, λₛ, γₛ, σₛ),
 	)
-	idx = blockedrange(length.([x, s, Σ, Λ, Γ, Ψ, λ̃, γ̃,]))
+	
+	idx = blockedrange(length.([x, s, Σ, Λ, Γ, Ψ, λₛ, γₛ, σₛ]))
 	preference_slack_dims = idx[Block(2)]
-	interior_point_slack_dims = idx[Block(3)]
-	inequality_constraint_dual_dims = vcat(idx[Block(5)], idx[Block(7)])
+	interior_point_slack_dims = vcat(idx[Block(3)], idx[Block(9)]) # Σ, σₛ
+	inequality_constraint_dual_dims = vcat(idx[Block(5)], idx[Block(8)]) # Γ, γₛ
 
 	GOOPKKTSystem(
 		F,
 		z,
 		θ,
+		ϵ,
 		preference_slack_dims,
 		interior_point_slack_dims,
 		inequality_constraint_dual_dims,
 	)
 
-    # (; F, z, θ)
+	# (; F, z, θ)
 end

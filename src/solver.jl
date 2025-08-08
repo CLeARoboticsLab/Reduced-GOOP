@@ -122,6 +122,7 @@ function solve(
 
             α_s = fraction_to_the_boundary_linesearch(s, δs; tol = min_stepsize)
             α_σ = fraction_to_the_boundary_linesearch(σ, δσ; tol = min_stepsize, max_stepsize = α_s)
+            
             α_γ = fraction_to_the_boundary_linesearch(γ, δγ; tol = min_stepsize)
 
             println("α_s = $α_s, α_σ = $α_σ, α_γ = $α_γ")
