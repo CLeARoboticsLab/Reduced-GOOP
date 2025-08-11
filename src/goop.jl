@@ -36,7 +36,7 @@ function ParametricGOOP(
 	shared_equality_constraint,
 	shared_inequality_constraint,
 )
-	primal_dims = [length(x)] #TODO: BlockArrays.blocksizes(x)
+	primal_dims = only(BlockArrays.blocksizes(x)) 
 	parameter_dims = length(θ)
 	equality_dims = map(equality_constraints) do f
 		isnothing(f) ? 0 : length(f(x, θ))
@@ -45,9 +45,9 @@ function ParametricGOOP(
 		isnothing(g) ? 0 : length(g(x, θ))
 	end
 	shared_equality_dims =
-		isnothing(shared_equality_constraint) ? 0 : shared_equality_constraint(x, θ)
+		isnothing(shared_equality_constraint) ? 0 : length(shared_equality_constraint(x, θ))
 	shared_inequality_dims =
-		isnothing(shared_inequality_constraint) ? 0 : shared_inequality_constraint(x, θ)
+		isnothing(shared_inequality_constraint) ? 0 : length(shared_inequality_constraint(x, θ))
 
 	ParametricGOOP(;
 		preferences,
@@ -138,10 +138,6 @@ function generate_slacked_kkt_system(
 		)
 		push!(Γ, γ...)
 
-		# Shared constraints are not supported at this point.
-		if !isnothing(goop.shared_equality_constraint) || !isnothing(goop.shared_inequality_constraint)
-			error("Shared constraints are not supported at this level.")
-		end
 		# # Shared constraints exist at every level. https://github.com/CLeARoboticsLab/Quasi-GOOP/issues/6
 		# Option (1): Share the multipliers only at all players' innermost levels, but let successive outer levels have their own separate multipliers for all players.
 
@@ -238,6 +234,20 @@ function generate_slacked_kkt_system(
 		)
 		push!(Ψ, ψ...)
 
+			λ̃ₛ = SymbolicTracingUtils.make_variables(
+				backend,
+				Symbol("λ̃ₛ_$(player)_$(level)"),
+				goop.shared_equality_dims,
+			)
+			push!(Λ, λ̃ₛ...)
+
+			γ̃ₛ = SymbolicTracingUtils.make_variables(
+				backend,
+				Symbol("γ̃ₛ_$(player)_$(level)"),
+				goop.shared_inequality_dims,
+			)
+			push!(Γ, γ̃ₛ...)
+
 		if first(is_prioritized_constraint)
 			@assert false
 			# Highest priority is a constraint.
@@ -261,20 +271,6 @@ function generate_slacked_kkt_system(
 				length(h),
 			)
 			push!(Γ, γₚ...)
-
-			λ̃ₛ = SymbolicTracingUtils.make_variables(
-				backend,
-				Symbol("λ̃ₛ_$(player)_$(level)"),
-				goop.shared_equality_dims,
-			)
-			push!(Λ, λ̃ₛ...)
-
-			γ̃ₛ = SymbolicTracingUtils.make_variables(
-				backend,
-				Symbol("γ̃ₛ_$(player)_$(level)"),
-				goop.shared_inequality_dims,
-			)
-			push!(Γ, γ̃ₛ...)
 
 			# Form partial Lagrangian at this stage.
 			L = sum(preference_slack) - γₚ' * (h .+ preference_slack) -
@@ -332,9 +328,9 @@ function generate_slacked_kkt_system(
 
 	# Filter out zeros
 	F = Vector{symbolic_type}(
-		filter!(!iszero && !isnothing,
+		filter!(!isnothing,
 			vcat(
-				F_π_pair.F,
+				filter!(!iszero, F_π_pair.F),
 				fₛ,
 				(isnothing(gₛ) ? nothing : gₛ .- σₛ),
 				(isnothing(gₛ) ? nothing : σₛ .* γₛ .- ϵ),
@@ -346,13 +342,13 @@ function generate_slacked_kkt_system(
 	z = Vector{symbolic_type}(
 		vcat(x, s, Σ, Λ, Γ, Ψ, λₛ, γₛ, σₛ),
 	)
-	
+
 	idx = blockedrange(length.([x, s, Σ, Λ, Γ, Ψ, λₛ, γₛ, σₛ]))
 	preference_slack_dims = idx[Block(2)]
 	interior_point_slack_dims = vcat(idx[Block(3)], idx[Block(9)]) # Σ, σₛ
 	inequality_constraint_dual_dims = vcat(idx[Block(5)], idx[Block(8)]) # Γ, γₛ
 
-	GOOPKKTSystem(
+	BuildGOOPKKTSystem(
 		F,
 		z,
 		θ,

@@ -69,7 +69,7 @@ println("# Equality constraints: $(length(g(primals, 0)))")
 println("Total variables: $(length(variables))")
 
 ##### NEW VERSION ######
-
+player = 1
 M₃ = [Q₂ -A₃'; A₃ zeros(m, m)]
 ∇ₓπ₃ = Q₂
 ∇ₓπ₂ = [Q₂; Q₃]
@@ -101,7 +101,7 @@ J₃(x, θ) = 0.5x[1:n]'*Q₃*x[1:n] + c₃'*x[1:n]
 g_eq(x, θ) = A₃*x[1:n] .- b₃
 g_ineq(x, θ) = [x[1] - 0.5; x[2] - 0.5]
 
-x = zeros(n) #zeros(n+2n+m+n+m+m)
+x = BlockArray(zeros(n), [n]) # single player
 θ = 0.0
 
 
@@ -110,10 +110,10 @@ GOOP_trial1 = QuasiGOOP.ParametricGOOP(
 	θ;
 	preferences = [[J₁, J₂, J₃]],
 	is_prioritized_constraint = [[false, false, false]],
-	equality_constraints = [g_eq],
-	inequality_constraints = [g_ineq],
-	shared_equality_constraint = nothing,
-	shared_inequality_constraint = nothing,
+	equality_constraints = [nothing],
+	inequality_constraints = [nothing],
+	shared_equality_constraint = g_eq,
+	shared_inequality_constraint = g_ineq,
 )
 
 # (; F, z, θ) = QuasiGOOP.generate_slacked_kkt_system(GOOP_trial1)
@@ -156,7 +156,6 @@ println("v3 Objective: $(f(x[1:n], 0))")
 
 ## Cross check with original GOOP##
 # θ is the relaxation factor
-player = 1
 goop_preferences = [[J₁, J₂, J₃]]
 equality_constraints = [g_eq]
 inequality_constraints = [g_ineq]
@@ -227,8 +226,6 @@ function construct_kkt(preferences, player)
 end
 
 (; F, G, z) = construct_kkt(goop_preferences[player][2:end], player)
-Main.@infiltrate
-
 λ = SymbolicTracingUtils.make_variables(
 	backend,
 	Symbol("λ_$(player)_1"),
@@ -240,6 +237,10 @@ Main.@infiltrate
 	length(G),
 )
 
+# Topmost level
+L = first(goop_preferences[player][1](z, θ)) - λ'*F - γ'*G
+∇L = Symbolics.gradient(L, z)
+F = Vector{symbolic_type}([∇L; F])
 z̲ = [
 	fill(-Inf, length(F))
 	fill(0, length(G))
@@ -248,12 +249,13 @@ z̅ = [
 	fill(Inf, length(F))
 	fill(Inf, length(G))
 ]
-parameter_value = zeros(length(θ))
-parametric_mcp = ParametricMCPs.ParametricMCP([F; G], [z; λ; γ], θ, z̲, z̅; compute_sensitivities = false)
+parameter_value = [0.0]
+Main.@infiltrate
+parametric_mcp = ParametricMCPs.ParametricMCP([F; G], [z; λ; γ], [θ], z̲, z̅; compute_sensitivities = false)
 z_sol, status, info = ParametricMCPs.solve(
 	parametric_mcp,
 	parameter_value;
-	initial_guess = zeros(length(z)),
+	initial_guess = zeros(length([z; λ; γ])),
 	verbose = false,
 	cumulative_iteration_limit = 100000,
 	proximal_perturbation = 1e-2,

@@ -28,7 +28,7 @@ struct GOOPKKTSystem{T1, T2, T3, T4, T5, T6}
 	kkt_dimension::T6
 end
 
-function GOOPKKTSystem(
+function BuildGOOPKKTSystem(
 	F_symbolic::Vector{T},
 	z_symbolic::Vector{T},
 	θ_symbolic::Vector{T},

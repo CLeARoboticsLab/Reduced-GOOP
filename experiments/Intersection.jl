@@ -24,7 +24,7 @@ function get_setup(
     primal_dimensions = fill(primals_per_agent, num_players)
     parameter_dimensions = fill(state_dimension + 4, num_players) # (state, goal, obstacle)
 
-    dummy_primals = BlockArray(zeros(sum(primal_dimensions)), primal_dimensions)
+    dummy_primals = BlockArray(zeros(sum(primal_dimensions)), primal_dimensions) # THIS will be x
     dummy_parameters = BlockArray(zeros(sum(parameter_dimensions)), parameter_dimensions)
 
     unflatten_parameters = function (θ)
