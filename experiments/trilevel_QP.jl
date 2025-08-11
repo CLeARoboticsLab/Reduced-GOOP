@@ -116,29 +116,6 @@ GOOP_trial1 = QuasiGOOP.ParametricGOOP(
 	shared_inequality_constraint = g_ineq,
 )
 
-# (; F, z, θ) = QuasiGOOP.generate_slacked_kkt_system(GOOP_trial1)
-# F = vcat(F, zeros(length(z) - length(F))) # TODO: (DH) cross-check with David
-# z̲ = fill(-Inf, length(z))
-# z̅ = fill(Inf, length(z))
-# parameter_value = zeros(length(θ))
-
-# parametric_mcp = ParametricMCPs.ParametricMCP(F, z, θ, z̲, z̅; compute_sensitivities = false)
-# z_sol, status, info = ParametricMCPs.solve(
-# 	parametric_mcp,
-# 	parameter_value;
-# 	initial_guess = zeros(length(z)),
-# 	verbose = false,
-# 	cumulative_iteration_limit = 100000,
-# 	proximal_perturbation = 1e-2,
-# 	use_basics = true,
-# 	use_start = true,
-# )
-# @show status
-# println("v2 Primal solution: $(z_sol[1:n])")
-# println("v2 Variables: $(z_sol)")
-# println("v2 Objective: $(f(z_sol[1:n], 0))")
-
-
 GOOP_kkt_system = QuasiGOOP.generate_slacked_kkt_system(GOOP_trial1)
 parameter_value = [0, 0]
 (; status, z, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters) = QuasiGOOP.solve(

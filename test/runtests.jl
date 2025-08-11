@@ -6,13 +6,13 @@ using LinearAlgebra: I, norm
 using Symbolics
 using BlockArrays: BlockArrays, BlockArray, Block, blocks, blocksizes
 
-@testset "Trilevel Equality-Constrained Quadratic Program" begin
+@testset "Trilevel Quadratic Program" begin
 	""" Upper-level problem:
 	min_{x} (1/2)x' Q₁ x + c₁'x
 	subject to:
 		x ∈ argmin_{x} (1/2)x' Q₂ x + c₂' x
 						  subject to: x ∈ argmin_{x} (1/2)x' Q₃ x + c₃' x
-														A₃x = b₃
+														A₃x - b₃ = 0, G₃x - h₃ ≥ 0
 	"""
 	n = 4 # x dimension
 	m = 2 # equality dimension
@@ -22,60 +22,30 @@ using BlockArrays: BlockArrays, BlockArray, Block, blocks, blocksizes
 	c₁ = [1.0, 0.0, -1.0, 2.0]
 	Q₂ = 2I(n) # [0 0 0 0; 0 1 0 0; 0 0 2 0; 0 0 0 1]
 	c₂ = [-1.0, 2.0, 0.0, 1.0]
-	Q₃ = 3I(n) #[1 0 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 0]
+	Q₃ = [1 0 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 0] # I(n)
 	c₃ = [0.5, -0.5, 1.0, 0.0]
 	A₃ = [1 0 1 1; 0 1 1 0]
 	b₃ = [1.0, 2.0]
 
-	##### ORIGINAL GOOP VERSION ######
-
-	f(x, θ) = 0.5x[1:n]'*Q₁*x[1:n] + c₁'*x[1:n]
-
-	g(x, θ) = [
-		Q₂ * x[1:n] .+ c₂ - A₃'*x[(n+1):(n+m)] - Q₃'*x[(n+m+1):(n+m+n)]; # Q₂x + c₂ - A₃'μ₂₁ - Q₃'μ₂₂ = 0
-		A₃*x[(n+m+1):(n+m+n)]; # A₃μ₂₂ = 0
-		Q₃ * x[1:n] .+ c₃ - A₃'*x[(n+m+n+1):(n+m+n+m)]; # Q₃x + c₃ - A₃'μ₃ = 0
-		A₃*x[1:n] .- b₃ # A₃x - b₃ = 0
-	]
-	h(x, θ) = []
-
-	dummy_primals = zeros(n + m + n + m)
-	dummy_parameters = [0.0]
-
-	problem = QuasiGOOP.ParametricOptimizationProblem(;
-		objective = f,
-		equality_constraint = g,
-		inequality_constraint = h,
-		parameter_dimension = 1,
-		primal_dimension = length(dummy_primals),
-		equality_dimension = length(g(dummy_primals, dummy_parameters)),
-		inequality_dimension = 0,
-	)
-
-	(; primals, variables, status, info) = QuasiGOOP.solve(problem, [0])
-	orig_primals = primals[1:n]
-	orig_objective = f(orig_primals, 0)
-
-	##### NEW VERSION ######
 	dummy_primals = zeros(n+2n+m+n+m+m)
 	dummy_parameters = [0.0]
 
 	J₁(x, θ) = 0.5x[1:n]'*Q₁*x[1:n] + c₁'*x[1:n]
 	J₂(x, θ) = 0.5x[1:n]'*Q₂*x[1:n] + c₂'*x[1:n]
 	J₃(x, θ) = 0.5x[1:n]'*Q₃*x[1:n] + c₃'*x[1:n]
-	new_g(x, θ) = A₃*x[1:n] .- b₃
+	g_eq(x, θ) = A₃*x[1:n] .- b₃
+	g_ineq(x, θ) = [x[1] - 0.5; x[2] - 0.5]
 
-	x = zeros(n) #zeros(n+2n+m+n+m+m)
+	x = BlockArray(zeros(n), [n]) # single player
 	θ = 0.0
-
 
 	GOOP_trial1 = QuasiGOOP.ParametricGOOP(
 		x,
 		θ;
 		preferences = [[J₁, J₂, J₃]],
 		is_prioritized_constraint = [[false, false, false]],
-		equality_constraints = [new_g],
-		inequality_constraints = [nothing],
+		equality_constraints = [g_eq],
+		inequality_constraints = [g_ineq],
 		shared_equality_constraint = nothing,
 		shared_inequality_constraint = nothing,
 	)
@@ -89,8 +59,8 @@ using BlockArrays: BlockArrays, BlockArray, Block, blocks, blocksizes
 		z₀ = nothing,
 	)
 	new_primals = x[1:n]
-	new_objective = f(new_primals, 0)
+	new_objective = J₁(new_primals, 0)
 
-	@test isapprox(orig_primals, new_primals, atol = 1e-6)
-	@test isapprox(orig_objective, new_objective, atol = 1e-6)
+	@test isapprox([0.5, 1.75, 0.25, 0.25], new_primals, atol = 1e-3)
+	@test isapprox(2.4688, new_objective, atol = 1e-3)
 end
