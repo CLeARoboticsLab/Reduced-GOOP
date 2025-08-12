@@ -15,7 +15,7 @@ Base.@kwdef struct ParametricGOOP{T1, T2, T3, T4, T5}
 
 	"Dimensions for all relevant quantities."
 	primal_dims::Vector{Int}
-	parameter_dims::Int
+	parameter_dims::Vector{Int}
 	equality_dims::Vector{Int}
 	inequality_dims::Vector{Int}
 	shared_equality_dims::Int = 0
@@ -36,8 +36,8 @@ function ParametricGOOP(
 	shared_equality_constraint,
 	shared_inequality_constraint,
 )
-	primal_dims = only(BlockArrays.blocksizes(x)) 
-	parameter_dims = length(θ)
+	primal_dims = only(BlockArrays.blocksizes(x))
+	parameter_dims = only(BlockArrays.blocksizes(θ))
 	equality_dims = map(equality_constraints) do f
 		isnothing(f) ? 0 : length(f(x, θ))
 	end
@@ -80,7 +80,8 @@ function generate_slacked_kkt_system(
 	x =
 		SymbolicTracingUtils.make_variables(backend, :x, sum(goop.primal_dims)) |>
 		to_blockvector(goop.primal_dims)
-	θ = SymbolicTracingUtils.make_variables(backend, :θ, goop.parameter_dims)
+	θ = SymbolicTracingUtils.make_variables(backend, :θ, sum(goop.parameter_dims)) |>
+		to_blockvector(goop.parameter_dims)
 	ϵ = only(SymbolicTracingUtils.make_variables(backend, :ϵ, 1))
 
 	λₛ = SymbolicTracingUtils.make_variables(backend, :λₛ, goop.shared_equality_dims)
@@ -154,7 +155,6 @@ function generate_slacked_kkt_system(
 			h = only(preferences)(x, θ)
 
 			if only(is_prioritized_constraint)
-				@assert false
 				# Highest priority is a constraint.
 				preference_slack = SymbolicTracingUtils.make_variables(
 					backend,
@@ -234,22 +234,21 @@ function generate_slacked_kkt_system(
 		)
 		push!(Ψ, ψ...)
 
-			λ̃ₛ = SymbolicTracingUtils.make_variables(
-				backend,
-				Symbol("λ̃ₛ_$(player)_$(level)"),
-				goop.shared_equality_dims,
-			)
-			push!(Λ, λ̃ₛ...)
+		λ̃ₛ = SymbolicTracingUtils.make_variables(
+			backend,
+			Symbol("λ̃ₛ_$(player)_$(level)"),
+			goop.shared_equality_dims,
+		)
+		push!(Λ, λ̃ₛ...)
 
-			γ̃ₛ = SymbolicTracingUtils.make_variables(
-				backend,
-				Symbol("γ̃ₛ_$(player)_$(level)"),
-				goop.shared_inequality_dims,
-			)
-			push!(Γ, γ̃ₛ...)
+		γ̃ₛ = SymbolicTracingUtils.make_variables(
+			backend,
+			Symbol("γ̃ₛ_$(player)_$(level)"),
+			goop.shared_inequality_dims,
+		)
+		push!(Γ, γ̃ₛ...)
 
 		if first(is_prioritized_constraint)
-			@assert false
 			# Highest priority is a constraint.
 			preference_slack = SymbolicTracingUtils.make_variables(
 				backend,
@@ -326,11 +325,22 @@ function generate_slacked_kkt_system(
 		)
 	end
 
+	# Flatten the F and π vectors for all players.
+	flattened_F = begin
+		if length(goop.primal_dims) > 1
+			mapreduce(vcat, F_π_pair) do pair
+				pair.F
+			end
+		else
+			F_π_pair.F
+		end
+	end
+
 	# Filter out zeros
 	F = Vector{symbolic_type}(
 		filter!(!isnothing,
 			vcat(
-				filter!(!iszero, F_π_pair.F),
+				filter!(!iszero, flattened_F),
 				fₛ,
 				(isnothing(gₛ) ? nothing : gₛ .- σₛ),
 				(isnothing(gₛ) ? nothing : σₛ .* γₛ .- ϵ),
@@ -342,6 +352,7 @@ function generate_slacked_kkt_system(
 	z = Vector{symbolic_type}(
 		vcat(x, s, Σ, Λ, Γ, Ψ, λₛ, γₛ, σₛ),
 	)
+	θ = Vector{symbolic_type}(θ)
 
 	idx = blockedrange(length.([x, s, Σ, Λ, Γ, Ψ, λₛ, γₛ, σₛ]))
 	preference_slack_dims = idx[Block(2)]

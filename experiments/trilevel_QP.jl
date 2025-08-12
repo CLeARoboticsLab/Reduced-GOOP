@@ -102,7 +102,7 @@ g_eq(x, θ) = A₃*x[1:n] .- b₃
 g_ineq(x, θ) = [x[1] - 0.5; x[2] - 0.5]
 
 x = BlockArray(zeros(n), [n]) # single player
-θ = 0.0
+θ = BlockArray([0.0], [1])
 
 
 GOOP_trial1 = QuasiGOOP.ParametricGOOP(
@@ -117,7 +117,7 @@ GOOP_trial1 = QuasiGOOP.ParametricGOOP(
 )
 
 GOOP_kkt_system = QuasiGOOP.generate_slacked_kkt_system(GOOP_trial1)
-parameter_value = [0, 0]
+parameter_value = θ 
 (; status, z, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters) = QuasiGOOP.solve(
 	QuasiGOOP.InteriorPoint(),
 	GOOP_kkt_system,
