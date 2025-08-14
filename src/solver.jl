@@ -137,7 +137,7 @@ function solve(
 			if isnan(α_s) || isnan(α_γ) || isnan(α_σ)
 				verbose && @warn "Linesearch failed. Exiting prematurely."
 				status = :failed
-				Main.@infiltrate
+				# Main.@infiltrate
 				break
 			end
 
