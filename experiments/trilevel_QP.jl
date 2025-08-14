@@ -28,12 +28,10 @@ Q₁ = I(n)
 c₁ = [1.0, 0.0, -1.0, 2.0]
 Q₂ = 2I(n) # [0 0 0 0; 0 1 0 0; 0 0 2 0; 0 0 0 1]
 c₂ = [-1.0, 2.0, 0.0, 1.0]
-Q₃ = [1 0 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 0] #3I(n)
-c₃ = [0.5, -0.5, 1.0, 0.0]
+Q₃ = -[1 0 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 0] #3I(n)
+c₃ = -[0.5, -0.5, 1.0, 0.0]
 A₃ = [1 0 1 1; 0 1 1 0] # A₃x = b₃
 b₃ = [1.0, 2.0]
-G₃ = [1 0 0 0;] # G₃x ≥ h₃
-h₃ = [0.5, 0.0]
 ##### ORIGINAL GOOP VERSION ######
 
 f(x, θ) = 0.5x[1:n]'*Q₁*x[1:n] + c₁'*x[1:n]
@@ -103,25 +101,33 @@ g_ineq(x, θ) = [x[1] - 0.5; x[2] - 0.5]
 
 x = BlockArray(zeros(n), [n]) # single player
 θ = BlockArray([0.0], [1])
-
+goop_preferences = [[J₁, J₂, J₃]]
+is_prioritized_constraint = [[false, false, true]]
+equality_constraints = [g_eq]
+inequality_constraints = [g_ineq]
+shared_equality_constraint = nothing
+shared_inequality_constraint = nothing
 
 GOOP_trial1 = QuasiGOOP.ParametricGOOP(
 	x,
 	θ;
-	preferences = [[J₁, J₂, J₃]],
-	is_prioritized_constraint = [[false, false, false]],
-	equality_constraints = [nothing],
-	inequality_constraints = [nothing],
-	shared_equality_constraint = g_eq,
-	shared_inequality_constraint = g_ineq,
+	preferences = goop_preferences,
+	is_prioritized_constraint,
+	equality_constraints,
+	inequality_constraints,
+	shared_equality_constraint,
+	shared_inequality_constraint,
 )
 
 GOOP_kkt_system = QuasiGOOP.generate_slacked_kkt_system(GOOP_trial1)
-parameter_value = θ 
+parameter_value = θ
 (; status, z, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters) = QuasiGOOP.solve(
 	QuasiGOOP.InteriorPoint(),
 	GOOP_kkt_system,
 	parameter_value;
+	tol = 1e-6,
+	min_stepsize = 1e-4,
+	max_outer_iters = 50,
 	z₀ = nothing,
 	verbose = true,
 )
@@ -133,10 +139,6 @@ println("v3 Objective: $(f(x[1:n], 0))")
 
 ## Cross check with original GOOP##
 # θ is the relaxation factor
-goop_preferences = [[J₁, J₂, J₃]]
-equality_constraints = [g_eq]
-inequality_constraints = [g_ineq]
-
 backend = SymbolicTracingUtils.SymbolicsBackend()
 x = SymbolicTracingUtils.make_variables(backend, :x, n)
 θ = only(SymbolicTracingUtils.make_variables(backend, :θ, 1))
@@ -147,37 +149,73 @@ symbolic_type = eltype(x)
 
 # Keep track of all inequality constraint duals (γ) that we create.
 Γ = []
-function construct_kkt(preferences, player)
+function construct_kkt(preferences, is_prioritized_constraint, player)
 	level = 1 + length(goop_preferences[player]) - length(preferences)
 
+	f = isnothing(equality_constraints[player]) ? nothing : equality_constraints[player](x, θ)
+	g = isnothing(inequality_constraints[player]) ? nothing : inequality_constraints[player](x, θ)
+	λ = SymbolicTracingUtils.make_variables(
+		backend,
+		Symbol("λ_$(player)_$(level)"),
+		isnothing(f) ? 1 : length(f),
+	)
+
+	γ = SymbolicTracingUtils.make_variables(
+		backend,
+		Symbol("γ_$(player)_$(level)"),
+		isnothing(g) ? 1 : length(g),
+	)
 	# Base level
 	if length(preferences) == 1
-		f = equality_constraints[player](x, θ)
-		g = inequality_constraints[player](x, θ)
-		λ = SymbolicTracingUtils.make_variables(
-			backend,
-			Symbol("λ_$(player)_$(level)"),
-			length(f),
-		)
-		push!(Λ, λ...)
+		if only(is_prioritized_constraint) # For now, only the innermost is preference constraint.
+			# Highest priority is a constraint.
+			h = only(preferences)(x, θ)
 
-		γ = SymbolicTracingUtils.make_variables(
-			backend,
-			Symbol("γ_$(player)_$(level)"),
-			length(g),
-		)
-		push!(Γ, γ...)
+			preference_slack = SymbolicTracingUtils.make_variables(
+				backend,
+				Symbol("s_$(player)_$(level)"),
+				length(h), # get the right dimension
+			)
 
-		J = only(preferences)(x, θ)
-		L = J - λ'*f - γ'*g
-		∇L = Symbolics.gradient(L, x)
-		F = Vector{symbolic_type}([∇L; f])
-		G = Vector{symbolic_type}([g; γ; θ - γ'*g]) #ϵ - γ'*g
-		return (; F, G, z = [x; λ; γ])
+			γₚ = SymbolicTracingUtils.make_variables(
+				backend,
+				Symbol("γₚ_$(player)_$(level)"),
+				length(h),
+			)
+
+			γₛ = SymbolicTracingUtils.make_variables(
+				backend,
+				Symbol("γₛ_$(player)_$(level)"),
+				length(h),
+			)
+
+			L =
+				sum(preference_slack) - γₚ' * (h .+ preference_slack) - γₛ' * preference_slack -
+				(isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g)
+
+			∇L = Symbolics.gradient(L, vcat(x, preference_slack))
+			F = Vector{symbolic_type}([∇L; f])
+			G = Vector{symbolic_type}( # TODO: filter out nothing
+				[
+					g; γ; θ - γ'*g;
+					γₚ; h .+ preference_slack; θ - γₚ'*(h .+ preference_slack);
+					γₛ; preference_slack; θ - γₛ' * preference_slack
+				],
+			)
+			return (; F, G, z = [x; preference_slack; λ; γ; γₚ; γₛ])
+		else
+
+			J = only(preferences)(x, θ)
+			L = J - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g)
+			∇L = Symbolics.gradient(L, x)
+			F = Vector{symbolic_type}([∇L; f])
+			G = Vector{symbolic_type}([g; γ; θ - γ'*g]) #ϵ - γ'*g
+			return (; F, G, z = [x; λ; γ])
+		end
 	end
 
 	# Recursive call for the next level.
-	(; F, G, z) = construct_kkt(preferences[2:end], player)
+	(; F, G, z) = construct_kkt(preferences[2:end], is_prioritized_constraint[2:end], player)
 
 	J = first(preferences)(x, θ)
 
@@ -186,13 +224,11 @@ function construct_kkt(preferences, player)
 		Symbol("λ_$(player)_$(level)"),
 		length(F),
 	)
-	push!(Λ, λ...)
 	γ = SymbolicTracingUtils.make_variables(
 		backend,
 		Symbol("γ_$(player)_$(level)"),
 		length(G),
 	)
-	push!(Γ, γ...)
 
 	L = J - λ'*F - γ'*G
 	∇L = Symbolics.gradient(L, z)
@@ -202,7 +238,7 @@ function construct_kkt(preferences, player)
 	return (; F = F̃, G = G̃, z = [z; λ; γ])
 end
 
-(; F, G, z) = construct_kkt(goop_preferences[player][2:end], player)
+(; F, G, z) = construct_kkt(goop_preferences[player][2:end], is_prioritized_constraint[player][2:end], player)
 λ = SymbolicTracingUtils.make_variables(
 	backend,
 	Symbol("λ_$(player)_1"),
@@ -226,16 +262,18 @@ z̅ = [
 	fill(Inf, length(F))
 	fill(Inf, length(G))
 ]
-parameter_value = [0.0]
-Main.@infiltrate
+parameter_value = [1e-5]
 parametric_mcp = ParametricMCPs.ParametricMCP([F; G], [z; λ; γ], [θ], z̲, z̅; compute_sensitivities = false)
 z_sol, status, info = ParametricMCPs.solve(
 	parametric_mcp,
 	parameter_value;
 	initial_guess = zeros(length([z; λ; γ])),
 	verbose = false,
-	cumulative_iteration_limit = 100000,
+	cumulative_iteration_limit = 200000,
 	proximal_perturbation = 1e-2,
+	major_iteration_limit = 1000,
+	minor_iteration_limit = 2000,
+	nms_initial_reference_factor = 50,
 	use_basics = true,
 	use_start = true,
 )

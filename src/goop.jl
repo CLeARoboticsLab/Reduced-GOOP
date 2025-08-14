@@ -84,6 +84,8 @@ function generate_slacked_kkt_system(
 		to_blockvector(goop.parameter_dims)
 	ϵ = only(SymbolicTracingUtils.make_variables(backend, :ϵ, 1))
 
+	η = only(SymbolicTracingUtils.make_variables(backend, :η, 1))
+
 	λₛ = SymbolicTracingUtils.make_variables(backend, :λₛ, goop.shared_equality_dims)
 	γₛ = SymbolicTracingUtils.make_variables(backend, :γₛ, goop.shared_inequality_dims)
 	σₛ = SymbolicTracingUtils.make_variables(backend, :σₛ, goop.shared_inequality_dims)
@@ -99,17 +101,17 @@ function generate_slacked_kkt_system(
 
 
 	# Keep track of all the preference (s) and interior point (σ) slacks we create.
-	s = []
-	Σ = []
+	s = symbolic_type[]
+	Σ = symbolic_type[]
 
 	# Keep track of all equality constraint duals (λ) that we create.
-	Λ = []
+	Λ = symbolic_type[]
 
 	# Keep track of all inequality constraint duals (γ) that we create.
-	Γ = []
+	Γ = symbolic_type[]
 
 	# Keep track of all lower level policy constraint duals (ψ) that we create.
-	Ψ = []
+	Ψ = symbolic_type[]
 
 	# Recursive function to construct a player's KKT conditions.
 	function construct_player_kkt_conditions(
@@ -170,6 +172,13 @@ function generate_slacked_kkt_system(
 				)
 				push!(Σ, σₚ...)
 
+				σₚₛ = SymbolicTracingUtils.make_variables(
+					backend,
+					Symbol("σₚₛ_$(player)_$(level)"),
+					length(h),
+				)
+				push!(Σ, σₚₛ...)
+
 				γₚ = SymbolicTracingUtils.make_variables(
 					backend,
 					Symbol("γₚ_$(player)_$(level)"),
@@ -177,22 +186,32 @@ function generate_slacked_kkt_system(
 				)
 				push!(Γ, γₚ...)
 
+				μₛ = SymbolicTracingUtils.make_variables(
+					backend,
+					Symbol("μₛ_$(player)_$(level)"),
+					length(h),
+				)
+				push!(Γ, μₛ...)
+
 				L =
-					sum(preference_slack) - γₚ' * (h .+ preference_slack) -
+					sum(preference_slack) - γₚ' * (h .+ preference_slack) - μₛ' * preference_slack -
 					(isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
 					(isnothing(fₛ) ? 0 : λₛ' * fₛ) - (isnothing(gₛ) ? 0 : γₛ' * gₛ)
 
 				∇L = Symbolics.gradient(L, vcat(x[Block(player)], preference_slack))
+
 				F = Vector{symbolic_type}(
 					filter!(
 						!isnothing,
 						[
-							∇L
-							h .+ preference_slack .- σₚ
+							∇L .+ η * vcat(x[Block(player)], preference_slack)
 							f
-							(isnothing(g) ? g : g .- σ)
-							(isnothing(g) ? nothing : σ .* γ .- ϵ)
+							h .+ preference_slack .- σₚ
 							σₚ .* γₚ .- ϵ
+							preference_slack .- σₚₛ
+							σₚₛ .* μₛ .- ϵ
+							(isnothing(g) ? nothing : g .- σ)
+							(isnothing(g) ? nothing : σ .* γ .- ϵ)
 						],
 					),
 				)
@@ -207,7 +226,7 @@ function generate_slacked_kkt_system(
 					filter!(
 						!isnothing,
 						[
-							∇L
+							∇L .+ η * x[Block(player)]
 							f
 							(isnothing(g) ? nothing : g .- σ)
 							(isnothing(g) ? nothing : σ .* γ .- ϵ)
@@ -264,6 +283,13 @@ function generate_slacked_kkt_system(
 			)
 			push!(Σ, σₚ...)
 
+			σₚₛ = SymbolicTracingUtils.make_variables(
+				backend,
+				Symbol("σₚₛ_$(player)_$(level)"),
+				length(h),
+			)
+			push!(Σ, σₚₛ...)
+
 			γₚ = SymbolicTracingUtils.make_variables(
 				backend,
 				Symbol("γₚ_$(player)_$(level)"),
@@ -271,16 +297,26 @@ function generate_slacked_kkt_system(
 			)
 			push!(Γ, γₚ...)
 
+			μₛ = SymbolicTracingUtils.make_variables(
+				backend,
+				Symbol("μₛ_$(player)_$(level)"),
+				length(h),
+			)
+			push!(Γ, μₛ...)
+
 			# Form partial Lagrangian at this stage.
-			L = sum(preference_slack) - γₚ' * (h .+ preference_slack) -
-				- ψ' * π - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g)
-			- (isnothing(fₛ) ? 0 : λ̃ₛ' * fₛ) - (isnothing(gₛ) ? 0 : γ̃ₛ' * gₛ)
+			L = sum(preference_slack) - γₚ' * (h .+ preference_slack) - μₛ' * preference_slack -
+				ψ' * π - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
+				(isnothing(fₛ) ? 0 : λ̃ₛ' * fₛ) - (isnothing(gₛ) ? 0 : γ̃ₛ' * gₛ)
 
 			∇L = Symbolics.gradient(L, vcat(x[Block(player)], preference_slack))
+
 			F̃ = [
-				∇L
+				∇L .+ η * vcat(x[Block(player)], preference_slack)
 				h .+ preference_slack .- σₚ
 				σₚ .* γₚ .- ϵ
+				preference_slack .- σₚₛ
+				σₚₛ .* μₛ .- ϵ
 				(isnothing(g) ? nothing : σ .* γ .- ϵ)
 				(isnothing(gₛ) ? nothing : σₛ .* γ̃ₛ .- ϵ) # Note: same slacks (not duals) for all levels
 				F
@@ -289,13 +325,6 @@ function generate_slacked_kkt_system(
 			return (; F = F̃, π = ∇L)
 		else
 			# Current priority is a cost.
-			# ip_slack = SymbolicTracingUtils.make_variables(
-			# 	backend,
-			# 	Symbol("σ_$(player)_$(level)"),
-			# 	goop.inequality_dims[player],
-			# )
-			# push!(Σ, ip_slack...)
-
 			L = h - ψ' * π - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
 				(isnothing(fₛ) ? 0 : λ̃ₛ' * fₛ) - (isnothing(gₛ) ? 0 : γ̃ₛ' * gₛ)
 			∇L = Symbolics.gradient(L, x[Block(player)])
@@ -303,8 +332,7 @@ function generate_slacked_kkt_system(
 				filter!(
 					!isnothing,
 					[
-						∇L
-						#(isnothing(g) ? nothing : g - σ) # TODO: Isn't this repeated at other levels?
+						∇L .+ η * x[Block(player)]
 						(isnothing(g) ? nothing : σ .* γ .- ϵ)
 						(isnothing(gₛ) ? nothing : σₛ .* γ̃ₛ .- ϵ)
 						F
@@ -336,7 +364,7 @@ function generate_slacked_kkt_system(
 		end
 	end
 
-	# Filter out zeros
+	# Filter out zeros and add shared constraints.
 	F = Vector{symbolic_type}(
 		filter!(!isnothing,
 			vcat(
@@ -355,7 +383,7 @@ function generate_slacked_kkt_system(
 	θ = Vector{symbolic_type}(θ)
 
 	idx = blockedrange(length.([x, s, Σ, Λ, Γ, Ψ, λₛ, γₛ, σₛ]))
-	preference_slack_dims = idx[Block(2)]
+	preference_slack_dims = idx[Block(2)] # s
 	interior_point_slack_dims = vcat(idx[Block(3)], idx[Block(9)]) # Σ, σₛ
 	inequality_constraint_dual_dims = vcat(idx[Block(5)], idx[Block(8)]) # Γ, γₛ
 
@@ -364,6 +392,7 @@ function generate_slacked_kkt_system(
 		z,
 		θ,
 		ϵ,
+		η,
 		preference_slack_dims,
 		interior_point_slack_dims,
 		inequality_constraint_dual_dims,

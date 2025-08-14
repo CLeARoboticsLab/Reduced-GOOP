@@ -292,15 +292,15 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 		#         verbose,
 		#     )
 		# end
-        # Main.@infiltrate
 		GOOP_kkt_system = QuasiGOOP.generate_slacked_kkt_system(problem)
 		elapsed_time = @elapsed begin
-			Main.@infiltrate
+			# Main.@infiltrate
 			# sol = solve(problem, θ, σ, κ, max_iterations, tolerance; verbose)
 			(; status, z, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters) = QuasiGOOP.solve(
 				QuasiGOOP.InteriorPoint(),
 				GOOP_kkt_system,
 				θ;
+				tol = 1.0, # ϵ
 				z₀ = nothing,
 				verbose = true,
 			)

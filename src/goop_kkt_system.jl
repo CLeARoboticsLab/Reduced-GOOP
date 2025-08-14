@@ -33,6 +33,7 @@ function BuildGOOPKKTSystem(
 	z_symbolic::Vector{T},
 	θ_symbolic::Vector{T},
 	ϵ_symbolic::T,
+	η_symbolic::T,
 	preference_slack_dims,
 	interior_point_slack_dims,
 	inequality_constraint_dual_dims;
@@ -50,12 +51,13 @@ function BuildGOOPKKTSystem(
 			F_symbolic,
 			z_symbolic,
 			θ_symbolic,
-			ϵ_symbolic;
+			ϵ_symbolic,
+			η_symbolic;
 			in_place = true,
 			backend_options,
 		)
 
-		(result, z; θ, ϵ) -> _F!(result, z, θ, ϵ)
+		(result, z; θ, ϵ, η) -> _F!(result, z, θ, ϵ, η)
 	end
 
 	∇F_z! = let
@@ -64,7 +66,8 @@ function BuildGOOPKKTSystem(
 			∇F_symbolic,
 			z_symbolic,
 			θ_symbolic,
-			ϵ_symbolic;
+			ϵ_symbolic,
+			η_symbolic;
 			in_place = true,
 			backend_options,
 		)
@@ -73,7 +76,7 @@ function BuildGOOPKKTSystem(
 		constant_entries =
 			SymbolicTracingUtils.get_constant_entries(∇F_symbolic, z_symbolic)
 		SymbolicTracingUtils.SparseFunction(
-			(result, z; θ, ϵ) -> _∇F!(result, z, θ, ϵ),
+			(result, z; θ, ϵ, η) -> _∇F!(result, z, θ, ϵ, η),
 			rows,
 			cols,
 			size(∇F_symbolic),

@@ -34,150 +34,163 @@ Keyword arguments:
 	- `linear_solve_algorithm::LinearSolve.SciMLLinearSolveAlgorithm`: the linear solve algorithm to use. Any solver from `LinearSolve.jl` that can handle nonsquare system can be used.
 """
 function solve(
-    ::InteriorPoint,
-    mcp::GOOPKKTSystem,
-    θ::AbstractVector{<:Real};
-    z₀ = nothing,
-    tol = 1e-4,
-    ϵ₀ = :auto,
-    max_inner_iters = 20,
-    max_outer_iters = 50,
-    tightening_rate = 0.1,
-    loosening_rate = 0.5,
-    min_stepsize = 1e-4,
-    verbose = false,
-    linear_solve_algorithm = LinearSolve.KrylovJL_LSMR(), # KrylovJL_CRAIGMR() for non-square KKT systems
+	::InteriorPoint,
+	mcp::GOOPKKTSystem,
+	θ::AbstractVector{<:Real};
+	z₀ = nothing,
+	tol = 1e-4,
+	ϵ₀ = :auto,
+	max_inner_iters = 20,
+	max_outer_iters = 50,
+	tightening_rate = 0.1,
+	loosening_rate = 0.5,
+	min_stepsize = 1e-4,
+	verbose = false,
+	linear_solve_algorithm = LinearSolve.KrylovJL_LSMR(), # LinearSolve.KrylovJL_LSMR(), # KrylovJL_CRAIGMR() for non-square KKT systems
 )
-    z = @something(z₀, begin
-        z = zeros(mcp.variable_dimension)
-        z[mcp.preference_slack_dims] .= 1.0
-        z[mcp.interior_point_slack_dims] .= 1.0
-        z[mcp.inequality_constraint_dual_dims] .= 1.0
-        z
-    end)
-    
-    x = @view z[Not(vcat(mcp.preference_slack_dims, mcp.interior_point_slack_dims, mcp.inequality_constraint_dual_dims))]
-    s = @view z[mcp.preference_slack_dims]
-    σ = @view z[mcp.interior_point_slack_dims]
-    γ = @view z[mcp.inequality_constraint_dual_dims]
+	z = @something(z₀, begin
+		z = zeros(mcp.variable_dimension)
+		z[mcp.preference_slack_dims] .= 1.0
+		z[mcp.interior_point_slack_dims] .= 1.0
+		z[mcp.inequality_constraint_dual_dims] .= 1.0
+		z
+	end)
 
-    # Set up common memory.
-    ∇F = mcp.∇F_z!.result_buffer
-    F = zeros(mcp.kkt_dimension)
-    δz = zeros(mcp.variable_dimension)
-    δx = @view δz[Not(vcat(mcp.preference_slack_dims, mcp.interior_point_slack_dims, mcp.inequality_constraint_dual_dims))]
-    δs = @view δz[mcp.preference_slack_dims]
-    δσ = @view δz[mcp.interior_point_slack_dims]
-    δγ = @view δz[mcp.inequality_constraint_dual_dims]
+	x = @view z[Not(vcat(mcp.preference_slack_dims, mcp.interior_point_slack_dims, mcp.inequality_constraint_dual_dims))]
+	s = @view z[mcp.preference_slack_dims]
+	σ = @view z[mcp.interior_point_slack_dims]
+	γ = @view z[mcp.inequality_constraint_dual_dims]
 
-    linsolve = init(LinearProblem(∇F, δz), linear_solve_algorithm)
+	# Set up common memory.
+	∇F = mcp.∇F_z!.result_buffer
+	F = zeros(mcp.kkt_dimension)
+	δz = zeros(mcp.variable_dimension)
+	δx = @view δz[Not(vcat(mcp.preference_slack_dims, mcp.interior_point_slack_dims, mcp.inequality_constraint_dual_dims))]
+	δs = @view δz[mcp.preference_slack_dims]
+	δσ = @view δz[mcp.interior_point_slack_dims]
+	δγ = @view δz[mcp.inequality_constraint_dual_dims]
 
-    # Main solver loop.
-    if ϵ₀ === :auto
-        is_warmstarted = !isnothing(z₀)
-        if is_warmstarted
-            ϵ = tol
-        else
-            ϵ = one(tol)
-        end
-    else
-        ϵ = ϵ₀
-    end
+	linsolve = init(LinearProblem(∇F, δz), linear_solve_algorithm, maxiters = 1000)
 
-    status = :solved
-    total_iters = 0
-    inner_iters = 1
-    outer_iters = 1
-    kkt_error = Inf
-    while outer_iters < max_outer_iters || iszero(total_iters)
-        inner_iters = 1
-        status = :solved
+	# Main solver loop.
+	if ϵ₀ === :auto
+		is_warmstarted = !isnothing(z₀)
+		if is_warmstarted
+			ϵ = tol
+		else
+			ϵ = one(tol)
+		end
+	else
+		ϵ = ϵ₀
+	end
 
-        verbose && @info "Outer iteration $(outer_iters): ϵ = $ϵ, kkt_error = $kkt_error"
-        # Main.@infiltrate
-        while kkt_error > ϵ && inner_iters < max_inner_iters
-            total_iters += 1
-            # Compute the Newton step.
-            # TODO: Can add some adaptive regularization.
-            # TODO: use a linear operator with a lazy gradient computation here.
-            mcp.F!(F, z; θ, ϵ)
-            mcp.∇F_z!(∇F, z; θ, ϵ)
-            @assert all(.!isnan.(F)) "Found NaN in F - aborting!"
-            @assert all(.!isnan.(∇F)) "Found NaN in ∇F - aborting!"
-            println("condition number of ∇F = $(cond(collect(∇F),2))")
-            linsolve.A = ∇F + tol * I
-            linsolve.b = -F
-            solution = solve!(linsolve)
-            if !SciMLBase.successful_retcode(solution) &&
-               (solution.retcode !== SciMLBase.ReturnCode.Default)
-                verbose &&
-                    @warn "Linear solve failed. Exiting prematurely. Return code: $(solution.retcode)"
-                status = :failed
-                break
-            end
+	status = :solved
+	total_iters = 0
+	inner_iters = 1
+	outer_iters = 1
+	kkt_error = Inf
+	while outer_iters < max_outer_iters || iszero(total_iters)
+		inner_iters = 1
+		status = :solved
 
-            δz .= solution.u
+		verbose && @info "Outer iteration $(outer_iters): ϵ = $ϵ, kkt_error = $kkt_error"
+		# Main.@infiltrate
+		while kkt_error > ϵ && inner_iters < max_inner_iters
+			total_iters += 1
+			# Compute the Newton step.
+			# TODO: Can add some adaptive regularization.
+			# TODO: use a linear operator with a lazy gradient computation here.
+			mcp.F!(F, z; θ, ϵ, η = 0)
+			mcp.∇F_z!(∇F, z; θ, ϵ, η = 0)
+			@assert all(.!isnan.(F)) "Found NaN in F - aborting!"
+			@assert all(.!isnan.(∇F)) "Found NaN in ∇F - aborting!"
+			println("condition number of ∇F = $(cond(collect(∇F),2))")
+            I_idx = vcat(collect(1:4), collect(7:10), collect(13:16), mcp.variable_dimension) #kkt
+            J_idx = vcat(collect(1:4), collect(7:10), collect(13:16), mcp.variable_dimension)
+            V = vcat(ones(4), ones(4), ones(4), 0.0)
+			linsolve.A = ∇F # + 1e-6 * SparseArrays.sparse(I_idx, J_idx, V) #+ I # adding I to a nonsquare matrix?
+			linsolve.b = -F
+            # Main.@infiltrate
+            # println("inertia of ∇F = $(LinearAlgebra.eigen(Array(∇F'*∇F + 1e-4 * SparseArrays.sparse(I_idx, J_idx, V))))")
+			solution = solve!(linsolve)
+			if !SciMLBase.successful_retcode(solution) &&
+			   (solution.retcode !== SciMLBase.ReturnCode.Default)
+				verbose &&
+					@warn "Linear solve failed. Exiting prematurely. Return code: $(solution.retcode)"
+				status = :failed
+				break
+			end
 
-            # Fraction to the boundary linesearch.
+			δz .= solution.u
 
-            α_s = fraction_to_the_boundary_linesearch(s, δs; tol = min_stepsize)
-            α_σ = fraction_to_the_boundary_linesearch(σ, δσ; tol = min_stepsize, max_stepsize = α_s)
-            
-            α_γ = fraction_to_the_boundary_linesearch(γ, δγ; tol = min_stepsize)
+			# Fraction to the boundary linesearch.
 
-            println("α_s = $α_s, α_σ = $α_σ, α_γ = $α_γ")
+			α_σ = fraction_to_the_boundary_linesearch(σ, δσ; tol = min_stepsize)
+			α_s = fraction_to_the_boundary_linesearch(s, δs; tol = min_stepsize, max_stepsize = α_σ)
+			# α_s = fraction_to_the_boundary_linesearch(s, δs; tol = min_stepsize)
+			# α_σ = fraction_to_the_boundary_linesearch(σ, δσ; tol = min_stepsize, max_stepsize = α_s)
 
-            if isnan(α_s) || isnan(α_γ) || isnan(α_σ)
-                verbose && @warn "Linesearch failed. Exiting prematurely."
-                status = :failed
-                break
-            end
+			α_γ = fraction_to_the_boundary_linesearch(γ, δγ; tol = min_stepsize)
 
-            # Update variables accordingly.
-            @. x += α_σ * δx
-            @. s += α_σ * δs
-            @. σ += α_σ * δσ
-            @. γ += α_γ * δγ
+			println("α_s = $α_s, α_σ = $α_σ, α_γ = $α_γ")
 
-            kkt_error = norm(F, Inf)
+			if isnan(α_s) || isnan(α_γ) || isnan(α_σ)
+				verbose && @warn "Linesearch failed. Exiting prematurely."
+				status = :failed
+				Main.@infiltrate
+				break
+			end
 
-            println("KKT error = $kkt_error")
+			# Update variables accordingly.
+			@. x += α_s * δx
+			@. s += α_s * δs
+			@. σ += α_s * δσ
+			@. γ += α_γ * δγ
 
-            inner_iters += 1
-        end
+			# @. x += α_σ * δx
+			# @. s += α_σ * δs
+			# @. σ += α_σ * δσ
+			# @. γ += α_γ * δγ
 
-        if kkt_error <= ϵ <= tol
-            break
-        end
+			kkt_error = norm(F, Inf)
 
-        ϵ *= if status === :solved
-            1 - exp(-tightening_rate * inner_iters)
-        else
-            1 + exp(-loosening_rate * inner_iters)
-        end
-        ϵ = min(ϵ, one(ϵ))
-        outer_iters += 1
-    end
+			println("KKT error = $kkt_error")
 
-    if outer_iters == max_outer_iters
-        status = :failed
-    end
+			inner_iters += 1
+		end
 
-    (; status, z, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters)
+		if kkt_error <= ϵ <= tol
+			break
+		end
+
+		ϵ *= if status === :solved
+			1 - exp(-tightening_rate * inner_iters)
+		else
+			1 + exp(-loosening_rate * inner_iters)
+		end
+		ϵ = min(ϵ, one(ϵ))
+		outer_iters += 1
+	end
+
+	if outer_iters == max_outer_iters
+		status = :failed
+	end
+
+	(; status, z, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters)
 end
 
 """Helper function to compute the step size `α` which solves:
 				   α* = max(α ∈ [0, 1] : v + α δ ≥ (1 - τ) v).
 """
 function fraction_to_the_boundary_linesearch(v, δ; max_stepsize = 1.0, τ = 0.995, decay = 0.5, tol = 1e-4)
-    α = max_stepsize
-    while any(@. v + α * δ < (1 - τ) * v)
-        if α < tol
-            return NaN
-        end
+	α = max_stepsize
+	while any(@. v + α * δ < (1 - τ) * v)
+		if α < tol
+			return NaN
+		end
 
-        α *= decay
-    end
+		α *= decay
+	end
 
-    α
+	α
 end
