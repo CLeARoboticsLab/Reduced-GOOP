@@ -186,15 +186,15 @@ function generate_slacked_kkt_system(
 				)
 				push!(Γ, γₚ...)
 
-				μₛ = SymbolicTracingUtils.make_variables(
-					backend,
-					Symbol("μₛ_$(player)_$(level)"),
-					length(h),
-				)
-				push!(Γ, μₛ...)
+				# μₛ = SymbolicTracingUtils.make_variables(
+				# 	backend,
+				# 	Symbol("μₛ_$(player)_$(level)"),
+				# 	length(h),
+				# )
+				# push!(Γ, μₛ...)
 
 				L =
-					sum(preference_slack) - γₚ' * (h .+ preference_slack) - μₛ' * preference_slack -
+					sum(preference_slack) - γₚ' * (h .+ preference_slack) - #μₛ' * preference_slack -
 					(isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
 					(isnothing(fₛ) ? 0 : λₛ' * fₛ) - (isnothing(gₛ) ? 0 : γₛ' * gₛ)
 
@@ -208,8 +208,8 @@ function generate_slacked_kkt_system(
 							f
 							h .+ preference_slack .- σₚ
 							σₚ .* γₚ .- ϵ
-							preference_slack .- σₚₛ
-							σₚₛ .* μₛ .- ϵ
+							# preference_slack .- σₚₛ
+							# σₚₛ .* μₛ .- ϵ
 							(isnothing(g) ? nothing : g .- σ)
 							(isnothing(g) ? nothing : σ .* γ .- ϵ)
 						],
@@ -297,15 +297,15 @@ function generate_slacked_kkt_system(
 			)
 			push!(Γ, γₚ...)
 
-			μₛ = SymbolicTracingUtils.make_variables(
-				backend,
-				Symbol("μₛ_$(player)_$(level)"),
-				length(h),
-			)
-			push!(Γ, μₛ...)
+			# μₛ = SymbolicTracingUtils.make_variables(
+			# 	backend,
+			# 	Symbol("μₛ_$(player)_$(level)"),
+			# 	length(h),
+			# )
+			# push!(Γ, μₛ...)
 
 			# Form partial Lagrangian at this stage.
-			L = sum(preference_slack) - γₚ' * (h .+ preference_slack) - μₛ' * preference_slack -
+			L = sum(preference_slack) - γₚ' * (h .+ preference_slack) - #μₛ' * preference_slack -
 				ψ' * π - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
 				(isnothing(fₛ) ? 0 : λ̃ₛ' * fₛ) - (isnothing(gₛ) ? 0 : γ̃ₛ' * gₛ)
 
@@ -315,8 +315,8 @@ function generate_slacked_kkt_system(
 				∇L .+ η * vcat(x[Block(player)], preference_slack)
 				h .+ preference_slack .- σₚ
 				σₚ .* γₚ .- ϵ
-				preference_slack .- σₚₛ
-				σₚₛ .* μₛ .- ϵ
+				# preference_slack .- σₚₛ
+				# σₚₛ .* μₛ .- ϵ
 				(isnothing(g) ? nothing : σ .* γ .- ϵ)
 				(isnothing(gₛ) ? nothing : σₛ .* γ̃ₛ .- ϵ) # Note: same slacks (not duals) for all levels
 				F

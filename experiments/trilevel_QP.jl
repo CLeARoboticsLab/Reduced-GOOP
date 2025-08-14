@@ -269,11 +269,11 @@ z_sol, status, info = ParametricMCPs.solve(
 	parameter_value;
 	initial_guess = zeros(length([z; λ; γ])),
 	verbose = false,
-	cumulative_iteration_limit = 200000,
+	cumulative_iteration_limit = 100000,
 	proximal_perturbation = 1e-2,
-	major_iteration_limit = 1000,
-	minor_iteration_limit = 2000,
-	nms_initial_reference_factor = 50,
+	# major_iteration_limit = 1000,
+	# minor_iteration_limit = 2000,
+	# nms_initial_reference_factor = 50,
 	use_basics = true,
 	use_start = true,
 )
