@@ -70,7 +70,7 @@ function solve(
 	δσ = @view δz[mcp.interior_point_slack_dims]
 	δγ = @view δz[mcp.inequality_constraint_dual_dims]
 
-	linsolve = init(LinearProblem(∇F, δz), linear_solve_algorithm, maxiters = 1000)
+	linsolve = init(LinearProblem(∇F, δz), linear_solve_algorithm, maxiters = 10000)
 
 	# Main solver loop.
 	if ϵ₀ === :auto
@@ -101,17 +101,17 @@ function solve(
 			# TODO: Can add some adaptive regularization.
 			# TODO: use a linear operator with a lazy gradient computation here.
 			mcp.F!(F, z; θ, ϵ, η = 0)
-			mcp.∇F_z!(∇F, z; θ, ϵ, η = 0)
+			mcp.∇F_z!(∇F, z; θ, ϵ, η = 5e-1)
 			@assert all(.!isnan.(F)) "Found NaN in F - aborting!"
 			@assert all(.!isnan.(∇F)) "Found NaN in ∇F - aborting!"
 			println("condition number of ∇F = $(cond(collect(∇F),2))")
-            I_idx = vcat(collect(1:4), collect(7:10), collect(13:16), mcp.variable_dimension) #kkt
-            J_idx = vcat(collect(1:4), collect(7:10), collect(13:16), mcp.variable_dimension)
-            V = vcat(ones(4), ones(4), ones(4), 0.0)
-			linsolve.A = ∇F # + 1e-6 * SparseArrays.sparse(I_idx, J_idx, V) #+ I # adding I to a nonsquare matrix?
+			println("min singular value of ∇F = $(minimum(svdvals(Array(∇F))))")
+			println("max singular value of ∇F = $(maximum(svdvals(Array(∇F))))")
+			# Main.@infiltrate
+			linsolve.A = ∇F
 			linsolve.b = -F
-            # Main.@infiltrate
-            # println("inertia of ∇F = $(LinearAlgebra.eigen(Array(∇F'*∇F + 1e-4 * SparseArrays.sparse(I_idx, J_idx, V))))")
+			# Main.@infiltrate
+			# println("inertia of ∇F = $(LinearAlgebra.eigen(Array(∇F'*∇F + 1e-4 * SparseArrays.sparse(I_idx, J_idx, V))))")
 			solution = solve!(linsolve)
 			if !SciMLBase.successful_retcode(solution) &&
 			   (solution.retcode !== SciMLBase.ReturnCode.Default)
@@ -125,26 +125,29 @@ function solve(
 
 			# Fraction to the boundary linesearch.
 
-			α_σ = fraction_to_the_boundary_linesearch(σ, δσ; tol = min_stepsize)
-			α_s = fraction_to_the_boundary_linesearch(s, δs; tol = min_stepsize, max_stepsize = α_σ)
+			α_σ = fraction_to_the_boundary_linesearch(σ, δσ; tol = 0.001*min_stepsize) #, max_stepsize = 0.1)
+			# α_s = fraction_to_the_boundary_linesearch(s, δs; tol = 0.001*min_stepsize, max_stepsize = 0.1)
 			# α_s = fraction_to_the_boundary_linesearch(s, δs; tol = min_stepsize)
 			# α_σ = fraction_to_the_boundary_linesearch(σ, δσ; tol = min_stepsize, max_stepsize = α_s)
 
-			α_γ = fraction_to_the_boundary_linesearch(γ, δγ; tol = min_stepsize)
+			α_γ = fraction_to_the_boundary_linesearch(γ, δγ; tol = min_stepsize) #, max_stepsize = 0.1)
 
-			println("α_s = $α_s, α_σ = $α_σ, α_γ = $α_γ")
+			# println("α_s = $α_s, α_σ = $α_σ, α_γ = $α_γ")
+			println("α_σ = $α_σ, α_γ = $α_γ")
 
-			if isnan(α_s) || isnan(α_γ) || isnan(α_σ)
+
+			# if isnan(α_s) || isnan(α_γ) || isnan(α_σ)
+			if isnan(α_γ) || isnan(α_σ)
+
 				verbose && @warn "Linesearch failed. Exiting prematurely."
 				status = :failed
-				# Main.@infiltrate
 				break
 			end
-
+			# α_x = max(α_s, α_σ)
 			# Update variables accordingly.
-			@. x += α_s * δx
-			@. s += α_s * δs
-			@. σ += α_s * δσ
+			@. x += α_σ * δx
+			@. s += α_σ * δs
+			@. σ += α_σ * δσ
 			@. γ += α_γ * δγ
 
 			# @. x += α_σ * δx

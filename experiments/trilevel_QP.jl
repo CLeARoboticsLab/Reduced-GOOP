@@ -195,7 +195,7 @@ function construct_kkt(preferences, is_prioritized_constraint, player)
 
 			∇L = Symbolics.gradient(L, vcat(x, preference_slack))
 			F = Vector{symbolic_type}([∇L; f])
-			G = Vector{symbolic_type}( # TODO: filter out nothing
+			G = Vector{symbolic_type}(
 				[
 					g; γ; θ - γ'*g;
 					γₚ; h .+ preference_slack; θ - γₚ'*(h .+ preference_slack);
@@ -263,6 +263,7 @@ z̅ = [
 	fill(Inf, length(G))
 ]
 parameter_value = [1e-5]
+Main.@infiltrate
 parametric_mcp = ParametricMCPs.ParametricMCP([F; G], [z; λ; γ], [θ], z̲, z̅; compute_sensitivities = false)
 z_sol, status, info = ParametricMCPs.solve(
 	parametric_mcp,

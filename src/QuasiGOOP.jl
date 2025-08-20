@@ -6,7 +6,7 @@ using Symbolics: Symbolics
 using BlockArrays: BlockArrays, BlockArray, Block, blocks, blocksizes, blockedrange
 using SparseArrays: SparseArrays
 using InvertedIndices: Not
-using LinearAlgebra: LinearAlgebra, I, norm, eigvals, cond
+using LinearAlgebra: LinearAlgebra, I, norm, eigvals, cond, svdvals
 using LinearSolve: LinearSolve, LinearProblem, init, solve!
 using SciMLBase: SciMLBase
 using SymbolicTracingUtils: SymbolicTracingUtils
