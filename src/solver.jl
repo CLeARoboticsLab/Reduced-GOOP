@@ -71,7 +71,7 @@ function solve(
 	δσ = @view δz[mcp.interior_point_slack_dims]
 	δγ = @view δz[mcp.inequality_constraint_dual_dims]
 
-	linsolve = init(LinearProblem(∇F, δz), linear_solve_algorithm, maxiters = 20000)
+	linsolve = init(LinearProblem(∇F, δz), linear_solve_algorithm, maxiters = 100000)
 
 	# Main solver loop.
 	if ϵ₀ === :auto

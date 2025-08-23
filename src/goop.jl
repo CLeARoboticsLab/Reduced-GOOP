@@ -188,7 +188,7 @@ function generate_slacked_kkt_system(
 				push!(Γ, μₛ...)
 
 				L =
-					sum(preference_slack) - γₚ' * (h .+ preference_slack) - μₛ' * preference_slack -
+					2sum(preference_slack) - γₚ' * (h .+ preference_slack) - μₛ' * preference_slack -
 					(isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
 					(isnothing(fₛ) ? 0 : λₛ' * fₛ) - (isnothing(gₛ) ? 0 : γₛ' * gₛ)
 
@@ -300,7 +300,7 @@ function generate_slacked_kkt_system(
 			push!(Γ, μₛ...)
 
 			# Form partial Lagrangian at this stage.
-			L = sum(preference_slack) - γₚ' * (h .+ preference_slack) - μₛ' * preference_slack -
+			L = 2sum(preference_slack) - γₚ' * (h .+ preference_slack) - μₛ' * preference_slack -
 				ψ' * π - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
 				(isnothing(fₛ) ? 0 : λ̃ₛ' * fₛ) - (isnothing(gₛ) ? 0 : γ̃ₛ' * gₛ)
 

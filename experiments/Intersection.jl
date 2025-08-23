@@ -195,7 +195,7 @@ function get_setup(
 				)
 				mapreduce(vcat, 1:length(xs)) do k
 					px, py, vx, vy = xs[k]
-					vcat(vx + 1.0, -vx + 1.0, vy + 1.0, -vy + 1.0)
+					vcat(vx + 1.5, -vx + 1.5, vy + 1.5, -vy + 1.5)
 				end
 			end,
 
@@ -249,16 +249,16 @@ end
 
 function demo(; map_end = 7, lane_width = 2, verbose = false)
 	# Algorithm setting
-	σ = 20
-	κ = 0.6
-	max_iterations = 10
-	tolerance = 5e-2
+	# σ = 20
+	# κ = 0.6
+	# max_iterations = 10
+	# tolerance = 5e-2
 	relaxation_mode = :standard
 
 	num_players = 2
 	control_bounds = (; lb = [-2.0, -2.0], ub = [2.0, 2.0])
-	dynamics = planar_double_integrator(; dt = 1.0, control_bounds) # x := (px, py, vx, vy) and u := (ax, ay).
-	planning_horizon = 7
+	dynamics = planar_double_integrator(; dt = 0.5, control_bounds) # x := (px, py, vx, vy) and u := (ax, ay).
+	planning_horizon = 10
 	collision_avoidance = 1.3
 
 	(; problem, flatten_parameters) = get_setup(
@@ -286,7 +286,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 				QuasiGOOP.InteriorPoint(),
 				GOOP_kkt_system,
 				θ;
-				tol = 1e-4,
+				tol = 5e-3,
 				η₀ = 5e-1, # 0.5
 				ϵ₀ = 10.0, # 5.0
 				max_inner_iters = 30, # 20
@@ -560,6 +560,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 
 	# Save img 
 	GLMakie.save("data/Intersection_closed_loop/trajectory.png", figure)
+	# Main.@infiltrate
 
 	# closed_loop + receding horizon demo
 	time_step = 1
@@ -571,6 +572,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 	    θ1.val[1:state_dim(dynamics)] = first(strategy[]).xs[begin + 1] # Asynchronous update: mutate p1's initial state without triggering others
 	    println("Update initial state2")
 	    initial_state2[] = strategy[][2].xs[begin + 1]
+		# Main.@infiltrate
 	    time_step += 1
 	end
 
