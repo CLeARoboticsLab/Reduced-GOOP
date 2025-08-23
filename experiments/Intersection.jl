@@ -47,14 +47,13 @@ function get_setup(
 			goal_deviation = xs[end][1:2] .- goal_position
 			0.5*sum(sum(u .^ 2) for u in us) + sum(goal_deviation .^ 2) # ||x - x\_goal||^ 2
 		end, #for i in 1:num_players
-
 		function (z, θ)
 			(; xs, us) =
 				unflatten_trajectory(z[Block(2)], state_dimension, control_dimension)
 			(; goal_position) = unflatten_parameters(θ[Block(2)]) # Player 2 θ[Block(i)] Car
 			goal_deviation = xs[end][1:2] .- goal_position
 			0.5*sum(sum(u .^ 2) for u in us) + sum(goal_deviation .^ 2) # ||x - x\_goal||^ 2
-		end
+		end,
 	]
 
 	equality_constraints = [
@@ -128,95 +127,95 @@ function get_setup(
 
 	prioritized_preferences = [
 		[
-		# # Drive under speed limit 
-		# function (z, θ)
-		# 	(; xs, us) = unflatten_trajectory(
-		# 		z[Block(1)],
-		# 		state_dimension,
-		# 		control_dimension,
-		# 	)
-		# 	mapreduce(vcat, 1:length(xs)) do k
-		# 		px, py, vx, vy = xs[k]
-		# 		vcat(vx + 1.5, -vx + 1.5, vy + 1.5, -vy + 1.5)
-		# 	end
-		# end,
+			# Drive under speed limit 
+			function (z, θ)
+				(; xs, us) = unflatten_trajectory(
+					z[Block(1)],
+					state_dimension,
+					control_dimension,
+				)
+				mapreduce(vcat, 1:length(xs)) do k
+					px, py, vx, vy = xs[k]
+					vcat(vx + 1.5, -vx + 1.5, vy + 1.5, -vy + 1.5)
+				end
+			end,
 
-		# # Keep center (yellow) line
-		# function (z, θ)
-		# 	(; xs, us) = unflatten_trajectory(
-		# 		z[Block(1)],
-		# 		state_dimension,
-		# 		control_dimension,
-		# 	)
-		# 	mapreduce(vcat, 1:length(xs)) do k
-		# 		px, py, vx, vy = xs[k]
-		# 		-py # py ≤ 0.0
-		# 	end
-		# end,
+			# Keep center (yellow) line
+			function (z, θ)
+				(; xs, us) = unflatten_trajectory(
+					z[Block(1)],
+					state_dimension,
+					control_dimension,
+				)
+				mapreduce(vcat, 1:length(xs)) do k
+					px, py, vx, vy = xs[k]
+					-py # py ≤ 0.0
+				end
+			end,
 
-		# # reach the goal. (highest priority)
-		# function (z, θ)
-		# 	(; xs, us) = unflatten_trajectory(
-		# 		z[Block(1)],
-		# 		state_dimension,
-		# 		control_dimension,
-		# 	)
-		# 	(; goal_position) = unflatten_parameters(θ[Block(1)]) # Player 1 θ[Block(i)] Ambuluance
-		# 	goal_deviation = xs[end][1:2] .- goal_position
-		# 	[
-		# 		goal_deviation .+ 0.1 # change to ||x - x\_goal||^ 2
-		# 		-goal_deviation .+ 0.1
-		# 	]
-		# 	sum(goal_deviation .^ 2) # ||x - x\_goal||^ 2
-		# end,
+			# reach the goal. (highest priority)
+			function (z, θ)
+				(; xs, us) = unflatten_trajectory(
+					z[Block(1)],
+					state_dimension,
+					control_dimension,
+				)
+				(; goal_position) = unflatten_parameters(θ[Block(1)]) # Player 1 θ[Block(i)] Ambuluance
+				goal_deviation = xs[end][1:2] .- goal_position
+				[
+					goal_deviation .+ 0.1 # change to ||x - x\_goal||^ 2
+					-goal_deviation .+ 0.1
+				]
+				sum(goal_deviation .^ 2) # ||x - x\_goal||^ 2
+			end,
 		],
 		[
-		# # reach the goal.
-		# function (z, θ)
-		# 	(; xs, us) = unflatten_trajectory(
-		# 		z[Block(2)],
-		# 		state_dimension,
-		# 		control_dimension,
-		# 	)
-		# 	(; goal_position) = unflatten_parameters(θ[Block(2)]) # Player 2
-		# 	goal_deviation = xs[end][1:2] .- goal_position
-		# 	[
-		# 		goal_deviation .+ 0.1
-		# 		-goal_deviation .+ 0.1
-		# 	]
-		# 	1 - sum(goal_deviation .^ 2)
-		# end,
+			# reach the goal.
+			function (z, θ)
+				(; xs, us) = unflatten_trajectory(
+					z[Block(2)],
+					state_dimension,
+					control_dimension,
+				)
+				(; goal_position) = unflatten_parameters(θ[Block(2)]) # Player 2
+				goal_deviation = xs[end][1:2] .- goal_position
+				[
+					goal_deviation .+ 0.1
+					-goal_deviation .+ 0.1
+				]
+				1 - sum(goal_deviation .^ 2)
+			end,
 
-		# Drive under speed limit 
-		function (z, θ)
-			(; xs, us) = unflatten_trajectory(
-				z[Block(2)],
-				state_dimension,
-				control_dimension,
-			)
-			mapreduce(vcat, 1:length(xs)) do k
-				px, py, vx, vy = xs[k]
-				vcat(vx + 1.5, -vx + 1.5, vy + 1.5, -vy + 1.5)
-			end
-		end,
+			# Drive under speed limit 
+			function (z, θ)
+				(; xs, us) = unflatten_trajectory(
+					z[Block(2)],
+					state_dimension,
+					control_dimension,
+				)
+				mapreduce(vcat, 1:length(xs)) do k
+					px, py, vx, vy = xs[k]
+					vcat(vx + 1.0, -vx + 1.0, vy + 1.0, -vy + 1.0)
+				end
+			end,
 
-		# # Keep center (yellow) line (highest priority)
-		# function (z, θ)
-		# 	(; xs, us) = unflatten_trajectory(
-		# 		z[Block(2)],
-		# 		state_dimension,
-		# 		control_dimension,
-		# 	)
-		# 	mapreduce(vcat, 1:length(xs)) do k
-		# 		px, py, vx, vy = xs[k]
-		# 		px + 0.0 # px ≥ 0.0
-		# 	end
-		# end,
+			# Keep center (yellow) line (highest priority)
+			function (z, θ)
+				(; xs, us) = unflatten_trajectory(
+					z[Block(2)],
+					state_dimension,
+					control_dimension,
+				)
+				mapreduce(vcat, 1:length(xs)) do k
+					px, py, vx, vy = xs[k]
+					px + 0.0 # px ≥ 0.0
+				end
+			end,
 		],
 	]
 
 	# Specify prioritized constraint [lowest priority, ..., highest priority]
-	is_prioritized_constraint = [[false], [false, true]] #[[false, false, true, true], [false, true, true, false]]
+	is_prioritized_constraint = [[false, true, true, false], [false, false, true, true]] #[[false, true], [false, true]] #
 	preferences = [vcat(objectives[player], prioritized_preferences[player]) for player in 1:num_players]
 
 	# Shared constraints
@@ -283,17 +282,16 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 	function get_receding_horizon_solution(θ; warmstart_solution)
 		GOOP_kkt_system = QuasiGOOP.generate_slacked_kkt_system(problem)
 		elapsed_time = @elapsed begin
-			# Main.@infiltrate
-			# sol = solve(problem, θ, σ, κ, max_iterations, tolerance; verbose)
 			(; status, z, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters) = QuasiGOOP.solve(
 				QuasiGOOP.InteriorPoint(),
 				GOOP_kkt_system,
 				θ;
-				tol = 2e-4,
-				ϵ₀ = 5.0,
+				tol = 1e-4,
+				η₀ = 5e-1, # 0.5
+				ϵ₀ = 10.0, # 5.0
 				max_inner_iters = 30, # 20
 				max_outer_iters = 30, # 50
-				min_stepsize = 1e-8,
+				min_stepsize = 1e-4,
 				z₀ = nothing,
 				verbose = true,
 			)
@@ -303,35 +301,35 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 			error("GOOP solver failed to converge.")
 		end
 
-		# TODO: Choose the solution with best complementarity residual
-		# min_residual_idx = argmin(residual)
-		# println("residual: ", residual[min_residual_idx])
-		# println("relaxation: ", relaxation[min_residual_idx])
-		# println("slacks: ", solution[min_residual_idx].slacks)
 		strategies = mapreduce(vcat, 1:num_players) do i
+			start_idx = primal_dimension * (i-1) + 1
+			end_idx = start_idx + primal_dimension - 1
+			x_segment = x[start_idx:end_idx]   # same as sol.primals[i][1:primal_dimension]
+
 			unflatten_trajectory(
-				x, # sol.primals[i][1:primal_dimension],
+				x_segment,
 				state_dim(dynamics),
 				control_dim(dynamics),
 			)
 		end
 		# Save solution
 		solution_dict = Dict(
-			# "residual" => residual[min_residual_idx],
-			# "relaxation" => relaxation[min_residual_idx],
-			# "slacks" => solution[min_residual_idx].slacks,
-			"strategy1" => strategies[1],
-			"strategy2" => strategies[2],
-			"primals" => sol.primals,
+			"strategies" => strategies,
+			"z" => z,
+			"x" => x,
+			"s" => s,
+			"kkt_error" => kkt_error,
+			"ϵ" => ϵ,
+			"outer_iters" => outer_iters,
+			"total_iters" => total_iters,
 		)
 		file_name = "intersection_"*string(now())*".jld2"
 		JLD2.save_object(
 			"./data/Intersection_closed_loop/GOOP_solution/$(file_name)",
 			solution_dict,
 		)
-		# JLD2.save_object("./data/Intersection_closed_loop/GOOP_solution/intersection.jld2", solution_dict)
 
-		(; strategies, sol)
+		strategies
 	end
 
 	obstacle_position = Observable([0.25, 0.15]) # placeholder
@@ -375,7 +373,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 	strategy = GLMakie.@lift let
 		result = get_receding_horizon_solution($θ; warmstart_solution)
 		warmstart_solution = nothing
-		result.strategies
+		result
 	end
 
 	# Plot using GLMakie
@@ -530,7 +528,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 
 	# GLMakie.plot!(ax, goop_strategy1, color = :blue)
 	# GLMakie.plot!(ax, goop_strategy2, color = :red)
-	Main.@infiltrate
+	# Main.@infiltrate
 	strategy1 = GLMakie.@lift OpenLoopStrategy($strategy[1].xs, $strategy[1].us)
 	strategy2 = GLMakie.@lift OpenLoopStrategy($strategy[2].xs, $strategy[2].us)
 	GLMakie.plot!(ax, strategy1, color = :blue)
@@ -563,70 +561,70 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 	# Save img 
 	GLMakie.save("data/Intersection_closed_loop/trajectory.png", figure)
 
-	# # closed_loop + receding horizon demo
-	# time_step = 2
-	# while time_step < 3 #15
-	#     println("time_step: ", time_step)
-	#     GLMakie.save("data/Intersection_closed_loop/trajectory$(time_step).png", figure)
-	#     # Update the positions of the vehicles
-	#     println("Update initial state1")
-	#     θ1.val[1:state_dim(dynamics)] = first(strategy[]).xs[begin + 1] # Asynchronous update: mutate p1's initial state without triggering others
-	#     println("Update initial state2")
-	#     initial_state2[] = strategy[][2].xs[begin + 1]
-	#     time_step += 1
-	# end
+	# closed_loop + receding horizon demo
+	time_step = 1
+	while time_step < 15 #15
+	    println("time_step: ", time_step)
+	    GLMakie.save("data/Intersection_closed_loop/trajectory$(time_step-1).png", figure)
+	    # Update the positions of the vehicles
+	    println("Update initial state1")
+	    θ1.val[1:state_dim(dynamics)] = first(strategy[]).xs[begin + 1] # Asynchronous update: mutate p1's initial state without triggering others
+	    println("Update initial state2")
+	    initial_state2[] = strategy[][2].xs[begin + 1]
+	    time_step += 1
+	end
 
-	# # Store speed data for Intersection
-	# horizontal_speed_data = Vector{Vector{Float64}}[]
-	# vertical_speed_data = Vector{Vector{Float64}}[]
-	# openloop_distance1 = Vector{Float64}[]
+	# Store speed data for Intersection
+	horizontal_speed_data = Vector{Vector{Float64}}[]
+	vertical_speed_data = Vector{Vector{Float64}}[]
+	openloop_distance1 = Vector{Float64}[]
 
-	# # Store openloop speed data
-	# push!(horizontal_speed_data, [vcat(strategy[][1].xs...)[3:4:end], vcat(strategy[][2].xs...)[3:4:end]])#, vcat(strategy[3].xs...)[3:4:end]])
-	# push!(vertical_speed_data, [vcat(strategy[][1].xs...)[4:4:end], vcat(strategy[][2].xs...)[4:4:end]])#, vcat(strategy[3].xs...)[4:4:end]])
+	# Store openloop speed data
+	push!(horizontal_speed_data, [vcat(strategy[][1].xs...)[3:4:end], vcat(strategy[][2].xs...)[3:4:end]])#, vcat(strategy[3].xs...)[3:4:end]])
+	push!(vertical_speed_data, [vcat(strategy[][1].xs...)[4:4:end], vcat(strategy[][2].xs...)[4:4:end]])#, vcat(strategy[3].xs...)[4:4:end]])
 
-	# # Store openloop distance data
-	# push!(openloop_distance1, [sqrt(sum((strategy[][1].xs[k][1:2] - strategy[][2].xs[k][1:2]) .^ 2)) for k in 1:planning_horizon])
+	# Store openloop distance data
+	push!(openloop_distance1, [sqrt(sum((strategy[][1].xs[k][1:2] - strategy[][2].xs[k][1:2]) .^ 2)) for k in 1:planning_horizon])
 
-	# # Visualize horizontal speed
-	# T = 1
-	# fig = GLMakie.Figure() # limits = (nothing, (nothing, 0.7))
-	# ax2 = GLMakie.Axis(fig[1, 1]; xlabel = "time step", ylabel = "speed", title = "Horizontal Speed")
-	# GLMakie.scatterlines!(ax2, 0:planning_horizon-1, horizontal_speed_data[T][1], label = "Vehicle 1", color = :blue)
-	# GLMakie.scatterlines!(ax2, 0:planning_horizon-1, horizontal_speed_data[T][2], label = "Vehicle 2", color = :red)
-	# GLMakie.lines!(ax2, 0:planning_horizon-1, [1.5 for _ in 0:planning_horizon-1], color = :black, linestyle = :dash)
-	# fig[2,1:2] = GLMakie.Legend(fig, ax2, framevisible = false, orientation = :horizontal)
+	# Visualize horizontal speed
+	T = 1
+	fig = GLMakie.Figure() # limits = (nothing, (nothing, 0.7))
+	ax2 = GLMakie.Axis(fig[1, 1]; xlabel = "time step", ylabel = "speed", title = "Horizontal Speed")
+	GLMakie.scatterlines!(ax2, 0:planning_horizon-1, horizontal_speed_data[T][1], label = "Vehicle 1", color = :blue)
+	GLMakie.scatterlines!(ax2, 0:planning_horizon-1, horizontal_speed_data[T][2], label = "Vehicle 2", color = :red)
+	GLMakie.lines!(ax2, 0:planning_horizon-1, [1.5 for _ in 0:planning_horizon-1], color = :black, linestyle = :dash)
+	fig[2,1:2] = GLMakie.Legend(fig, ax2, framevisible = false, orientation = :horizontal)
 
-	# # Visualize vertical speed
-	# ax3 = GLMakie.Axis(fig[1, 2]; xlabel = "time step", ylabel = "speed", title = "Vertical Speed")
-	# GLMakie.scatterlines!(ax3, 0:planning_horizon-1, vertical_speed_data[T][1], label = "Vehicle 1", color = :blue)
-	# GLMakie.scatterlines!(ax3, 0:planning_horizon-1, vertical_speed_data[T][2], label = "Vehicle 2", color = :red)
-	# GLMakie.lines!(ax3, 0:planning_horizon-1, [1.5 for _ in 0:planning_horizon-1], color = :black, linestyle = :dash)
+	# Visualize vertical speed
+	ax3 = GLMakie.Axis(fig[1, 2]; xlabel = "time step", ylabel = "speed", title = "Vertical Speed")
+	GLMakie.scatterlines!(ax3, 0:planning_horizon-1, vertical_speed_data[T][1], label = "Vehicle 1", color = :blue)
+	GLMakie.scatterlines!(ax3, 0:planning_horizon-1, vertical_speed_data[T][2], label = "Vehicle 2", color = :red)
+	GLMakie.lines!(ax3, 0:planning_horizon-1, [1.5 for _ in 0:planning_horizon-1], color = :black, linestyle = :dash)
 
-	# GLMakie.save("./data/Intersection_closed_loop/GOOP_plots/speed.png", fig)
+	GLMakie.save("./data/Intersection_closed_loop/GOOP_plots/speed.png", fig)
 
-	# # Visualize distance bw vehicles , limits = (nothing, (collision_avoidance-0.05, 0.4)) 
-	# fig = GLMakie.Figure() # limits = (nothing, (nothing, 0.7))
-	# ax4 = GLMakie.Axis(fig[1, 1]; xlabel = "time step", ylabel = "distance", title = "Distance bw vehicles")
-	# GLMakie.scatterlines!(ax4, 0:planning_horizon-1, openloop_distance1[T], label = "B/w Agent 1 & Agent 2", color = :black, marker = :star5, markersize = 20)
-	# GLMakie.lines!(ax4, 0:planning_horizon-1, [1.0 for _ in 0:planning_horizon-1], color = :black, linestyle = :dash)
-	# fig[2,1] = GLMakie.Legend(fig, ax4, framevisible = false, orientation = :horizontal)
+	# Visualize distance bw vehicles , limits = (nothing, (collision_avoidance-0.05, 0.4)) 
+	fig = GLMakie.Figure() # limits = (nothing, (nothing, 0.7))
+	ax4 = GLMakie.Axis(fig[1, 1]; xlabel = "time step", ylabel = "distance", title = "Distance bw vehicles")
+	GLMakie.scatterlines!(ax4, 0:planning_horizon-1, openloop_distance1[T], label = "B/w Agent 1 & Agent 2", color = :black, marker = :star5, markersize = 20)
+	GLMakie.lines!(ax4, 0:planning_horizon-1, [1.0 for _ in 0:planning_horizon-1], color = :black, linestyle = :dash)
+	fig[2,1] = GLMakie.Legend(fig, ax4, framevisible = false, orientation = :horizontal)
 
-	# GLMakie.save("./data/Intersection_closed_loop/GOOP_plots/" * "distance_bw_vehicles.png", fig)
+	GLMakie.save("./data/Intersection_closed_loop/GOOP_plots/" * "distance_bw_vehicles.png", fig)
 
-	# # Store distance from center yellow line 
-	# distance_from_center = Vector{Vector{Float64}}[]
-	# push!(distance_from_center, [vcat(strategy[][1].xs...)[2:4:end], vcat(-strategy[][2].xs...)[1:4:end]])#, vcat(strategy[3].xs...)[2:4:end]])
+	# Store distance from center yellow line 
+	distance_from_center = Vector{Vector{Float64}}[]
+	push!(distance_from_center, [vcat(strategy[][1].xs...)[2:4:end], vcat(-strategy[][2].xs...)[1:4:end]])#, vcat(strategy[3].xs...)[2:4:end]])
 
-	# # Visualize distance from center yellow line
-	# fig = GLMakie.Figure() # limits = (nothing, (nothing, 0.7))
-	# ax5 = GLMakie.Axis(fig[1, 1]; xlabel = "time step", ylabel = "distance", title = "Position from center yellow line")
-	# GLMakie.scatterlines!(ax5, 0:planning_horizon-1, distance_from_center[T][1], label = "Vehicle 1", color = :blue)
-	# GLMakie.scatterlines!(ax5, 0:planning_horizon-1, distance_from_center[T][2], label = "Vehicle 2", color = :red)
-	# GLMakie.lines!(ax5, 0:planning_horizon-1, [0.0 for _ in 0:planning_horizon-1], color = :black, linestyle = :dash)
-	# fig[2,1] = GLMakie.Legend(fig, ax5, framevisible = false, orientation = :horizontal)
+	# Visualize distance from center yellow line
+	fig = GLMakie.Figure() # limits = (nothing, (nothing, 0.7))
+	ax5 = GLMakie.Axis(fig[1, 1]; xlabel = "time step", ylabel = "distance", title = "Position from center yellow line")
+	GLMakie.scatterlines!(ax5, 0:planning_horizon-1, distance_from_center[T][1], label = "Vehicle 1", color = :blue)
+	GLMakie.scatterlines!(ax5, 0:planning_horizon-1, distance_from_center[T][2], label = "Vehicle 2", color = :red)
+	GLMakie.lines!(ax5, 0:planning_horizon-1, [0.0 for _ in 0:planning_horizon-1], color = :black, linestyle = :dash)
+	fig[2,1] = GLMakie.Legend(fig, ax5, framevisible = false, orientation = :horizontal)
 
-	# GLMakie.save("./data/Intersection_closed_loop/GOOP_plots/" * "position_from_center.png", fig)
+	GLMakie.save("./data/Intersection_closed_loop/GOOP_plots/" * "position_from_center.png", fig)
 
 end
 

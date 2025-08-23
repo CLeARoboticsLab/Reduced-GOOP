@@ -71,11 +71,6 @@ function generate_slacked_kkt_system(
 	goop::ParametricGOOP;
 	backend = SymbolicTracingUtils.SymbolicsBackend(),
 )
-	# NOTE FOR LATER: 
-	# 0807: Do we need to account for previous preference slacks when we take gradient of Lagrangian function at upper levels?
-	# 		Different relaxations for different preferences is already handled
-	# 		x \argmin_{x̃, s} x̃ st ...
-
 	# Symbolic variables for all primals, parameters, and duals for shared constraints.
 	x =
 		SymbolicTracingUtils.make_variables(backend, :x, sum(goop.primal_dims)) |>

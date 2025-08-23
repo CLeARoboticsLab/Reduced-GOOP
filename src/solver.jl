@@ -39,6 +39,7 @@ function solve(
 	θ::AbstractVector{<:Real};
 	z₀ = nothing,
 	tol = 1e-4,
+	η₀ = 1e-4,
 	ϵ₀ = :auto,
 	max_inner_iters = 20,
 	max_outer_iters = 50,
@@ -70,7 +71,7 @@ function solve(
 	δσ = @view δz[mcp.interior_point_slack_dims]
 	δγ = @view δz[mcp.inequality_constraint_dual_dims]
 
-	linsolve = init(LinearProblem(∇F, δz), linear_solve_algorithm, maxiters = 10000)
+	linsolve = init(LinearProblem(∇F, δz), linear_solve_algorithm, maxiters = 20000)
 
 	# Main solver loop.
 	if ϵ₀ === :auto
@@ -101,12 +102,12 @@ function solve(
 			# TODO: Can add some adaptive regularization.
 			# TODO: use a linear operator with a lazy gradient computation here.
 			mcp.F!(F, z; θ, ϵ, η = 0)
-			mcp.∇F_z!(∇F, z; θ, ϵ, η = 5e-1)
-			@assert all(.!isnan.(F)) "Found NaN in F - aborting!"
-			@assert all(.!isnan.(∇F)) "Found NaN in ∇F - aborting!"
-			println("condition number of ∇F = $(cond(collect(∇F),2))")
-			println("min singular value of ∇F = $(minimum(svdvals(Array(∇F))))")
-			println("max singular value of ∇F = $(maximum(svdvals(Array(∇F))))")
+			mcp.∇F_z!(∇F, z; θ, ϵ, η = η₀)
+			# @assert all(.!isnan.(F)) "Found NaN in F - aborting!"
+			# @assert all(.!isnan.(∇F)) "Found NaN in ∇F - aborting!"
+			# println("condition number of ∇F = $(cond(collect(∇F),2))")
+			# println("min singular value of ∇F = $(minimum(svdvals(Array(∇F))))")
+			# println("max singular value of ∇F = $(maximum(svdvals(Array(∇F))))")
 			# Main.@infiltrate
 			linsolve.A = ∇F
 			linsolve.b = -F
@@ -125,7 +126,7 @@ function solve(
 
 			# Fraction to the boundary linesearch.
 
-			α_σ = fraction_to_the_boundary_linesearch(σ, δσ; tol = 0.001*min_stepsize) #, max_stepsize = 0.1)
+			α_σ = fraction_to_the_boundary_linesearch(σ, δσ; tol = min_stepsize) #, max_stepsize = 0.1)
 			# α_s = fraction_to_the_boundary_linesearch(s, δs; tol = 0.001*min_stepsize, max_stepsize = 0.1)
 			# α_s = fraction_to_the_boundary_linesearch(s, δs; tol = min_stepsize)
 			# α_σ = fraction_to_the_boundary_linesearch(σ, δσ; tol = min_stepsize, max_stepsize = α_s)
