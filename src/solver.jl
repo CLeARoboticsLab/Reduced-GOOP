@@ -49,15 +49,20 @@ function solve(
 	verbose = false,
 	linear_solve_algorithm = LinearSolve.KrylovJL_LSMR(), # LinearSolve.KrylovJL_LSMR(), # KrylovJL_CRAIGMR() for non-square KKT systems
 )
-	z = @something(z₀, begin
-		z = zeros(mcp.variable_dimension)
-		z[mcp.preference_slack_dims] .= 1.0
-		z[mcp.interior_point_slack_dims] .= 1.0
-		z[mcp.inequality_constraint_dual_dims] .= 1.0
-		z
-	end)
-
-	Main.@infiltrate
+	# z = @something(z₀, begin
+	# 	z = zeros(mcp.variable_dimension)
+	# 	z[mcp.preference_slack_dims] .= 1.0
+	# 	z[mcp.interior_point_slack_dims] .= 1.0
+	# 	z[mcp.inequality_constraint_dual_dims] .= 1.0
+	# 	z
+	# end)
+	z = zeros(mcp.variable_dimension)
+	z[mcp.preference_slack_dims] .= 1.0
+	z[mcp.interior_point_slack_dims] .= 1.0
+	z[mcp.inequality_constraint_dual_dims] .= 1.0
+	if !isnothing(z₀)
+		z[mcp.primal_dims] .= z₀
+	end
 
 	x = @view z[Not(vcat(mcp.preference_slack_dims, mcp.interior_point_slack_dims, mcp.inequality_constraint_dual_dims))]
 	s = @view z[mcp.preference_slack_dims]

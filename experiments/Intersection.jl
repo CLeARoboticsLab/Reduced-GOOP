@@ -22,14 +22,14 @@ function get_setup(
 	control_dimension = control_dim(dynamics)
 	primals_per_agent = (state_dimension + control_dimension) * planning_horizon
 	primal_dimensions = fill(primals_per_agent, num_players)
-	parameter_dimensions = fill(state_dimension + control_dimension + 4, num_players) # (state, control, goal, obstacle)
+	parameter_dimensions = fill(state_dimension + 4, num_players) # (state, goal, obstacle)
 
 	dummy_primals = BlockArray(zeros(sum(primal_dimensions)), primal_dimensions) # THIS will be x
 	dummy_parameters = BlockArray(zeros(sum(parameter_dimensions)), parameter_dimensions)
 
 	unflatten_parameters = function (θ)
 		θ_iter = Iterators.Stateful(θ)
-		initial_state = first(θ_iter, state_dimension + control_dimension)
+		initial_state = first(θ_iter, state_dimension)
 		goal_position = first(θ_iter, 2)
 		obstacle_position = first(θ_iter, 2)
 		(; initial_state, goal_position, obstacle_position)
@@ -61,7 +61,7 @@ function get_setup(
 			(; xs, us) =
 				unflatten_trajectory(z[Block(i)], state_dimension, control_dimension)
 			(; initial_state) = unflatten_parameters(θ[Block(i)]) # Player i θ[Block(i)]
-			initial_state_constraint = [xs[1]; us[1]] - initial_state
+			initial_state_constraint = xs[1] - initial_state
 			dynamics_constraints = mapreduce(vcat, 2:length(xs)) do k
 				xs[k] - dynamics(xs[k-1], us[k-1], k)
 			end
@@ -284,13 +284,13 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 				QuasiGOOP.InteriorPoint(),
 				GOOP_kkt_system,
 				θ;
-				tol = 1e-4, # 5e-3
+				tol = 1e-5, # 5e-3
 				η₀ = 1.0, # 0.5
 				ϵ₀ = 10.0, # 5.0
 				max_inner_iters = 30, # 20
 				max_outer_iters = 30, # 50
 				min_stepsize = 1e-4,
-				z₀ = nothing,
+				z₀ = warmstart_solution,
 				verbose = true,
 			)
 		end
@@ -372,7 +372,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 	# warmstart_solution = nothing 
 	warmstart_solution = begin
 		warmstart_x = [[initial_state1[]], [initial_state2[]]]
-		warmstart_u = [[[0.0, 0.0]], [[0.0, 0.0]]] # some constant control
+		warmstart_u = [[[1.0, 0.0]], [[0.0, 2.0]]] # some constant control
 		warmstart_solution = []
 		for k in 1:num_players
 			for i in 1:(planning_horizon-1)
@@ -390,7 +390,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 		vcat(warmstart_solution...)
 	end
 
-	warmstart_solution = nothing 
+	# warmstart_solution = nothing 
 
 	strategy = GLMakie.@lift let
 		result = get_receding_horizon_solution($θ; warmstart_solution)
