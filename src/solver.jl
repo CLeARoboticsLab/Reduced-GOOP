@@ -57,6 +57,8 @@ function solve(
 		z
 	end)
 
+	Main.@infiltrate
+
 	x = @view z[Not(vcat(mcp.preference_slack_dims, mcp.interior_point_slack_dims, mcp.inequality_constraint_dual_dims))]
 	s = @view z[mcp.preference_slack_dims]
 	σ = @view z[mcp.interior_point_slack_dims]
@@ -126,35 +128,24 @@ function solve(
 
 			# Fraction to the boundary linesearch.
 
-			α_σ = fraction_to_the_boundary_linesearch(σ, δσ; tol = min_stepsize) #, max_stepsize = 0.1)
-			# α_s = fraction_to_the_boundary_linesearch(s, δs; tol = 0.001*min_stepsize, max_stepsize = 0.1)
-			# α_s = fraction_to_the_boundary_linesearch(s, δs; tol = min_stepsize)
-			# α_σ = fraction_to_the_boundary_linesearch(σ, δσ; tol = min_stepsize, max_stepsize = α_s)
+			α_σ = fraction_to_the_boundary_linesearch(σ, δσ; tol = min_stepsize)
+			α_γ = fraction_to_the_boundary_linesearch(γ, δγ; tol = min_stepsize)
 
-			α_γ = fraction_to_the_boundary_linesearch(γ, δγ; tol = min_stepsize) #, max_stepsize = 0.1)
-
-			# println("α_s = $α_s, α_σ = $α_σ, α_γ = $α_γ")
 			println("α_σ = $α_σ, α_γ = $α_γ")
 
 
 			# if isnan(α_s) || isnan(α_γ) || isnan(α_σ)
 			if isnan(α_γ) || isnan(α_σ)
-
 				verbose && @warn "Linesearch failed. Exiting prematurely."
 				status = :failed
 				break
 			end
-			# α_x = max(α_s, α_σ)
+
 			# Update variables accordingly.
 			@. x += α_σ * δx
 			@. s += α_σ * δs
 			@. σ += α_σ * δσ
 			@. γ += α_γ * δγ
-
-			# @. x += α_σ * δx
-			# @. s += α_σ * δs
-			# @. σ += α_σ * δσ
-			# @. γ += α_γ * δγ
 
 			kkt_error = norm(F, Inf)
 

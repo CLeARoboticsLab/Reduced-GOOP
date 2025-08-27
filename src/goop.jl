@@ -188,7 +188,7 @@ function generate_slacked_kkt_system(
 				push!(Γ, μₛ...)
 
 				L =
-					2sum(preference_slack) - γₚ' * (h .+ preference_slack) - μₛ' * preference_slack -
+					sum(preference_slack) - γₚ' * (h .+ preference_slack) - μₛ' * preference_slack -
 					(isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
 					(isnothing(fₛ) ? 0 : λₛ' * fₛ) - (isnothing(gₛ) ? 0 : γₛ' * gₛ)
 
@@ -300,7 +300,7 @@ function generate_slacked_kkt_system(
 			push!(Γ, μₛ...)
 
 			# Form partial Lagrangian at this stage.
-			L = 2sum(preference_slack) - γₚ' * (h .+ preference_slack) - μₛ' * preference_slack -
+			L = sum(preference_slack) - γₚ' * (h .+ preference_slack) - μₛ' * preference_slack -
 				ψ' * π - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
 				(isnothing(fₛ) ? 0 : λ̃ₛ' * fₛ) - (isnothing(gₛ) ? 0 : γ̃ₛ' * gₛ)
 
@@ -379,6 +379,7 @@ function generate_slacked_kkt_system(
 	θ = Vector{symbolic_type}(θ)
 
 	idx = blockedrange(length.([x, s, Σ, Λ, Γ, Ψ, λₛ, γₛ, σₛ]))
+	primal_dims = idx[Block(1)] # x
 	preference_slack_dims = idx[Block(2)] # s
 	interior_point_slack_dims = vcat(idx[Block(3)], idx[Block(9)]) # Σ, σₛ
 	inequality_constraint_dual_dims = vcat(idx[Block(5)], idx[Block(8)]) # Γ, γₛ
@@ -389,10 +390,10 @@ function generate_slacked_kkt_system(
 		θ,
 		ϵ,
 		η,
+		primal_dims,
 		preference_slack_dims,
 		interior_point_slack_dims,
 		inequality_constraint_dual_dims,
 	)
 
-	# (; F, z, θ)
 end

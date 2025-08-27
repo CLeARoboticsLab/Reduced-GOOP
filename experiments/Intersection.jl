@@ -22,14 +22,14 @@ function get_setup(
 	control_dimension = control_dim(dynamics)
 	primals_per_agent = (state_dimension + control_dimension) * planning_horizon
 	primal_dimensions = fill(primals_per_agent, num_players)
-	parameter_dimensions = fill(state_dimension + 4, num_players) # (state, goal, obstacle)
+	parameter_dimensions = fill(state_dimension + control_dimension + 4, num_players) # (state, control, goal, obstacle)
 
 	dummy_primals = BlockArray(zeros(sum(primal_dimensions)), primal_dimensions) # THIS will be x
 	dummy_parameters = BlockArray(zeros(sum(parameter_dimensions)), parameter_dimensions)
 
 	unflatten_parameters = function (θ)
 		θ_iter = Iterators.Stateful(θ)
-		initial_state = first(θ_iter, state_dimension)
+		initial_state = first(θ_iter, state_dimension + control_dimension)
 		goal_position = first(θ_iter, 2)
 		obstacle_position = first(θ_iter, 2)
 		(; initial_state, goal_position, obstacle_position)
@@ -43,16 +43,16 @@ function get_setup(
 		function (z, θ)
 			(; xs, us) =
 				unflatten_trajectory(z[Block(1)], state_dimension, control_dimension)
-			(; goal_position) = unflatten_parameters(θ[Block(1)]) # Player 1 θ[Block(i)] Ambuluance
-			goal_deviation = xs[end][1:2] .- goal_position
-			0.5*sum(sum(u .^ 2) for u in us) + sum(goal_deviation .^ 2) # ||x - x\_goal||^ 2
+			# (; goal_position) = unflatten_parameters(θ[Block(1)]) # Player 1 θ[Block(i)] Ambuluance
+			# goal_deviation = xs[end][1:2] .- goal_position
+			0.5*sum(sum(u .^ 2) for u in us) #+ sum(goal_deviation .^ 2) # ||x - x\_goal||^ 2
 		end, #for i in 1:num_players
 		function (z, θ)
 			(; xs, us) =
 				unflatten_trajectory(z[Block(2)], state_dimension, control_dimension)
-			(; goal_position) = unflatten_parameters(θ[Block(2)]) # Player 2 θ[Block(i)] Car
-			goal_deviation = xs[end][1:2] .- goal_position
-			0.5*sum(sum(u .^ 2) for u in us) + sum(goal_deviation .^ 2) # ||x - x\_goal||^ 2
+			# (; goal_position) = unflatten_parameters(θ[Block(2)]) # Player 2 θ[Block(i)] Car
+			# goal_deviation = xs[end][1:2] .- goal_position
+			0.5*sum(sum(u .^ 2) for u in us) #+ sum(goal_deviation .^ 2) # ||x - x\_goal||^ 2
 		end,
 	]
 
@@ -61,7 +61,7 @@ function get_setup(
 			(; xs, us) =
 				unflatten_trajectory(z[Block(i)], state_dimension, control_dimension)
 			(; initial_state) = unflatten_parameters(θ[Block(i)]) # Player i θ[Block(i)]
-			initial_state_constraint = xs[1] - initial_state
+			initial_state_constraint = [xs[1]; us[1]] - initial_state
 			dynamics_constraints = mapreduce(vcat, 2:length(xs)) do k
 				xs[k] - dynamics(xs[k-1], us[k-1], k)
 			end
@@ -163,10 +163,9 @@ function get_setup(
 				(; goal_position) = unflatten_parameters(θ[Block(1)]) # Player 1 θ[Block(i)] Ambuluance
 				goal_deviation = xs[end][1:2] .- goal_position
 				[
-					goal_deviation .+ 0.1 # change to ||x - x\_goal||^ 2
-					-goal_deviation .+ 0.1
+					goal_deviation .+ 0.01
+					-goal_deviation .+ 0.01
 				]
-				sum(goal_deviation .^ 2) # ||x - x\_goal||^ 2
 			end,
 		],
 		[
@@ -180,10 +179,9 @@ function get_setup(
 				(; goal_position) = unflatten_parameters(θ[Block(2)]) # Player 2
 				goal_deviation = xs[end][1:2] .- goal_position
 				[
-					goal_deviation .+ 0.1
-					-goal_deviation .+ 0.1
+					goal_deviation .+ 0.01
+					-goal_deviation .+ 0.01
 				]
-				1 - sum(goal_deviation .^ 2)
 			end,
 
 			# Drive under speed limit 
@@ -215,7 +213,8 @@ function get_setup(
 	]
 
 	# Specify prioritized constraint [lowest priority, ..., highest priority]
-	is_prioritized_constraint = [[false, true, true, false], [false, false, true, true]] #[[false, true], [false, true]] #
+	is_prioritized_constraint = [[false, true, true, true], [false, true, true, true]]
+	#[[false, true, true, false], [false, false, true, true]] #[[false, true], [false, true]] #
 	preferences = [vcat(objectives[player], prioritized_preferences[player]) for player in 1:num_players]
 
 	# Shared constraints
@@ -241,7 +240,7 @@ function get_setup(
 		equality_constraints,
 		inequality_constraints,
 		shared_equality_constraint = nothing,
-		shared_inequality_constraint,
+		shared_inequality_constraint = nothing,
 	)
 
 	(; problem, flatten_parameters)
@@ -258,7 +257,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 	num_players = 2
 	control_bounds = (; lb = [-2.0, -2.0], ub = [2.0, 2.0])
 	dynamics = planar_double_integrator(; dt = 0.5, control_bounds) # x := (px, py, vx, vy) and u := (ax, ay).
-	planning_horizon = 10
+	planning_horizon = 7
 	collision_avoidance = 1.3
 
 	(; problem, flatten_parameters) = get_setup(
@@ -271,8 +270,6 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 		relaxation_mode,
 	)
 
-	warmstart_solution = nothing
-
 	dynamics_dimension = state_dim(dynamics) + control_dim(dynamics)
 	primal_dimension = dynamics_dimension * planning_horizon
 
@@ -281,13 +278,14 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 
 	function get_receding_horizon_solution(θ; warmstart_solution)
 		GOOP_kkt_system = QuasiGOOP.generate_slacked_kkt_system(problem)
+		# Main.@infiltrate
 		elapsed_time = @elapsed begin
 			(; status, z, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters) = QuasiGOOP.solve(
 				QuasiGOOP.InteriorPoint(),
 				GOOP_kkt_system,
 				θ;
-				tol = 5e-3,
-				η₀ = 5e-1, # 0.5
+				tol = 1e-4, # 5e-3
+				η₀ = 1.0, # 0.5
 				ϵ₀ = 10.0, # 5.0
 				max_inner_iters = 30, # 20
 				max_outer_iters = 30, # 50
@@ -370,9 +368,33 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 		problem_data,
 	)
 
+	# Warmstart solution
+	# warmstart_solution = nothing 
+	warmstart_solution = begin
+		warmstart_x = [[initial_state1[]], [initial_state2[]]]
+		warmstart_u = [[[0.0, 0.0]], [[0.0, 0.0]]] # some constant control
+		warmstart_solution = []
+		for k in 1:num_players
+			for i in 1:(planning_horizon-1)
+				push!(warmstart_x[k], dynamics(warmstart_x[k][i], warmstart_u[k][1]))
+				push!(warmstart_u[k], warmstart_u[k][1])
+			end
+			pop!(warmstart_u[k])
+			push!(warmstart_u[k], [0.0, 0.0])
+
+			warmstart_primals = mapreduce(vcat, 1:planning_horizon) do i
+				vcat(warmstart_x[k][i], warmstart_u[k][i])
+			end
+			push!(warmstart_solution, warmstart_primals)
+		end
+		vcat(warmstart_solution...)
+	end
+
+	warmstart_solution = nothing 
+
 	strategy = GLMakie.@lift let
 		result = get_receding_horizon_solution($θ; warmstart_solution)
-		warmstart_solution = nothing
+		warmstart_solution = nothing # TODO
 		result
 	end
 
@@ -559,21 +581,22 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 	)
 
 	# Save img 
-	GLMakie.save("data/Intersection_closed_loop/trajectory.png", figure)
 	# Main.@infiltrate
+	GLMakie.save("data/Intersection_closed_loop/trajectory.png", figure)
+	Main.@infiltrate
 
 	# closed_loop + receding horizon demo
 	time_step = 1
 	while time_step < 15 #15
-	    println("time_step: ", time_step)
-	    GLMakie.save("data/Intersection_closed_loop/trajectory$(time_step-1).png", figure)
-	    # Update the positions of the vehicles
-	    println("Update initial state1")
-	    θ1.val[1:state_dim(dynamics)] = first(strategy[]).xs[begin + 1] # Asynchronous update: mutate p1's initial state without triggering others
-	    println("Update initial state2")
-	    initial_state2[] = strategy[][2].xs[begin + 1]
+		println("time_step: ", time_step)
+		GLMakie.save("data/Intersection_closed_loop/trajectory$(time_step-1).png", figure)
+		# Update the positions of the vehicles
+		println("Update initial state1")
+		θ1.val[1:state_dim(dynamics)] = first(strategy[]).xs[begin+1] # Asynchronous update: mutate p1's initial state without triggering others
+		println("Update initial state2")
+		initial_state2[] = strategy[][2].xs[begin+1]
 		# Main.@infiltrate
-	    time_step += 1
+		time_step += 1
 	end
 
 	# Store speed data for Intersection
@@ -592,25 +615,25 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 	T = 1
 	fig = GLMakie.Figure() # limits = (nothing, (nothing, 0.7))
 	ax2 = GLMakie.Axis(fig[1, 1]; xlabel = "time step", ylabel = "speed", title = "Horizontal Speed")
-	GLMakie.scatterlines!(ax2, 0:planning_horizon-1, horizontal_speed_data[T][1], label = "Vehicle 1", color = :blue)
-	GLMakie.scatterlines!(ax2, 0:planning_horizon-1, horizontal_speed_data[T][2], label = "Vehicle 2", color = :red)
-	GLMakie.lines!(ax2, 0:planning_horizon-1, [1.5 for _ in 0:planning_horizon-1], color = :black, linestyle = :dash)
-	fig[2,1:2] = GLMakie.Legend(fig, ax2, framevisible = false, orientation = :horizontal)
+	GLMakie.scatterlines!(ax2, 0:(planning_horizon-1), horizontal_speed_data[T][1], label = "Vehicle 1", color = :blue)
+	GLMakie.scatterlines!(ax2, 0:(planning_horizon-1), horizontal_speed_data[T][2], label = "Vehicle 2", color = :red)
+	GLMakie.lines!(ax2, 0:(planning_horizon-1), [1.5 for _ in 0:(planning_horizon-1)], color = :black, linestyle = :dash)
+	fig[2, 1:2] = GLMakie.Legend(fig, ax2, framevisible = false, orientation = :horizontal)
 
 	# Visualize vertical speed
 	ax3 = GLMakie.Axis(fig[1, 2]; xlabel = "time step", ylabel = "speed", title = "Vertical Speed")
-	GLMakie.scatterlines!(ax3, 0:planning_horizon-1, vertical_speed_data[T][1], label = "Vehicle 1", color = :blue)
-	GLMakie.scatterlines!(ax3, 0:planning_horizon-1, vertical_speed_data[T][2], label = "Vehicle 2", color = :red)
-	GLMakie.lines!(ax3, 0:planning_horizon-1, [1.5 for _ in 0:planning_horizon-1], color = :black, linestyle = :dash)
+	GLMakie.scatterlines!(ax3, 0:(planning_horizon-1), vertical_speed_data[T][1], label = "Vehicle 1", color = :blue)
+	GLMakie.scatterlines!(ax3, 0:(planning_horizon-1), vertical_speed_data[T][2], label = "Vehicle 2", color = :red)
+	GLMakie.lines!(ax3, 0:(planning_horizon-1), [1.5 for _ in 0:(planning_horizon-1)], color = :black, linestyle = :dash)
 
 	GLMakie.save("./data/Intersection_closed_loop/GOOP_plots/speed.png", fig)
 
 	# Visualize distance bw vehicles , limits = (nothing, (collision_avoidance-0.05, 0.4)) 
 	fig = GLMakie.Figure() # limits = (nothing, (nothing, 0.7))
 	ax4 = GLMakie.Axis(fig[1, 1]; xlabel = "time step", ylabel = "distance", title = "Distance bw vehicles")
-	GLMakie.scatterlines!(ax4, 0:planning_horizon-1, openloop_distance1[T], label = "B/w Agent 1 & Agent 2", color = :black, marker = :star5, markersize = 20)
-	GLMakie.lines!(ax4, 0:planning_horizon-1, [1.0 for _ in 0:planning_horizon-1], color = :black, linestyle = :dash)
-	fig[2,1] = GLMakie.Legend(fig, ax4, framevisible = false, orientation = :horizontal)
+	GLMakie.scatterlines!(ax4, 0:(planning_horizon-1), openloop_distance1[T], label = "B/w Agent 1 & Agent 2", color = :black, marker = :star5, markersize = 20)
+	GLMakie.lines!(ax4, 0:(planning_horizon-1), [1.0 for _ in 0:(planning_horizon-1)], color = :black, linestyle = :dash)
+	fig[2, 1] = GLMakie.Legend(fig, ax4, framevisible = false, orientation = :horizontal)
 
 	GLMakie.save("./data/Intersection_closed_loop/GOOP_plots/" * "distance_bw_vehicles.png", fig)
 
@@ -621,10 +644,10 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 	# Visualize distance from center yellow line
 	fig = GLMakie.Figure() # limits = (nothing, (nothing, 0.7))
 	ax5 = GLMakie.Axis(fig[1, 1]; xlabel = "time step", ylabel = "distance", title = "Position from center yellow line")
-	GLMakie.scatterlines!(ax5, 0:planning_horizon-1, distance_from_center[T][1], label = "Vehicle 1", color = :blue)
-	GLMakie.scatterlines!(ax5, 0:planning_horizon-1, distance_from_center[T][2], label = "Vehicle 2", color = :red)
-	GLMakie.lines!(ax5, 0:planning_horizon-1, [0.0 for _ in 0:planning_horizon-1], color = :black, linestyle = :dash)
-	fig[2,1] = GLMakie.Legend(fig, ax5, framevisible = false, orientation = :horizontal)
+	GLMakie.scatterlines!(ax5, 0:(planning_horizon-1), distance_from_center[T][1], label = "Vehicle 1", color = :blue)
+	GLMakie.scatterlines!(ax5, 0:(planning_horizon-1), distance_from_center[T][2], label = "Vehicle 2", color = :red)
+	GLMakie.lines!(ax5, 0:(planning_horizon-1), [0.0 for _ in 0:(planning_horizon-1)], color = :black, linestyle = :dash)
+	fig[2, 1] = GLMakie.Legend(fig, ax5, framevisible = false, orientation = :horizontal)
 
 	GLMakie.save("./data/Intersection_closed_loop/GOOP_plots/" * "position_from_center.png", fig)
 

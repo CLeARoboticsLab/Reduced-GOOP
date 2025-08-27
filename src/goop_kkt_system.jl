@@ -16,6 +16,8 @@ struct GOOPKKTSystem{T1, T2, T3, T4, T5, T6}
 	F!::T1
 	"A callable function that computes ∇F!(val, z; θ, ϵ) in-place for 'val'"
 	∇F_z!::T2
+	"Length of primal x vector"
+	primal_dims::T3
 	"Coordinates of z associated to preference slacks"
 	preference_slack_dims::T3
 	"Coordinates of z associated to interior point slacks"
@@ -24,7 +26,8 @@ struct GOOPKKTSystem{T1, T2, T3, T4, T5, T6}
 	inequality_constraint_dual_dims::T5
 	"Length of z vector"
 	variable_dimension::T6
-    "KKT dimension"
+
+	"KKT dimension"
 	kkt_dimension::T6
 end
 
@@ -34,6 +37,7 @@ function BuildGOOPKKTSystem(
 	θ_symbolic::Vector{T},
 	ϵ_symbolic::T,
 	η_symbolic::T,
+	primal_dims,
 	preference_slack_dims,
 	interior_point_slack_dims,
 	inequality_constraint_dual_dims;
@@ -87,10 +91,11 @@ function BuildGOOPKKTSystem(
 	GOOPKKTSystem(
 		F!,
 		∇F_z!,
+		primal_dims,
 		preference_slack_dims,
 		interior_point_slack_dims,
 		inequality_constraint_dual_dims,
 		length(z_symbolic),
-        length(F_symbolic),
+		length(F_symbolic),
 	)
 end
