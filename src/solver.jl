@@ -92,6 +92,9 @@ function solve(
 		ϵ = ϵ₀
 	end
 
+	# Initialize regularization parameter.
+	η = η₀
+
 	status = :solved
 	total_iters = 0
 	inner_iters = 1
@@ -108,11 +111,11 @@ function solve(
 			# Compute the Newton step.
 			# TODO: Can add some adaptive regularization.
 			# TODO: use a linear operator with a lazy gradient computation here.
-			mcp.F!(F, z; θ, ϵ, η = 0)
-			mcp.∇F_z!(∇F, z; θ, ϵ, η = η₀)
+			mcp.F!(F, z; θ, ϵ, η = 0.0)
+			mcp.∇F_z!(∇F, z; θ, ϵ, η)
 			# @assert all(.!isnan.(F)) "Found NaN in F - aborting!"
 			# @assert all(.!isnan.(∇F)) "Found NaN in ∇F - aborting!"
-			# println("condition number of ∇F = $(cond(collect(∇F),2))")
+			println("condition number of ∇F = $(cond(collect(∇F),2))")
 			# println("min singular value of ∇F = $(minimum(svdvals(Array(∇F))))")
 			# println("max singular value of ∇F = $(maximum(svdvals(Array(∇F))))")
 			# Main.@infiltrate
@@ -138,12 +141,19 @@ function solve(
 
 			println("α_σ = $α_σ, α_γ = $α_γ")
 
-
-			# if isnan(α_s) || isnan(α_γ) || isnan(α_σ)
 			if isnan(α_γ) || isnan(α_σ)
 				verbose && @warn "Linesearch failed. Exiting prematurely."
 				status = :failed
 				break
+			end
+			
+			# Update regularization parameter.
+			if min(α_σ, α_γ) == 1.0
+				verbose && printstyled("Full step taken... Decreasing η. ($η -> $(η * (1 - exp(-tightening_rate * inner_iters))))\n"; color = :blue)
+				η *= 1 - exp(-tightening_rate * inner_iters)
+			else
+				verbose && printstyled("Partial step (<1.0) taken... Increasing η. ($η -> $(η * (1 + exp(-loosening_rate * inner_iters))))\n"; color = :red)
+				η *= 1 + exp(-loosening_rate * inner_iters)
 			end
 
 			# Update variables accordingly.

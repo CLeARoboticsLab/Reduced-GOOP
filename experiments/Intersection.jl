@@ -285,10 +285,12 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 				GOOP_kkt_system,
 				θ;
 				tol = 1e-5, # 5e-3
-				η₀ = 1.0, # 0.5
+				η₀ = 2.0, # 0.5
 				ϵ₀ = 10.0, # 5.0
 				max_inner_iters = 30, # 20
 				max_outer_iters = 30, # 50
+				tightening_rate = 0.05, # 0.1
+				loosening_rate = 0.2, # 0.5
 				min_stepsize = 1e-4,
 				z₀ = warmstart_solution,
 				verbose = true,
