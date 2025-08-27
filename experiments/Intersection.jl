@@ -328,7 +328,6 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 			"./data/Intersection_closed_loop/GOOP_solution/$(file_name)",
 			solution_dict,
 		)
-
 		strategies
 	end
 
@@ -371,27 +370,9 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 	)
 
 	# Warmstart solution
-	# warmstart_solution = nothing 
-	warmstart_solution = begin
-		warmstart_x = [[initial_state1[]], [initial_state2[]]]
-		warmstart_u = [[[1.0, 0.0]], [[0.0, 2.0]]] # some constant control
-		warmstart_solution = []
-		for k in 1:num_players
-			for i in 1:(planning_horizon-1)
-				push!(warmstart_x[k], dynamics(warmstart_x[k][i], warmstart_u[k][1]))
-				push!(warmstart_u[k], warmstart_u[k][1])
-			end
-			pop!(warmstart_u[k])
-			push!(warmstart_u[k], [0.0, 0.0])
-
-			warmstart_primals = mapreduce(vcat, 1:planning_horizon) do i
-				vcat(warmstart_x[k][i], warmstart_u[k][i])
-			end
-			push!(warmstart_solution, warmstart_primals)
-		end
-		vcat(warmstart_solution...)
-	end
-
+	warmstart_x = [[initial_state1[]], [initial_state2[]]]
+	warmstart_u = [[[1.0, 0.0]], [[0.0, 2.0]]] # some constant control
+	warmstart_solution = build_warmstart_solution(num_players, planning_horizon, dynamics, warmstart_x, warmstart_u)
 	# warmstart_solution = nothing 
 
 	strategy = GLMakie.@lift let
@@ -654,5 +635,24 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 	GLMakie.save("./data/Intersection_closed_loop/GOOP_plots/" * "position_from_center.png", fig)
 
 end
+
+function build_warmstart_solution(num_players, planning_horizon, dynamics, warmstart_x, warmstart_u)
+	warmstart_solution = []
+	for k in 1:num_players
+		for i in 1:(planning_horizon-1)
+			push!(warmstart_x[k], dynamics(warmstart_x[k][i], warmstart_u[k][1]))
+			push!(warmstart_u[k], warmstart_u[k][1])
+		end
+		pop!(warmstart_u[k])
+		push!(warmstart_u[k], [0.0, 0.0])
+
+		warmstart_primals = mapreduce(vcat, 1:planning_horizon) do i
+			vcat(warmstart_x[k][i], warmstart_u[k][i])
+		end
+		push!(warmstart_solution, warmstart_primals)
+	end
+	vcat(warmstart_solution...)
+end
+
 
 end
