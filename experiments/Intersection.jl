@@ -240,7 +240,7 @@ function get_setup(
 		equality_constraints,
 		inequality_constraints,
 		shared_equality_constraint = nothing,
-		shared_inequality_constraint = nothing,
+		shared_inequality_constraint,
 	)
 
 	(; problem, flatten_parameters)
