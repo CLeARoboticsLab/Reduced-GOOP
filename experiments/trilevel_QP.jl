@@ -28,43 +28,12 @@ Q₁ = I(n)
 c₁ = [1.0, 0.0, -1.0, 2.0]
 Q₂ = 2I(n) # [0 0 0 0; 0 1 0 0; 0 0 2 0; 0 0 0 1]
 c₂ = [-1.0, 2.0, 0.0, 1.0]
-Q₃ = -[1 0 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 0] #3I(n)
+Q₃ = 3I(n)# -[1 0 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 0]
 c₃ = -[0.5, -0.5, 1.0, 0.0]
 A₃ = [1 0 1 1; 0 1 1 0] # A₃x = b₃
 b₃ = [1.0, 2.0]
-##### ORIGINAL GOOP VERSION ######
 
 f(x, θ) = 0.5x[1:n]'*Q₁*x[1:n] + c₁'*x[1:n]
-
-g(x, θ) = [
-	Q₂ * x[1:n] .+ c₂ - A₃'*x[(n+1):(n+m)] - Q₃'*x[(n+m+1):(n+m+n)]; # Q₂x + c₂ - A₃'μ₂₁ - Q₃'μ₂₂ = 0
-	A₃*x[(n+m+1):(n+m+n)]; # A₃μ₂₂ = 0
-	Q₃ * x[1:n] .+ c₃ - A₃'*x[(n+m+n+1):(n+m+n+m)]; # Q₃x + c₃ - A₃'μ₃ = 0
-	A₃*x[1:n] .- b₃ # A₃x - b₃ = 0
-]
-h(x, θ) = []
-
-dummy_primals = zeros(n + m + n + m)
-dummy_parameters = [0.0]
-
-problem = QuasiGOOP.ParametricOptimizationProblem(;
-	objective = f,
-	equality_constraint = g,
-	inequality_constraint = h,
-	parameter_dimension = 1,
-	primal_dimension = length(dummy_primals),
-	equality_dimension = length(g(dummy_primals, dummy_parameters)),
-	inequality_dimension = 0,
-)
-
-(; primals, variables, status, info) = QuasiGOOP.solve(problem, [0])
-@show status
-println("Primal solution: $primals")
-println("Variables: $variables")
-println("Objective: $(f(primals, 0))")
-println("# Primals: $(length(primals))")
-println("# Equality constraints: $(length(g(primals, 0)))")
-println("Total variables: $(length(variables))")
 
 ##### NEW VERSION ######
 player = 1
@@ -102,9 +71,9 @@ g_ineq(x, θ) = [x[1] - 0.5; x[2] - 0.5]
 x = BlockArray(zeros(n), [n]) # single player
 θ = BlockArray([0.0], [1])
 goop_preferences = [[J₁, J₂, J₃]]
-is_prioritized_constraint = [[false, false, true]]
+is_prioritized_constraint = [[false, false, false]]
 equality_constraints = [g_eq]
-inequality_constraints = [g_ineq]
+inequality_constraints = [g_ineq] # [g_ineq]
 shared_equality_constraint = nothing
 shared_inequality_constraint = nothing
 
@@ -136,8 +105,7 @@ println("v3 Primal solution: $(x)")
 println("v3 Variables: $(z)")
 println("v3 Objective: $(f(x[1:n], 0))")
 
-
-## Cross check with original GOOP##
+################# Cross check with original GOOP#########################
 # θ is the relaxation factor
 backend = SymbolicTracingUtils.SymbolicsBackend()
 x = SymbolicTracingUtils.make_variables(backend, :x, n)
@@ -157,13 +125,13 @@ function construct_kkt(preferences, is_prioritized_constraint, player)
 	λ = SymbolicTracingUtils.make_variables(
 		backend,
 		Symbol("λ_$(player)_$(level)"),
-		isnothing(f) ? 1 : length(f),
+		isnothing(f) ? 0 : length(f),
 	)
 
 	γ = SymbolicTracingUtils.make_variables(
 		backend,
 		Symbol("γ_$(player)_$(level)"),
-		isnothing(g) ? 1 : length(g),
+		isnothing(g) ? 0 : length(g),
 	)
 	# Base level
 	if length(preferences) == 1
@@ -196,27 +164,48 @@ function construct_kkt(preferences, is_prioritized_constraint, player)
 			∇L = Symbolics.gradient(L, vcat(x, preference_slack))
 			F = Vector{symbolic_type}([∇L; f])
 			G = Vector{symbolic_type}(
-				[
-					g; γ; θ - γ'*g;
-					γₚ; h .+ preference_slack; θ - γₚ'*(h .+ preference_slack);
-					γₛ; preference_slack; θ - γₛ' * preference_slack
-				],
+				filter!(
+					!isnothing,
+					[
+						isnothing(g) ? nothing : g;
+						isnothing(g) ? nothing : γ;
+						isnothing(g) ? nothing : θ - γ'*g;
+						γₚ; h .+ preference_slack; θ - γₚ'*(h .+ preference_slack);
+						γₛ; preference_slack; θ - γₛ' * preference_slack
+					],
+				),
 			)
-			return (; F, G, z = [x; preference_slack; λ; γ; γₚ; γₛ])
+			z = Vector{symbolic_type}(
+				vcat(x, preference_slack, (isnothing(f) ? [] : λ), (isnothing(g) ? [] : γ), γₚ, γₛ),
+			)
+			return (; F, G, z)
 		else
 
 			J = only(preferences)(x, θ)
 			L = J - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g)
 			∇L = Symbolics.gradient(L, x)
 			F = Vector{symbolic_type}([∇L; f])
-			G = Vector{symbolic_type}([g; γ; θ - γ'*g]) #ϵ - γ'*g
-			return (; F, G, z = [x; λ; γ])
+			G = Vector{symbolic_type}(
+				filter!(
+					!isnothing, 
+					[
+						isnothing(g) ? nothing : g;
+						isnothing(g) ? nothing : γ;
+						isnothing(g) ? nothing : θ - γ'*g;
+					],
+				),	
+			) #ϵ - γ'*g
+			z = Vector{symbolic_type}(
+				vcat(x, (isnothing(f) ? [] : λ), (isnothing(g) ? [] : γ)),
+			)
+			return (; F, G, z)
 		end
 	end
 
 	# Recursive call for the next level.
 	(; F, G, z) = construct_kkt(preferences[2:end], is_prioritized_constraint[2:end], player)
 
+	Main.@infiltrate
 	J = first(preferences)(x, θ)
 
 	λ = SymbolicTracingUtils.make_variables(
@@ -263,7 +252,6 @@ z̅ = [
 	fill(Inf, length(G))
 ]
 parameter_value = [1e-5]
-Main.@infiltrate
 parametric_mcp = ParametricMCPs.ParametricMCP([F; G], [z; λ; γ], [θ], z̲, z̅; compute_sensitivities = false)
 z_sol, status, info = ParametricMCPs.solve(
 	parametric_mcp,

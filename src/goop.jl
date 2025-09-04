@@ -372,6 +372,8 @@ function generate_slacked_kkt_system(
 		),
 	)
 
+	Main.@infiltrate
+
 	# Pack all variables together.
 	z = Vector{symbolic_type}(
 		vcat(x, s, Σ, Λ, Γ, Ψ, λₛ, γₛ, σₛ),
