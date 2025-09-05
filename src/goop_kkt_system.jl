@@ -11,7 +11,7 @@ TODO (@Jingqi/@DongHo): Please flesh this comment out with more of the math,
 or with a pointer to a LaTeX derivation somewhere in this repository.
 """
 
-struct GOOPKKTSystem{T1, T2, T3, T4, T5, T6}
+struct GOOPKKTSystem{T1, T2, T3, T4, T5, T6, T7}
 	"A callable function that computes F!(val, z; θ, ϵ) in-place for 'val'"
 	F!::T1
 	"A callable function that computes ∇F!(val, z; θ, ϵ) in-place for 'val'"
@@ -24,11 +24,14 @@ struct GOOPKKTSystem{T1, T2, T3, T4, T5, T6}
 	interior_point_slack_dims::T4
 	"Coordinates of z associated to inequality constraint duals"
 	inequality_constraint_dual_dims::T5
-	"Length of z vector"
-	variable_dimension::T6
-
 	"KKT dimension"
 	kkt_dimension::T6
+	"Length of z vector"
+	variable_dimension::T6
+	"F in symbolics"
+	F_symbolic::T7
+	"z in symbolics"
+	z_symbolic::T7
 end
 
 function BuildGOOPKKTSystem(
@@ -95,7 +98,9 @@ function BuildGOOPKKTSystem(
 		preference_slack_dims,
 		interior_point_slack_dims,
 		inequality_constraint_dual_dims,
-		length(z_symbolic),
 		length(F_symbolic),
+		length(z_symbolic),
+		F_symbolic,
+		z_symbolic,
 	)
 end

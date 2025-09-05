@@ -1,14 +1,5 @@
 using QuasiGOOP
 
-using ParametricMCPs: ParametricMCPs
-
-using LinearAlgebra: I, norm, pinv
-
-using Symbolics
-using SymbolicTracingUtils
-using BlockArrays: BlockArrays, BlockArray, Block, blocks, blocksizes
-
-
 # Trilevel Equality-Constrained Quadratic Program (Toy Example)
 # --------------------------------------------------------------
 #
@@ -22,6 +13,7 @@ using BlockArrays: BlockArrays, BlockArray, Block, blocks, blocksizes
 # --------------------------------------------------------------
 n = 4 # x dimension
 m = 2 # equality dimension
+backend = SymbolicTracingUtils.SymbolicsBackend()
 
 # Problem data
 Q₁ = I(n)
@@ -101,13 +93,49 @@ parameter_value = θ
 	verbose = true,
 )
 @show status
-println("v3 Primal solution: $(x)")
-println("v3 Variables: $(z)")
-println("v3 Objective: $(f(x[1:n], 0))")
+println("Primal solution: $(x)")
+println("Variables: $(z)")
+println("Objective: $(f(x[1:n], 0))")
+
+## Check if duals can be found when primals are given using NonlinearSolve
+x = SymbolicTracingUtils.make_variables(backend, :x, n)
+ϵ = only(SymbolicTracingUtils.make_variables(backend, :ϵ, 1))
+η = only(SymbolicTracingUtils.make_variables(backend, :η, 1))
+F_symbolic = GOOP_kkt_system.F_symbolic
+z_symbolic = GOOP_kkt_system.z_symbolic
+symbolic_type = eltype(x)
+F_symbolic_after_sub = Vector{symbolic_type}(
+	Symbolics.substitute(F_symbolic, Dict([x[1] => 0.5, x[2] => 1.0, x[3] => 1.0, x[4] => -0.5, ϵ => 0, η => 0]))
+)
+
+# Compile the numeric function (returns F given z)
+F_eval = first(Symbolics.build_function(F_symbolic_after_sub, z_symbolic; expression=Val(false)))
+# Wrap it to match NonlinearSolve’s expected signature f(u, p)
+test_f(u, p) = F_eval(u)
+
+# Initial guess and parameters
+z_val = zeros(length(z_symbolic) - n)
+
+# Construct the problem (3 positional args max)
+prob = NonlinearLeastSquaresProblem(test_f, z_val)
+
+# prob = NonlinearProblem(f, z_val, p)
+sol = NonlinearSolve.solve(prob)
+@assert length(sol.u) ==  length(z) - n
+# compute l1 difference between two solutions
+println("Duals from nonlinear solve: $(sol.u)")
+@show norm(sol.u .- z[Not(1:n)], 1)
+Main.@infiltrate
+
+
+
+
+
+
+
 
 ################# Cross check with original GOOP#########################
 # θ is the relaxation factor
-backend = SymbolicTracingUtils.SymbolicsBackend()
 x = SymbolicTracingUtils.make_variables(backend, :x, n)
 θ = only(SymbolicTracingUtils.make_variables(backend, :θ, 1))
 symbolic_type = eltype(x)
@@ -205,7 +233,6 @@ function construct_kkt(preferences, is_prioritized_constraint, player)
 	# Recursive call for the next level.
 	(; F, G, z) = construct_kkt(preferences[2:end], is_prioritized_constraint[2:end], player)
 
-	Main.@infiltrate
 	J = first(preferences)(x, θ)
 
 	λ = SymbolicTracingUtils.make_variables(

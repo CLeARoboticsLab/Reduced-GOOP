@@ -6,6 +6,8 @@ using LinearAlgebra: I, norm, pinv
 using Symbolics
 using SymbolicTracingUtils
 using BlockArrays: BlockArrays, BlockArray, Block, blocks, blocksizes
+using NonlinearSolve
+using InvertedIndices: Not
 
 include("trilevel_QP.jl")
 # include("Intersection.jl")

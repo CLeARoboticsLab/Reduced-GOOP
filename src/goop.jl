@@ -372,7 +372,7 @@ function generate_slacked_kkt_system(
 		),
 	)
 
-	Main.@infiltrate
+	# Main.@infiltrate
 
 	# Pack all variables together.
 	z = Vector{symbolic_type}(
