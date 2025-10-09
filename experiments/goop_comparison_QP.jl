@@ -1,5 +1,7 @@
 using QuasiGOOP
 
+include("old_goop.jl")
+
 # Trilevel Equality-Constrained Quadratic Program (Toy Example)
 # --------------------------------------------------------------
 #
@@ -66,7 +68,7 @@ x = BlockArray(zeros(n), [n]) # single player
 goop_preferences = [[J₁, J₂, J₃]]
 is_prioritized_constraint = [[false, false, false]]
 equality_constraints = [g_eq]
-inequality_constraints = [nothing] #[g_ineq] # [g_ineq]
+inequality_constraints = [g_ineq] #[g_ineq] # [g_ineq]
 shared_equality_constraint = nothing
 shared_inequality_constraint = nothing
 
@@ -88,46 +90,18 @@ status, z_sol_new_goop, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters = 
 	GOOP_kkt_system,
 	parameter_value;
 	tol = 1e-6,
+	η₀ = 0.0, # no regularization
 	min_stepsize = 1e-4,
 	max_outer_iters = 50,
 	z₀ = nothing,
 	verbose = true,
 )
 @show status
-println("Primal solution: $(z_sol_new_goop[1:n])")
-println("Duals from new goop: $(z_sol_new_goop[Not(1:n)])")
-println("Objective: $(f(z_sol_new_goop[1:n], 0))")
-# z_sol_new_goop = z
+println("[New G] Primal solution: $(z_sol_new_goop[1:n])")
+println("[New G] Dual solution ($(length(z_sol_new_goop) - n) variables): $(z_sol_new_goop[Not(1:n)])")
+println("[New G] Objective: $(f(z_sol_new_goop[1:n], 0))")
 
-## Check if duals can be found when primals are given using NonlinearSolve
-x = SymbolicTracingUtils.make_variables(backend, :x, n)
-ϵ = only(SymbolicTracingUtils.make_variables(backend, :ϵ, 1))
-η = only(SymbolicTracingUtils.make_variables(backend, :η, 1))
-F_symbolic = GOOP_kkt_system.F_symbolic
-z_symbolic = GOOP_kkt_system.z_symbolic
-symbolic_type = eltype(x)
-F_symbolic_after_sub = Vector{symbolic_type}(
-	Symbolics.substitute(F_symbolic, Dict([x[1] => 0.5, x[2] => 1.0, x[3] => 1.0, x[4] => -0.5, ϵ => 0, η => 0]))
-)
-
-# Compile the numeric function (returns F given z)
-F_eval = first(Symbolics.build_function(F_symbolic_after_sub, z_symbolic[Not(1:n)]; expression=Val(false)))
-# Wrap it to match NonlinearSolve’s expected signature f(u, p)
-test_f(u, p) = F_eval(u)
-
-# Initial guess and parameters
-z_val = zeros(length(z_symbolic) - n) #z[Not(1:n)] .+ 1e-2*rand() # z[Not(1:n)] # sanity check #zeros(length(z_symbolic) - n)
-
-# Construct the problem (3 positional args max) and solve it
-prob = isnothing(inequality_constraints[1]) ?  NonlinearProblem(test_f, z_val) : NonlinearLeastSquaresProblem(test_f, z_val)
-sol = NonlinearSolve.solve(prob)
-@assert length(sol.u) ==  length(z_symbolic) - n
-# compute l1 difference between two solutions
-println("Duals from nonlinear solve: $(sol.u)")
-@show sol.u .- z_sol_new_goop[Not(1:n)]
-@show norm(sol.u .- z_sol_new_goop[Not(1:n)], Inf)
-
-Main.@infiltrate
+# Main.@infiltrate
 
 
 
@@ -140,28 +114,34 @@ x = SymbolicTracingUtils.make_variables(backend, :x, n)
 symbolic_type = eltype(x)
 
 # Keep track of all equality constraint duals (λ) that we create.
-Λ = []
+Λ = symbolic_type[]
 
 # Keep track of all inequality constraint duals (γ) that we create.
-Γ = []
+Γ = symbolic_type[]
+
+# Construct F (equalities), G (inequalities) and z (variables) for the topmost level after recursion.
 function construct_kkt(preferences, is_prioritized_constraint, player)
 	level = 1 + length(goop_preferences[player]) - length(preferences)
 
-	f = isnothing(equality_constraints[player]) ? nothing : equality_constraints[player](x, θ)
-	g = isnothing(inequality_constraints[player]) ? nothing : inequality_constraints[player](x, θ)
-	λ = SymbolicTracingUtils.make_variables(
-		backend,
-		Symbol("λ_$(player)_$(level)"),
-		isnothing(f) ? 0 : length(f),
-	)
-
-	γ = SymbolicTracingUtils.make_variables(
-		backend,
-		Symbol("γ_$(player)_$(level)"),
-		isnothing(g) ? 0 : length(g),
-	)
 	# Base level
 	if length(preferences) == 1
+
+		f = isnothing(equality_constraints[player]) ? nothing : equality_constraints[player](x, θ)
+		g = isnothing(inequality_constraints[player]) ? nothing : inequality_constraints[player](x, θ)
+		λ = SymbolicTracingUtils.make_variables(
+			backend,
+			Symbol("λ_$(player)_$(level)"),
+			isnothing(f) ? 0 : length(f),
+		)
+		push!(Λ, λ...)
+
+		γ = SymbolicTracingUtils.make_variables(
+			backend,
+			Symbol("γ_$(player)_$(level)"),
+			isnothing(g) ? 0 : length(g),
+		)
+		push!(Γ, γ...)
+
 		if only(is_prioritized_constraint) # For now, only the innermost is preference constraint.
 			# Highest priority is a constraint.
 			h = only(preferences)(x, θ)
@@ -207,20 +187,19 @@ function construct_kkt(preferences, is_prioritized_constraint, player)
 			)
 			return (; F, G, z)
 		else
-
 			J = only(preferences)(x, θ)
 			L = J - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g)
 			∇L = Symbolics.gradient(L, x)
 			F = Vector{symbolic_type}([∇L; f])
 			G = Vector{symbolic_type}(
 				filter!(
-					!isnothing, 
+					!isnothing,
 					[
 						isnothing(g) ? nothing : g;
 						isnothing(g) ? nothing : γ;
 						isnothing(g) ? nothing : θ - γ'*g;
 					],
-				),	
+				),
 			) #ϵ - γ'*g
 			z = Vector{symbolic_type}(
 				vcat(x, (isnothing(f) ? [] : λ), (isnothing(g) ? [] : γ)),
@@ -233,17 +212,19 @@ function construct_kkt(preferences, is_prioritized_constraint, player)
 	(; F, G, z) = construct_kkt(preferences[2:end], is_prioritized_constraint[2:end], player)
 
 	J = first(preferences)(x, θ)
-
 	λ = SymbolicTracingUtils.make_variables(
 		backend,
 		Symbol("λ_$(player)_$(level)"),
 		length(F),
 	)
+	push!(Λ, λ...)
+
 	γ = SymbolicTracingUtils.make_variables(
 		backend,
 		Symbol("γ_$(player)_$(level)"),
 		length(G),
 	)
+	push!(Γ, γ...)
 
 	L = J - λ'*F - γ'*G
 	∇L = Symbolics.gradient(L, z)
@@ -254,22 +235,31 @@ function construct_kkt(preferences, is_prioritized_constraint, player)
 end
 
 (; F, G, z) = construct_kkt(goop_preferences[player][2:end], is_prioritized_constraint[player][2:end], player)
+
+Main.@infiltrate
+
+# Topmost level (final)
 λ = SymbolicTracingUtils.make_variables(
 	backend,
 	Symbol("λ_$(player)_1"),
 	length(F),
 )
+push!(Λ, λ...)
 γ = SymbolicTracingUtils.make_variables(
 	backend,
 	Symbol("γ_$(player)_1"),
 	length(G),
 )
+push!(Γ, γ...)
 
-# Topmost level
 L = first(goop_preferences[player][1](z, θ)) - λ'*F - γ'*G
 ∇L = Symbolics.gradient(L, z)
-Main.@infiltrate
-F = Vector{symbolic_type}([∇L; F])
+F = Vector{symbolic_type}(
+	[
+		∇L;
+		F
+	],
+)
 z̲ = [
 	fill(-Inf, length(F))
 	fill(0, length(G))
@@ -279,7 +269,23 @@ z̅ = [
 	fill(Inf, length(G))
 ]
 parameter_value = [1e-5]
-parametric_mcp = ParametricMCPs.ParametricMCP([F; G], [z; λ; γ], [θ], z̲, z̅; compute_sensitivities = false)
+variables = [x; Λ; Γ]
+# parametric_mcp = ParametricMCPs.ParametricMCP([F; G], [z; λ; γ], [θ], z̲, z̅; compute_sensitivities = false)
+parametric_mcp = ParametricMCPs.ParametricMCP([F; G], variables, [θ], z̲, z̅; compute_sensitivities = false)
+
+Main.@infiltrate
+
+# Set up common memory
+variable_dimension = length(variables)
+kkt_dimension = length([F; G])
+idx = blockedrange(length.([x, Λ, Γ]))
+primal_dims = idx[Block(1)]
+interior_point_slack_dims = []#TODO!!!!!!!!!!!!!!! need to modify construct kkt to follow math
+inequality_constraint_dual_dims = idx[Block(3)]
+
+
+# (For comparison) PATH solver result 
+
 z_sol_old_goop, status, info = ParametricMCPs.solve(
 	parametric_mcp,
 	parameter_value;
@@ -294,7 +300,6 @@ z_sol_old_goop, status, info = ParametricMCPs.solve(
 	use_start = true,
 )
 @show status
-println("v2 Primal solution: $(z_sol_old_goop[1:n])")
-println("v2 Variables: $(z_sol_old_goop)")
-println("v2 Objective: $(f(z_sol_old_goop[1:n], 0))")
-Main.@infiltrate
+println("[Old G] Primal solution: $(z_sol_old_goop[1:n])")
+println("[Old G] Dual solution ($(length(z_sol_old_goop) - n) variables): $(z_sol_old_goop[Not(1:n)])")
+println("[Old G] Objective: $(f(z_sol_old_goop[1:n], 0))")

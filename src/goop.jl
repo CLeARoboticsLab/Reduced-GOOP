@@ -329,7 +329,7 @@ function generate_slacked_kkt_system(
 					!isnothing,
 					[
 						∇L .+ η * x[Block(player)]
-						(isnothing(g) ? nothing : σ .* γ .- ϵ)
+						(isnothing(g) ? nothing : σ .* γ .- ϵ) # 1009: Isn't this already included in F from lower levels?
 						(isnothing(gₛ) ? nothing : σₛ .* γ̃ₛ .- ϵ)
 						F
 					],
@@ -399,3 +399,4 @@ function generate_slacked_kkt_system(
 	)
 
 end
+
