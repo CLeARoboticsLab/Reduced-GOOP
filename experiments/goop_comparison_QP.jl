@@ -18,6 +18,7 @@ m = 2 # equality dimension
 backend = SymbolicTracingUtils.SymbolicsBackend()
 
 # Problem data
+player = 1
 Q₁ = I(n)
 c₁ = [1.0, 0.0, -1.0, 2.0]
 Q₂ = 2I(n) # [0 0 0 0; 0 1 0 0; 0 0 2 0; 0 0 0 1]
@@ -28,34 +29,7 @@ A₃ = [1 0 1 1; 1 0 0 1] # A₃x = b₃
 b₃ = [1.0, 1.0]
 
 
-f(x, θ) = 0.5x[1:n]'*Q₁*x[1:n] + c₁'*x[1:n]
-
-##### NEW VERSION ######
-player = 1
-M₃ = [Q₂ -A₃'; A₃ zeros(m, m)]
-∇ₓπ₃ = Q₂
-∇ₓπ₂ = [Q₂; Q₃]
-M₂ = [Q₂ -Q₃' -A₃'; Q₃ zeros(n, n) zeros(n, m); A₃ zeros(m, n) zeros(m, m)]
-
-new_f(x, θ) = 0
-new_g = function (x, θ)
-	x₁ = x[1:n]
-	ψ₁ = x[(n+1):(n+2n)]
-	μ₁ = x[(n+2n+1):(n+2n+m)]
-	ψ₂ = x[(n+2n+m+1):(n+2n+m+n)]
-	μ₂ = x[(n+2n+m+n+1):(n+2n+m+n+m)]
-	μ₃ = x[(n+2n+m+n+m+1):(n+2n+m+n+m+m)]
-
-	[
-		Q₁*x₁ + c₁ - ∇ₓπ₂'*ψ₁ - A₃'*μ₁; # ∇ₓL₁ (n)
-		Q₂*x₁ + c₂ - ∇ₓπ₃'*ψ₂ - A₃'*μ₂; # π₂(x) = [Q₂x + c₂ - ∇ₓπ₃(x)'ψ₂ - A₃'μ₂; Q₃x + c₃ - A₃'μ₃] (n)
-		Q₃*x₁ + c₃ - A₃'*μ₃; #- [0; x[23]; 0 ; x[24]]; # (n)
-		A₃ * x₁ - b₃; # g₂ = 0 (m)
-	]
-end
-
-dummy_primals = zeros(n+2n+m+n+m+m)
-dummy_parameters = [0.0]
+# f(x, θ) = 0.5x[1:n]'*Q₁*x[1:n] + c₁'*x[1:n]
 
 J₁(x, θ) = 0.5x[1:n]'*Q₁*x[1:n] + c₁'*x[1:n]
 J₂(x, θ) = 0.5x[1:n]'*Q₂*x[1:n] + c₂'*x[1:n]
@@ -63,8 +37,10 @@ J₃(x, θ) = 0.5x[1:n]'*Q₃*x[1:n] + c₃'*x[1:n]
 g_eq(x, θ) = A₃*x[1:n] .- b₃
 g_ineq(x, θ) = [x[1] - 0.5; x[2] - 0.5]
 
+################# NEW GOOP #########################
+
 x = BlockArray(zeros(n), [n]) # single player
-θ = BlockArray([0.0], [1])
+parameters = BlockArray([0.0], [1])
 goop_preferences = [[J₁, J₂, J₃]]
 is_prioritized_constraint = [[false, false, false]]
 equality_constraints = [g_eq]
@@ -74,7 +50,7 @@ shared_inequality_constraint = nothing
 
 GOOP_trial1 = QuasiGOOP.ParametricGOOP(
 	x,
-	θ;
+	parameters;
 	preferences = goop_preferences,
 	is_prioritized_constraint,
 	equality_constraints,
@@ -84,11 +60,13 @@ GOOP_trial1 = QuasiGOOP.ParametricGOOP(
 )
 
 GOOP_kkt_system = QuasiGOOP.generate_slacked_kkt_system(GOOP_trial1)
-parameter_value = θ
+
+Main.@infiltrate
+
 status, z_sol_new_goop, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters = QuasiGOOP.solve(
 	QuasiGOOP.InteriorPoint(),
 	GOOP_kkt_system,
-	parameter_value;
+	parameters;
 	tol = 1e-6,
 	η₀ = 0.0, # no regularization
 	min_stepsize = 1e-4,
@@ -99,18 +77,16 @@ status, z_sol_new_goop, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters = 
 @show status
 println("[New G] Primal solution: $(z_sol_new_goop[1:n])")
 println("[New G] Dual solution ($(length(z_sol_new_goop) - n) variables): $(z_sol_new_goop[Not(1:n)])")
-println("[New G] Objective: $(f(z_sol_new_goop[1:n], 0))")
+println("[New G] Objective: $(J₁(z_sol_new_goop[1:n], 0))")
 
-# Main.@infiltrate
-
-
+Main.@infiltrate
 
 
-
-################# Cross check with original GOOP#########################
-# θ is the relaxation factor
+################# OLD GOOP #########################
 x = SymbolicTracingUtils.make_variables(backend, :x, n)
-θ = only(SymbolicTracingUtils.make_variables(backend, :θ, 1))
+θ = SymbolicTracingUtils.make_variables(backend, :θ, n)
+ϵ = only(SymbolicTracingUtils.make_variables(backend, :ϵ, 1))
+η = only(SymbolicTracingUtils.make_variables(backend, :η, 1))
 symbolic_type = eltype(x)
 
 # Keep track of all equality constraint duals (λ) that we create.
@@ -118,6 +94,10 @@ symbolic_type = eltype(x)
 
 # Keep track of all inequality constraint duals (γ) that we create.
 Γ = symbolic_type[]
+
+# Keep track of all preference slack (s) and interior point slack variables (σ) that we create.
+s = symbolic_type[]
+Σ = symbolic_type[]
 
 # Construct F (equalities), G (inequalities) and z (variables) for the topmost level after recursion.
 function construct_kkt(preferences, is_prioritized_constraint, player)
@@ -142,7 +122,14 @@ function construct_kkt(preferences, is_prioritized_constraint, player)
 		)
 		push!(Γ, γ...)
 
-		if only(is_prioritized_constraint) # For now, only the innermost is preference constraint.
+		σ = SymbolicTracingUtils.make_variables(
+			backend,
+			Symbol("σ_$(player)_$(level)"),
+			isnothing(g) ? 0 : length(g),
+		)
+		push!(Σ, σ...)
+
+		if only(is_prioritized_constraint) # TODO for old GOOP
 			# Highest priority is a constraint.
 			h = only(preferences)(x, θ)
 
@@ -190,26 +177,26 @@ function construct_kkt(preferences, is_prioritized_constraint, player)
 			J = only(preferences)(x, θ)
 			L = J - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g)
 			∇L = Symbolics.gradient(L, x)
-			F = Vector{symbolic_type}([∇L; f])
-			G = Vector{symbolic_type}(
+			F = Vector{symbolic_type}(
 				filter!(
 					!isnothing,
 					[
-						isnothing(g) ? nothing : g;
-						isnothing(g) ? nothing : γ;
-						isnothing(g) ? nothing : θ - γ'*g;
+						∇L;
+						f;
+						isnothing(g) ? nothing : g .- σ;
+						isnothing(g) ? nothing : σ .* γ .- ϵ;
 					],
 				),
-			) #ϵ - γ'*g
+			)
 			z = Vector{symbolic_type}(
 				vcat(x, (isnothing(f) ? [] : λ), (isnothing(g) ? [] : γ)),
 			)
-			return (; F, G, z)
+			return (; F, z)
 		end
 	end
 
 	# Recursive call for the next level.
-	(; F, G, z) = construct_kkt(preferences[2:end], is_prioritized_constraint[2:end], player)
+	(; F, z) = construct_kkt(preferences[2:end], is_prioritized_constraint[2:end], player)
 
 	J = first(preferences)(x, θ)
 	λ = SymbolicTracingUtils.make_variables(
@@ -219,23 +206,14 @@ function construct_kkt(preferences, is_prioritized_constraint, player)
 	)
 	push!(Λ, λ...)
 
-	γ = SymbolicTracingUtils.make_variables(
-		backend,
-		Symbol("γ_$(player)_$(level)"),
-		length(G),
-	)
-	push!(Γ, γ...)
-
-	L = J - λ'*F - γ'*G
+	L = J - λ'*F
 	∇L = Symbolics.gradient(L, z)
 	F̃ = Vector{symbolic_type}([∇L; F])
-	G̃ = Vector{symbolic_type}([G; γ; θ - γ'*G])
-	# return level == 1 ? (; F = F̃, G = G̃, z = z) : (; F = F̃, G = G̃, z = [z; λ; γ])
-	return (; F = F̃, G = G̃, z = [z; λ; γ])
+
+	(; F = F̃, z = [z; λ])
 end
 
-(; F, G, z) = construct_kkt(goop_preferences[player][2:end], is_prioritized_constraint[player][2:end], player)
-
+(; F, z) = construct_kkt(goop_preferences[player][2:end], is_prioritized_constraint[player][2:end], player)
 Main.@infiltrate
 
 # Topmost level (final)
@@ -245,14 +223,8 @@ Main.@infiltrate
 	length(F),
 )
 push!(Λ, λ...)
-γ = SymbolicTracingUtils.make_variables(
-	backend,
-	Symbol("γ_$(player)_1"),
-	length(G),
-)
-push!(Γ, γ...)
 
-L = first(goop_preferences[player][1](z, θ)) - λ'*F - γ'*G
+L = first(goop_preferences[player][1](z, θ)) - λ'*F
 ∇L = Symbolics.gradient(L, z)
 F = Vector{symbolic_type}(
 	[
@@ -260,46 +232,48 @@ F = Vector{symbolic_type}(
 		F
 	],
 )
-z̲ = [
-	fill(-Inf, length(F))
-	fill(0, length(G))
-]
-z̅ = [
-	fill(Inf, length(F))
-	fill(Inf, length(G))
-]
-parameter_value = [1e-5]
-variables = [x; Λ; Γ]
-# parametric_mcp = ParametricMCPs.ParametricMCP([F; G], [z; λ; γ], [θ], z̲, z̅; compute_sensitivities = false)
-parametric_mcp = ParametricMCPs.ParametricMCP([F; G], variables, [θ], z̲, z̅; compute_sensitivities = false)
+z = Vector{symbolic_type}(
+	vcat(x, s, Σ, Λ, Γ),
+)
+
+# Set up common memory
+variable_dimension = length(z)
+kkt_dimension = length(F)
+idx = blockedrange(length.([x, s, Λ, Σ, Γ]))
+primal_dims = idx[Block(1)]
+preference_slack_dims = idx[Block(2)] # s
+interior_point_slack_dims = idx[Block(4)] # Σ
+inequality_constraint_dual_dims = idx[Block(5)] # Γ
 
 Main.@infiltrate
 
-# Set up common memory
-variable_dimension = length(variables)
-kkt_dimension = length([F; G])
-idx = blockedrange(length.([x, Λ, Γ]))
-primal_dims = idx[Block(1)]
-interior_point_slack_dims = []#TODO!!!!!!!!!!!!!!! need to modify construct kkt to follow math
-inequality_constraint_dual_dims = idx[Block(3)]
+OG_kkt_system = QuasiGOOP.BuildGOOPKKTSystem(
+	F,
+	z,
+	θ,
+	ϵ,
+	η,
+	primal_dims,
+	preference_slack_dims,
+	interior_point_slack_dims,
+	inequality_constraint_dual_dims,
+)
+
+Main.@infiltrate
 
 
-# (For comparison) PATH solver result 
-
-z_sol_old_goop, status, info = ParametricMCPs.solve(
-	parametric_mcp,
-	parameter_value;
-	initial_guess = zeros(length([z; λ; γ])),
-	verbose = false,
-	cumulative_iteration_limit = 100000,
-	proximal_perturbation = 1e-2,
-	# major_iteration_limit = 1000,
-	# minor_iteration_limit = 2000,
-	# nms_initial_reference_factor = 50,
-	use_basics = true,
-	use_start = true,
+status, z_sol_old_goop, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters = QuasiGOOP.solve(
+	QuasiGOOP.InteriorPoint(),
+	OG_kkt_system,
+	parameters;
+	tol = 1e-6,
+	η₀ = 0.0, # no regularization
+	min_stepsize = 1e-4,
+	max_outer_iters = 50,
+	z₀ = nothing,
+	verbose = true,
 )
 @show status
 println("[Old G] Primal solution: $(z_sol_old_goop[1:n])")
 println("[Old G] Dual solution ($(length(z_sol_old_goop) - n) variables): $(z_sol_old_goop[Not(1:n)])")
-println("[Old G] Objective: $(f(z_sol_old_goop[1:n], 0))")
+println("[Old G] Objective: $(J₁(z_sol_old_goop[1:n], 0))")
