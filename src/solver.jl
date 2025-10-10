@@ -116,14 +116,15 @@ function solve(
 			# @assert all(.!isnan.(F)) "Found NaN in F - aborting!"
 			# @assert all(.!isnan.(∇F)) "Found NaN in ∇F - aborting!"
 			println("condition number of ∇F = $(cond(collect(∇F),2))")
-			# println("min singular value of ∇F = $(minimum(svdvals(Array(∇F))))")
-			# println("max singular value of ∇F = $(maximum(svdvals(Array(∇F))))")
-			# Main.@infiltrate
+
 			linsolve.A = ∇F
 			linsolve.b = -F
-			# Main.@infiltrate
-			# println("inertia of ∇F = $(LinearAlgebra.eigen(Array(∇F'*∇F + 1e-4 * SparseArrays.sparse(I_idx, J_idx, V))))")
 			solution = solve!(linsolve)
+
+			# Check the primals 
+			println("current primal x: ", round.(z[mcp.primal_dims]; digits = 4))
+			println("current δx: ", round.(δx[mcp.primal_dims]; digits = 4))
+
 			if !SciMLBase.successful_retcode(solution) &&
 			   (solution.retcode !== SciMLBase.ReturnCode.Default)
 				verbose &&
@@ -135,7 +136,6 @@ function solve(
 			δz .= solution.u
 
 			# Fraction to the boundary linesearch.
-
 			α_σ = fraction_to_the_boundary_linesearch(σ, δσ; tol = min_stepsize)
 			α_γ = fraction_to_the_boundary_linesearch(γ, δγ; tol = min_stepsize)
 
