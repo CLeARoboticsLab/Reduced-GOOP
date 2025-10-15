@@ -25,7 +25,15 @@ c₃ = -[0.5, -0.5, 1.0, 0.0]
 A₃ = [1 0 1 1; 1 0 0 1] # A₃x = b₃
 b₃ = [1.0, 1.0]
 
-
+player = 1
+Q₁ = I(n)
+c₁ = [1.0, 1.0, 1.0, 1.0]
+Q₂ = I(n) # [0 0 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 1]
+c₂ = [1.0, 1.0, 1.0, 1.0]
+Q₃ = I(n) # [1 0 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 0]
+c₃ = [1.0, 1.0, 1.0, 1.0]
+A₃ = [1 0 1 0; 1 1 0 1] # A₃x = b₃
+b₃ = [1.0, 1.0]
 f(x, θ) = 0.5x[1:n]'*Q₁*x[1:n] + c₁'*x[1:n]
 
 ##### NEW VERSION ######
@@ -66,7 +74,7 @@ x = BlockArray(zeros(n), [n]) # single player
 goop_preferences = [[J₁, J₂, J₃]]
 is_prioritized_constraint = [[false, false, false]]
 equality_constraints = [g_eq]
-inequality_constraints = [nothing] #[g_ineq] # [g_ineq]
+inequality_constraints = [g_ineq] #[g_ineq] # [g_ineq]
 shared_equality_constraint = nothing
 shared_inequality_constraint = nothing
 

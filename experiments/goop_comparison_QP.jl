@@ -28,26 +28,27 @@ backend = SymbolicTracingUtils.SymbolicsBackend()
 # Problem data
 player = 1
 Q₁ = I(n)
-c₁ = [1.0, 0.0, -1.0, 2.0]
-Q₂ = 2I(n) # [0 0 0 0; 0 1 0 0; 0 0 2 0; 0 0 0 1]
-c₂ = [-1.0, 2.0, 0.0, 1.0]
-Q₃ = 3I(n)# -[1 0 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 0]
-c₃ = -[0.5, -0.5, 1.0, 0.0]
-A₃ = [1 0 1 1; 1 0 0 1] # A₃x = b₃
+c₁ = [1.0, 1.0, 1.0, 1.0]
+Q₂ = [0 0 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 1]
+c₂ = [1.0, 1.0, 1.0, 1.0]
+Q₃ = [1 0 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 0]
+c₃ = [1.0, 1.0, 1.0, 1.0]
+A₃ = [1 0 1 0; 1 1 0 1] # A₃x = b₃
 b₃ = [1.0, 1.0]
 
 # Randomize Q, A and b (Q_i has to be positive semi-definite)
-# Q₁ = rand_psd(n, 1); c₁ = rand(n); 
-# Q₂ = rand_psd(n, 1); c₂ = rand(n);
-# Q₃ = rand_psd(n, 1); c₃ = rand(n);
-# Aₑ = rand(m, n); bₑ = rand(m);
-# Aᵢ = rand(m, n); bᵢ = rand(m);
+Q₁ = rand_psd(n, 1); c₁ = rand(n); 
+Q₂ = rand_psd(n, 1); c₂ = rand(n);
+Q₃ = rand_psd(n, 1); c₃ = rand(n);
+Aₑ = rand(m, n); bₑ = rand(m);
+Aᵢ = rand(m, n); bᵢ = rand(m);
 
 J₁(x, θ) = 0.5x[1:n]'*Q₁*x[1:n] + c₁'*x[1:n]
 J₂(x, θ) = 0.5x[1:n]'*Q₂*x[1:n] + c₂'*x[1:n]
 J₃(x, θ) = 0.5x[1:n]'*Q₃*x[1:n] + c₃'*x[1:n]
 # g_eq(x, θ) = Aₑ*x[1:n] .- bₑ
 # g_ineq(x, θ) = Aᵢ*x[1:n] .- bᵢ
+# g_eq(x, θ) = [x[1] + x[3] + x[4] - 1.0; x[1] + x[4] - 1.0]
 g_eq(x, θ) = A₃*x[1:n] .- b₃
 g_ineq(x, θ) = [x[1] - 0.5; x[2] - 0.5]
 
@@ -56,8 +57,8 @@ g_ineq(x, θ) = [x[1] - 0.5; x[2] - 0.5]
 
 x = BlockArray(zeros(n), [n]) # single player
 parameters = BlockArray([0.0], [1])
-goop_preferences = [[J₁, J₂, J₃]]
-is_prioritized_constraint = [[false, false, false]]
+goop_preferences = [[J₂, J₃]] # single player
+is_prioritized_constraint = [[false, false]]
 equality_constraints = [g_eq]
 inequality_constraints = [g_ineq] #[g_ineq] # nothing
 shared_equality_constraint = nothing
@@ -75,7 +76,6 @@ GOOP_trial1 = QuasiGOOP.ParametricGOOP(
 )
 
 GOOP_kkt_system = QuasiGOOP.generate_slacked_kkt_system(GOOP_trial1)
-
 status, z_sol_new_goop, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters = QuasiGOOP.solve(
 	QuasiGOOP.InteriorPoint(),
 	GOOP_kkt_system,
@@ -91,6 +91,7 @@ status, z_sol_new_goop, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters = 
 println("[New G] Primal solution: $(round.(z_sol_new_goop[1:n], digits = n_digits))")
 println("[New G] Dual solution ($(length(z_sol_new_goop) - n) variables): $(round.(z_sol_new_goop[Not(1:n)], digits = n_digits))")
 println("[New G] Objective: $(round(J₁(z_sol_new_goop[1:n], 0), digits = n_digits))")
+println("[New G] number of equations: $(GOOP_kkt_system.kkt_dimension)")
 
 ################# OLD GOOP #########################
 @info "........................STARTING OLD GOOP........................"
@@ -111,7 +112,7 @@ symbolic_type = eltype(x)
 s = symbolic_type[]
 Σ = symbolic_type[]
 
-(; F, z) = construct_kkt(goop_preferences[player][2:end], is_prioritized_constraint[player][2:end], player)
+(; F, z) = construct_old_goop_kkt(goop_preferences[player][2:end], is_prioritized_constraint[player][2:end], player)
 
 # Topmost level (final)
 λ = SymbolicTracingUtils.make_variables(
@@ -169,6 +170,14 @@ status, z_sol_old_goop, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters = 
 println("[Old G] Primal solution: $(round.(z_sol_old_goop[1:n], digits = n_digits))")
 println("[Old G] Dual solution ($(length(z_sol_old_goop) - n) variables): $(round.(z_sol_old_goop[Not(1:n)], digits = n_digits))")
 println("[Old G] Objective: $(round(J₁(z_sol_old_goop[1:n], 0), digits = n_digits))")
+println("[Old G] number of equations: $(OG_kkt_system.kkt_dimension)")
+
+# Reprint new goop
+@show status
+println("[New G] Primal solution: $(round.(z_sol_new_goop[1:n], digits = n_digits))")
+println("[New G] Dual solution ($(length(z_sol_new_goop) - n) variables): $(round.(z_sol_new_goop[Not(1:n)], digits = n_digits))")
+println("[New G] Objective: $(round(J₁(z_sol_new_goop[1:n], 0), digits = n_digits))")
+println("[New G] number of equations: $(GOOP_kkt_system.kkt_dimension)")
 
 # Final output
 primal_new = z_sol_new_goop[1:n]
@@ -178,3 +187,4 @@ primal_diff = primal_new .- primal_old
 println("Objective difference (new - old): $(round.(objective_diff, digits = n_digits))")
 println("Primal solution difference (new - old): $(round.(primal_diff, digits = n_digits))")
 println("Maximum absolute primal difference: $(round(maximum(abs.(primal_diff)), digits = n_digits))")
+

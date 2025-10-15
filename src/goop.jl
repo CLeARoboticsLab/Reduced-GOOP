@@ -139,12 +139,19 @@ function generate_slacked_kkt_system(
 		# # Shared constraints exist at every level. https://github.com/CLeARoboticsLab/Quasi-GOOP/issues/6
 		# Option (1): Share the multipliers only at all players' innermost levels, but let successive outer levels have their own separate multipliers for all players.
 
+		# (1015)TODO Discuss: interior point slacks only at innermost level. Otherwise,  γ₂ is not enforced?
 		σ = SymbolicTracingUtils.make_variables(
 			backend,
 			Symbol("σ_$(player)_$(level)"),
 			goop.inequality_dims[player],
 		)
 		push!(Σ, σ...)
+		# σ = SymbolicTracingUtils.make_variables(
+		# 	backend,
+		# 	Symbol("σ_$(player)_$(length(goop.preferences[player]))"),
+		# 	goop.inequality_dims[player],
+		# )
+		# (level == length(goop.preferences[player])) && push!(Σ, σ...)
 
 		# Base case is the inner-most layer.
 		if length(preferences) == 1
@@ -228,7 +235,7 @@ function generate_slacked_kkt_system(
 						],
 					),
 				)
-
+				
 				return (; F, π = ∇L)
 			end
 		end
@@ -312,7 +319,7 @@ function generate_slacked_kkt_system(
 				σₚ .* γₚ .- ϵ
 				preference_slack .- σₚₛ
 				σₚₛ .* μₛ .- ϵ
-				(isnothing(g) ? nothing : σ .* γ .- ϵ)
+				(isnothing(g) ? nothing : σ .* γ .- ϵ) 
 				(isnothing(gₛ) ? nothing : σₛ .* γ̃ₛ .- ϵ) # Note: same slacks (not duals) for all levels
 				F
 			]
@@ -329,7 +336,7 @@ function generate_slacked_kkt_system(
 					!isnothing,
 					[
 						∇L .+ η * x[Block(player)]
-						(isnothing(g) ? nothing : σ .* γ .- ϵ) # 1009: Isn't this already included in F from lower levels?
+						(isnothing(g) ? nothing : σ .* γ .- ϵ) 
 						(isnothing(gₛ) ? nothing : σₛ .* γ̃ₛ .- ϵ)
 						F
 					],

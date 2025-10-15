@@ -9,7 +9,8 @@ using BlockArrays: BlockArrays, BlockArray, Block, blocks, blocksizes, blockedra
 using NonlinearSolve
 using InvertedIndices: Not
 
-# include("trilevel_QP.jl")
 # include("Intersection.jl")
 include("goop_comparison_QP.jl")
+# include("trilevel_QP.jl")
+
 end

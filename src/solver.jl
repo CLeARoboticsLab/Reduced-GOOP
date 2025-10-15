@@ -116,14 +116,12 @@ function solve(
 			# @assert all(.!isnan.(F)) "Found NaN in F - aborting!"
 			# @assert all(.!isnan.(∇F)) "Found NaN in ∇F - aborting!"
 			println("condition number of ∇F = $(cond(collect(∇F),2))")
+			# Check the primals 
+			println("current primal x: ", round.(z[mcp.primal_dims]; digits = 4))
 
 			linsolve.A = ∇F
 			linsolve.b = -F
 			solution = solve!(linsolve)
-
-			# Check the primals 
-			println("current primal x: ", round.(z[mcp.primal_dims]; digits = 4))
-			println("current δx: ", round.(δx[mcp.primal_dims]; digits = 4))
 
 			if !SciMLBase.successful_retcode(solution) &&
 			   (solution.retcode !== SciMLBase.ReturnCode.Default)
@@ -134,6 +132,9 @@ function solve(
 			end
 
 			δz .= solution.u
+
+			println("current δx: ", round.(δz[mcp.primal_dims]; digits = 4))
+
 
 			# Fraction to the boundary linesearch.
 			α_σ = fraction_to_the_boundary_linesearch(σ, δσ; tol = min_stepsize)
@@ -146,7 +147,7 @@ function solve(
 				status = :failed
 				break
 			end
-			
+
 			# Update regularization parameter.
 			if min(α_σ, α_γ) == 1.0
 				verbose && printstyled("Full step taken... Decreasing η. ($η -> $(η * (1 - exp(-tightening_rate * inner_iters))))\n"; color = :blue)
