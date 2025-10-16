@@ -1,5 +1,5 @@
 # Construct F and z (variables) for the topmost level after recursion.
-function construct_old_goop_kkt(preferences, is_prioritized_constraint, player)
+function construct_kkt_old_goop(preferences, is_prioritized_constraint, player)
 	level = 1 + length(goop_preferences[player]) - length(preferences)
 
 	# Base level
@@ -97,7 +97,7 @@ function construct_old_goop_kkt(preferences, is_prioritized_constraint, player)
 	end
 
 	# Recursive call for the next level.
-	(; F, z) = construct_old_goop_kkt(preferences[2:end], is_prioritized_constraint[2:end], player)
+	(; F, z) = construct_kkt_old_goop(preferences[2:end], is_prioritized_constraint[2:end], player)
 
 	J = first(preferences)(x, θ)
 	λ = SymbolicTracingUtils.make_variables(

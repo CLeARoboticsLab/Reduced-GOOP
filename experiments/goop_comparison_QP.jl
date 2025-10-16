@@ -37,28 +37,62 @@ A₃ = [1 0 1 0; 1 1 0 1] # A₃x = b₃
 b₃ = [1.0, 1.0]
 
 # Randomize Q, A and b (Q_i has to be positive semi-definite)
+Random.seed!(17) 
+#16 (both version in new goop same sol)
+#17 (modified new goop gives wrong)
+#18,19,20 (old goop wrong)
 Q₁ = rand_psd(n, 1); c₁ = rand(n); 
 Q₂ = rand_psd(n, 1); c₂ = rand(n);
 Q₃ = rand_psd(n, 1); c₃ = rand(n);
 Aₑ = rand(m, n); bₑ = rand(m);
-Aᵢ = rand(m, n); bᵢ = rand(m);
+Aᵢ = [1 0 0 0; 0 1 0 0]; bᵢ = [0.5, 0.5] # x₁ ≥ 0.5, x₂ ≥ 0.5
+
+# Pretty-print randomized problem data in a compact table.
+println("Randomized problem data:")
+data = [
+	"Q₁" => Q₁,
+	"c₁" => c₁,
+	"Q₂" => Q₂,
+	"c₂" => c₂,
+	"Q₃" => Q₃,
+	"c₃" => c₃,
+	"Aₑ" => Aₑ,
+	"bₑ" => bₑ,
+	"Aᵢ" => Aᵢ,
+	"bᵢ" => bᵢ,
+]
+name_width = maximum(length(name) for (name, _) in data)
+println("  ", rpad("Name", name_width), " | Value")
+println("  ", repeat("-", name_width), "-+-", repeat("-", 40))
+for (name, value) in data
+	rounded_value = round.(value; digits = n_digits)
+	value_str = sprint(io -> show(io, "text/plain", rounded_value))
+	value_lines = split(value_str, '\n'; keepempty = false)
+	first_line = isempty(value_lines) ? "" : value_lines[1]
+	println("  ", rpad(name, name_width), " | ", first_line)
+	for line in value_lines[2:end]
+		println("  ", repeat(" ", name_width), " | ", line)
+	end
+	println("  ", repeat("-", name_width), "-+-", repeat("-", 40))
+end
+
 
 J₁(x, θ) = 0.5x[1:n]'*Q₁*x[1:n] + c₁'*x[1:n]
 J₂(x, θ) = 0.5x[1:n]'*Q₂*x[1:n] + c₂'*x[1:n]
 J₃(x, θ) = 0.5x[1:n]'*Q₃*x[1:n] + c₃'*x[1:n]
-# g_eq(x, θ) = Aₑ*x[1:n] .- bₑ
-# g_ineq(x, θ) = Aᵢ*x[1:n] .- bᵢ
+g_eq(x, θ) = Aₑ*x[1:n] .- bₑ
+g_ineq(x, θ) = Aᵢ*x[1:n] .- bᵢ
 # g_eq(x, θ) = [x[1] + x[3] + x[4] - 1.0; x[1] + x[4] - 1.0]
-g_eq(x, θ) = A₃*x[1:n] .- b₃
-g_ineq(x, θ) = [x[1] - 0.5; x[2] - 0.5]
+# g_eq(x, θ) = A₃*x[1:n] .- b₃
+# g_ineq(x, θ) = [x[1] - 0.5; x[2] - 0.5]
 
 ################# NEW GOOP #########################
 @info "........................STARTING NEW GOOP........................"
 
 x = BlockArray(zeros(n), [n]) # single player
 parameters = BlockArray([0.0], [1])
-goop_preferences = [[J₂, J₃]] # single player
-is_prioritized_constraint = [[false, false]]
+goop_preferences = [[J₁, J₂, J₃]] # single player
+is_prioritized_constraint = [[false, false, false]]
 equality_constraints = [g_eq]
 inequality_constraints = [g_ineq] #[g_ineq] # nothing
 shared_equality_constraint = nothing
@@ -76,7 +110,7 @@ GOOP_trial1 = QuasiGOOP.ParametricGOOP(
 )
 
 GOOP_kkt_system = QuasiGOOP.generate_slacked_kkt_system(GOOP_trial1)
-status, z_sol_new_goop, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters = QuasiGOOP.solve(
+status_new_goop, z_sol_new_goop, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters = QuasiGOOP.solve(
 	QuasiGOOP.InteriorPoint(),
 	GOOP_kkt_system,
 	parameters;
@@ -87,7 +121,7 @@ status, z_sol_new_goop, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters = 
 	z₀ = nothing,
 	verbose = true,
 )
-@show status
+println("[New G] status = $(status_new_goop)")
 println("[New G] Primal solution: $(round.(z_sol_new_goop[1:n], digits = n_digits))")
 println("[New G] Dual solution ($(length(z_sol_new_goop) - n) variables): $(round.(z_sol_new_goop[Not(1:n)], digits = n_digits))")
 println("[New G] Objective: $(round(J₁(z_sol_new_goop[1:n], 0), digits = n_digits))")
@@ -112,7 +146,7 @@ symbolic_type = eltype(x)
 s = symbolic_type[]
 Σ = symbolic_type[]
 
-(; F, z) = construct_old_goop_kkt(goop_preferences[player][2:end], is_prioritized_constraint[player][2:end], player)
+(; F, z) = construct_kkt_old_goop(goop_preferences[player][2:end], is_prioritized_constraint[player][2:end], player)
 
 # Topmost level (final)
 λ = SymbolicTracingUtils.make_variables(
@@ -155,7 +189,7 @@ OG_kkt_system = QuasiGOOP.BuildGOOPKKTSystem(
 	inequality_constraint_dual_dims,
 )
 
-status, z_sol_old_goop, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters = QuasiGOOP.solve(
+status_old_goop, z_sol_old_goop, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters = QuasiGOOP.solve(
 	QuasiGOOP.InteriorPoint(),
 	OG_kkt_system,
 	parameters;
@@ -166,14 +200,69 @@ status, z_sol_old_goop, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters = 
 	z₀ = nothing,
 	verbose = true,
 )
-@show status
+println("[Old G] status = $(status_old_goop)")
 println("[Old G] Primal solution: $(round.(z_sol_old_goop[1:n], digits = n_digits))")
 println("[Old G] Dual solution ($(length(z_sol_old_goop) - n) variables): $(round.(z_sol_old_goop[Not(1:n)], digits = n_digits))")
 println("[Old G] Objective: $(round(J₁(z_sol_old_goop[1:n], 0), digits = n_digits))")
 println("[Old G] number of equations: $(OG_kkt_system.kkt_dimension)")
 
+################# OLDER GOOP via PATH #########################
+x = SymbolicTracingUtils.make_variables(backend, :x, n)
+θ = only(SymbolicTracingUtils.make_variables(backend, :θ, 1)) # this is relaxation here
+symbolic_type = eltype(x)
+
+(; F, G, z) = construct_kkt_older_goop(goop_preferences[player][2:end], is_prioritized_constraint[player][2:end], player)
+
+λ = SymbolicTracingUtils.make_variables(
+	backend,
+	Symbol("λ_$(player)_1"),
+	length(F),
+)
+γ = SymbolicTracingUtils.make_variables(
+	backend,
+	Symbol("γ_$(player)_1"),
+	length(G),
+)
+
+# Topmost level
+L = first(goop_preferences[player][1](z, θ)) - λ'*F - γ'*G
+∇L = Symbolics.gradient(L, z)
+F = Vector{symbolic_type}([∇L; F])
+z̲ = [
+	fill(-Inf, length(F))
+	fill(0, length(G))
+]
+z̅ = [
+	fill(Inf, length(F))
+	fill(Inf, length(G))
+]
+parameter_value = [1e-4]
+parametric_mcp = ParametricMCPs.ParametricMCP([F; G], [z; λ; γ], [θ], z̲, z̅; compute_sensitivities = false)
+z_sol_older_goop, status_older_goop, info = ParametricMCPs.solve(
+	parametric_mcp,
+	parameter_value;
+	initial_guess = zeros(length([z; λ; γ])),
+	verbose = false,
+	cumulative_iteration_limit = 100000,
+	proximal_perturbation = 1e-2,
+	# major_iteration_limit = 1000,
+	# minor_iteration_limit = 2000,
+	# nms_initial_reference_factor = 50,
+	use_basics = true,
+	use_start = true,
+)
+@show status_older_goop
+println("[Older G via PATH] status = $(status_older_goop)")
+println("[Older G via PATH] Primal solution: $(round.(z_sol_older_goop[1:n], digits = n_digits))")
+println("[Older G via PATH] Dual solution ($(length(z_sol_older_goop) - n) variables): $(round.(z_sol_older_goop[Not(1:n)], digits = n_digits))")
+println("[Older G via PATH] Objective: $(round(J₁(z_sol_older_goop[1:n], 0), digits = n_digits))")
+println("[Older G via PATH] number of equations: $(length(F))")
+println("[Older G via PATH] number of inequalities: $(length(G))")
+
+
+
 # Reprint new goop
-@show status
+println("[New G] status = $(status_new_goop)")
 println("[New G] Primal solution: $(round.(z_sol_new_goop[1:n], digits = n_digits))")
 println("[New G] Dual solution ($(length(z_sol_new_goop) - n) variables): $(round.(z_sol_new_goop[Not(1:n)], digits = n_digits))")
 println("[New G] Objective: $(round(J₁(z_sol_new_goop[1:n], 0), digits = n_digits))")
@@ -187,4 +276,3 @@ primal_diff = primal_new .- primal_old
 println("Objective difference (new - old): $(round.(objective_diff, digits = n_digits))")
 println("Primal solution difference (new - old): $(round.(primal_diff, digits = n_digits))")
 println("Maximum absolute primal difference: $(round(maximum(abs.(primal_diff)), digits = n_digits))")
-

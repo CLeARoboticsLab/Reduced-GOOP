@@ -8,6 +8,7 @@ using SymbolicTracingUtils
 using BlockArrays: BlockArrays, BlockArray, Block, blocks, blocksizes, blockedrange
 using NonlinearSolve
 using InvertedIndices: Not
+using Random
 
 # include("Intersection.jl")
 include("goop_comparison_QP.jl")

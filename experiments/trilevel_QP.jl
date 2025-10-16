@@ -25,16 +25,17 @@ c₃ = -[0.5, -0.5, 1.0, 0.0]
 A₃ = [1 0 1 1; 1 0 0 1] # A₃x = b₃
 b₃ = [1.0, 1.0]
 
-player = 1
-Q₁ = I(n)
-c₁ = [1.0, 1.0, 1.0, 1.0]
-Q₂ = I(n) # [0 0 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 1]
-c₂ = [1.0, 1.0, 1.0, 1.0]
-Q₃ = I(n) # [1 0 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 0]
-c₃ = [1.0, 1.0, 1.0, 1.0]
-A₃ = [1 0 1 0; 1 1 0 1] # A₃x = b₃
-b₃ = [1.0, 1.0]
+Random.seed!(17) 
+#16 (both version in new goop same sol)
+#17 (modified new goop gives wrong)
+#18,19,20 (old goop wrong)
+Q₁ = rand_psd(n, 1); c₁ = rand(n); 
+Q₂ = rand_psd(n, 1); c₂ = rand(n);
+Q₃ = rand_psd(n, 1); c₃ = rand(n);
+Aₑ = rand(m, n); bₑ = rand(m);
+Aᵢ = [1 0 0 0; 0 1 0 0]; bᵢ = [0.5, 0.5] # x₁ ≥ 0.5, x₂ ≥ 0.5
 f(x, θ) = 0.5x[1:n]'*Q₁*x[1:n] + c₁'*x[1:n]
+
 
 ##### NEW VERSION ######
 player = 1
@@ -66,7 +67,8 @@ dummy_parameters = [0.0]
 J₁(x, θ) = 0.5x[1:n]'*Q₁*x[1:n] + c₁'*x[1:n]
 J₂(x, θ) = 0.5x[1:n]'*Q₂*x[1:n] + c₂'*x[1:n]
 J₃(x, θ) = 0.5x[1:n]'*Q₃*x[1:n] + c₃'*x[1:n]
-g_eq(x, θ) = A₃*x[1:n] .- b₃
+# g_eq(x, θ) = A₃*x[1:n] .- b₃
+g_eq(x, θ) = Aₑ*x[1:n] .- bₑ
 g_ineq(x, θ) = [x[1] - 0.5; x[2] - 0.5]
 
 x = BlockArray(zeros(n), [n]) # single player
@@ -134,8 +136,6 @@ sol = NonlinearSolve.solve(prob)
 println("Duals from nonlinear solve: $(sol.u)")
 @show sol.u .- z_sol_new_goop[Not(1:n)]
 @show norm(sol.u .- z_sol_new_goop[Not(1:n)], Inf)
-
-Main.@infiltrate
 
 
 
@@ -305,4 +305,3 @@ z_sol_old_goop, status, info = ParametricMCPs.solve(
 println("v2 Primal solution: $(z_sol_old_goop[1:n])")
 println("v2 Variables: $(z_sol_old_goop)")
 println("v2 Objective: $(f(z_sol_old_goop[1:n], 0))")
-Main.@infiltrate
