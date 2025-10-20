@@ -33,19 +33,25 @@ Q₂ = [0 0 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 1]
 c₂ = [1.0, 1.0, 1.0, 1.0]
 Q₃ = [1 0 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 0]
 c₃ = [1.0, 1.0, 1.0, 1.0]
-A₃ = [1 0 1 0; 1 1 0 1] # A₃x = b₃
-b₃ = [1.0, 1.0]
+Aₑ = [1 0 1 0; 1 1 0 1] # A₃x = b₃
+bₑ = [1.0, 1.0]
 
 # Randomize Q, A and b (Q_i has to be positive semi-definite)
-Random.seed!(17) 
+Random.seed!(34) # 17
+#10 (problem is infeasble or unbounded)
 #16 (both version in new goop same sol)
 #17 (modified new goop gives wrong)
 #18,19,20 (old goop wrong)
-Q₁ = rand_psd(n, 1); c₁ = rand(n); 
-Q₂ = rand_psd(n, 1); c₂ = rand(n);
-Q₃ = rand_psd(n, 1); c₃ = rand(n);
-Aₑ = rand(m, n); bₑ = rand(m);
-Aᵢ = [1 0 0 0; 0 1 0 0]; bᵢ = [0.5, 0.5] # x₁ ≥ 0.5, x₂ ≥ 0.5
+Q₁ = rand_psd(n, 1);
+c₁ = rand(n);
+Q₂ = rand_psd(n, 1);
+c₂ = rand(n);
+Q₃ = rand_psd(n, 1);
+c₃ = rand(n);
+Aₑ = rand(m, n);
+bₑ = rand(m);
+Aᵢ = [1 0 0 0; 0 1 0 0];
+bᵢ = [0.5, 0.5] # x₁ ≥ 0.5, x₂ ≥ 0.5
 
 # Pretty-print randomized problem data in a compact table.
 println("Randomized problem data:")
@@ -91,8 +97,8 @@ g_ineq(x, θ) = Aᵢ*x[1:n] .- bᵢ
 
 x = BlockArray(zeros(n), [n]) # single player
 parameters = BlockArray([0.0], [1])
-goop_preferences = [[J₁, J₂, J₃]] # single player
-is_prioritized_constraint = [[false, false, false]]
+goop_preferences = [[J₂, J₃]] # single player
+is_prioritized_constraint = [[false, false]]
 equality_constraints = [g_eq]
 inequality_constraints = [g_ineq] #[g_ineq] # nothing
 shared_equality_constraint = nothing
@@ -109,10 +115,10 @@ GOOP_trial1 = QuasiGOOP.ParametricGOOP(
 	shared_inequality_constraint,
 )
 
-GOOP_kkt_system = QuasiGOOP.generate_slacked_kkt_system(GOOP_trial1)
+NG_kkt_system = QuasiGOOP.generate_slacked_kkt_system(GOOP_trial1)
 status_new_goop, z_sol_new_goop, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters = QuasiGOOP.solve(
 	QuasiGOOP.InteriorPoint(),
-	GOOP_kkt_system,
+	NG_kkt_system,
 	parameters;
 	tol = 1e-5,
 	η₀ = 0.0, # no regularization
@@ -121,11 +127,12 @@ status_new_goop, z_sol_new_goop, x, s, σ, γ, kkt_error, ϵ, outer_iters, total
 	z₀ = nothing,
 	verbose = true,
 )
+
 println("[New G] status = $(status_new_goop)")
 println("[New G] Primal solution: $(round.(z_sol_new_goop[1:n], digits = n_digits))")
 println("[New G] Dual solution ($(length(z_sol_new_goop) - n) variables): $(round.(z_sol_new_goop[Not(1:n)], digits = n_digits))")
 println("[New G] Objective: $(round(J₁(z_sol_new_goop[1:n], 0), digits = n_digits))")
-println("[New G] number of equations: $(GOOP_kkt_system.kkt_dimension)")
+println("[New G] number of equations: $(NG_kkt_system.kkt_dimension)")
 
 ################# OLD GOOP #########################
 @info "........................STARTING OLD GOOP........................"
@@ -259,20 +266,48 @@ println("[Older G via PATH] Objective: $(round(J₁(z_sol_older_goop[1:n], 0), d
 println("[Older G via PATH] number of equations: $(length(F))")
 println("[Older G via PATH] number of inequalities: $(length(G))")
 
+# Check if the status is :solved
+if "$(status_older_goop)" != "MCP_Solved"
+	error("Older GOOP via PATH did not solve successfully. Status: $status_older_goop")
+end
 
-
+##################### SUMMARY ########################
 # Reprint new goop
 println("[New G] status = $(status_new_goop)")
 println("[New G] Primal solution: $(round.(z_sol_new_goop[1:n], digits = n_digits))")
 println("[New G] Dual solution ($(length(z_sol_new_goop) - n) variables): $(round.(z_sol_new_goop[Not(1:n)], digits = n_digits))")
 println("[New G] Objective: $(round(J₁(z_sol_new_goop[1:n], 0), digits = n_digits))")
-println("[New G] number of equations: $(GOOP_kkt_system.kkt_dimension)")
+println("[New G] number of equations: $(NG_kkt_system.kkt_dimension)")
 
-# Final output
+# Compare new goop and older goop
 primal_new = z_sol_new_goop[1:n]
-primal_old = z_sol_old_goop[1:n]
-objective_diff = J₁(primal_new, 0) - J₁(primal_old, 0)
-primal_diff = primal_new .- primal_old
-println("Objective difference (new - old): $(round.(objective_diff, digits = n_digits))")
-println("Primal solution difference (new - old): $(round.(primal_diff, digits = n_digits))")
-println("Maximum absolute primal difference: $(round(maximum(abs.(primal_diff)), digits = n_digits))")
+primal_older = z_sol_older_goop[1:n]
+objective_new = J₁(primal_new, 0)
+objective_older = J₁(primal_older, 0)
+objective_diff = objective_new - objective_older
+primal_diff = primal_new .- primal_older
+println("Objective difference (new - older): $(round.(objective_diff, digits = n_digits))")
+println("Primal solution difference (new - older): $(round.(primal_diff, digits = n_digits))")
+max_primal_diff = maximum(abs, primal_diff)
+println("Maximum absolute primal difference: $(round(max_primal_diff, digits = n_digits))")
+abs_objective_diff = abs(objective_diff)
+primal_tol = 1e-3
+objective_tol = 1e-3
+if max_primal_diff > primal_tol || abs_objective_diff > objective_tol
+	error(
+		"New G and Older G solutions diverge: max Δx = $(max_primal_diff), ΔJ = $(abs_objective_diff); tolerances are $(primal_tol) for primal and $(objective_tol) for objective.",
+	)
+else
+	println(
+		"New G and Older G solutions match within tolerances (max Δx = $(round(max_primal_diff, digits = n_digits)), ΔJ = $(round(abs_objective_diff, digits = n_digits))).",
+	)
+end
+
+# Main.@infiltrate
+
+# for (i, expr) in enumerate(NG_kkt_system.F_symbolic)
+#            print("F[$i] =")
+#            display(expr)
+# 		   println("")
+# end
+

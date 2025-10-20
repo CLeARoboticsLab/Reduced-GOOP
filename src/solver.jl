@@ -115,9 +115,9 @@ function solve(
 			mcp.∇F_z!(∇F, z; θ, ϵ, η)
 			# @assert all(.!isnan.(F)) "Found NaN in F - aborting!"
 			# @assert all(.!isnan.(∇F)) "Found NaN in ∇F - aborting!"
-			println("condition number of ∇F = $(cond(collect(∇F),2))")
-			# Check the primals 
-			println("current primal x: ", round.(z[mcp.primal_dims]; digits = 4))
+			verbose && println("condition number of ∇F = $(cond(collect(∇F),2))")
+			# Check the primals
+			verbose && println("current primal x: ", round.(z[mcp.primal_dims]; digits = 4))
 
 			linsolve.A = ∇F
 			linsolve.b = -F
@@ -133,14 +133,14 @@ function solve(
 
 			δz .= solution.u
 
-			println("current δx: ", round.(δz[mcp.primal_dims]; digits = 4))
+			verbose && println("current δx: ", round.(δz[mcp.primal_dims]; digits = 4))
 
 
 			# Fraction to the boundary linesearch.
 			α_σ = fraction_to_the_boundary_linesearch(σ, δσ; tol = min_stepsize)
 			α_γ = fraction_to_the_boundary_linesearch(γ, δγ; tol = min_stepsize)
 
-			println("α_σ = $α_σ, α_γ = $α_γ")
+			verbose && println("α_σ = $α_σ, α_γ = $α_γ")
 
 			if isnan(α_γ) || isnan(α_σ)
 				verbose && @warn "Linesearch failed. Exiting prematurely."
@@ -165,7 +165,7 @@ function solve(
 
 			kkt_error = norm(F, Inf)
 
-			println("KKT error = $kkt_error")
+			verbose && println("KKT error = $kkt_error")
 
 			inner_iters += 1
 		end

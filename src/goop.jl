@@ -235,7 +235,7 @@ function generate_slacked_kkt_system(
 						],
 					),
 				)
-				
+
 				return (; F, π = ∇L)
 			end
 		end
@@ -319,7 +319,7 @@ function generate_slacked_kkt_system(
 				σₚ .* γₚ .- ϵ
 				preference_slack .- σₚₛ
 				σₚₛ .* μₛ .- ϵ
-				(isnothing(g) ? nothing : σ .* γ .- ϵ) 
+				(isnothing(g) ? nothing : σ .* γ .- ϵ)
 				(isnothing(gₛ) ? nothing : σₛ .* γ̃ₛ .- ϵ) # Note: same slacks (not duals) for all levels
 				F
 			]
@@ -336,7 +336,8 @@ function generate_slacked_kkt_system(
 					!isnothing,
 					[
 						∇L .+ η * x[Block(player)]
-						(isnothing(g) ? nothing : σ .* γ .- ϵ) 
+						# (isnothing(g) ? nothing : g .- σ) # 10/20: Added? -> performs badly
+						(isnothing(g) ? nothing : σ .* γ .- ϵ)
 						(isnothing(gₛ) ? nothing : σₛ .* γ̃ₛ .- ϵ)
 						F
 					],
