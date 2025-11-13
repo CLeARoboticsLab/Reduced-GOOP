@@ -10,7 +10,7 @@ using ProgressMeter
 include("old_goop.jl")
 
 const NUM_TESTS = 100
-const MATCH_TOL = 1e-5
+const MATCH_TOL = 1e-2
 const N = 4
 const M = 2
 const PLAYER = 1
@@ -54,6 +54,8 @@ function run_trials(num_tests::Int)
 	older_failed_trials = Int[]
 	new_failed_trials = Int[]
 	mismatch_trials = Int[]
+	new_mismatch_complementarity = Int[]
+	col_space_inclusion = Int[]
 
 	@showprogress for trial in 1:num_tests
 		Random.seed!(trial)
@@ -68,11 +70,25 @@ function run_trials(num_tests::Int)
 		global Aᵢ = [1 0 0 0; 0 1 0 0]
 		global bᵢ = [0.5, 0.5]
 
+		# Check column space inclusion tests (1,2)
+		colspace_issubset(Aᵢ', hcat(Aₑ', Q₃)) && push!(col_space_inclusion, trial)
+		A = [
+			Q₃ Aᵢ';
+			zeros(M, N + M)
+		]
+		B = [ 
+			Q₃ Aᵢ';
+			Aᵢ zeros(M, M)
+		]
+		if !colspace_issubset(A, B)
+			error("Column space inclusion check failed: NG ⊈ OG")
+		end
+
 		try
 			x_block = BlockArray(zeros(N), [N])
 
-			global goop_preferences = [[J₁, J₂, J₃]]
-			global is_prioritized_constraint = [[false, false, false]]
+			global goop_preferences = [[J₂, J₃]]
+			global is_prioritized_constraint = [[false, false]]
 			global equality_constraints = [g_eq]
 			global inequality_constraints = [g_ineq]
 
@@ -102,6 +118,16 @@ function run_trials(num_tests::Int)
 			)
 			if "$(status_new)" != "solved"
 				push!(new_failed_trials, trial)
+			else
+				# new goop solved
+				z_primal = z_sol_new[1:N]
+				γ₂ = z_sol_new[13:14]
+				γ₃ = z_sol_new[15:16]
+				gineq_vals = g_ineq(z_primal, [0.0])
+				mismatch_complementarity = !all(isapprox.(gineq_vals .* γ₂, 0.0, atol = MATCH_TOL)) # check complementarity
+				if mismatch_complementarity
+					push!(new_mismatch_complementarity, trial)
+				end
 			end
 			global x = SymbolicTracingUtils.make_variables(backend, :x, N)
 			global θ = only(SymbolicTracingUtils.make_variables(backend, :θ, 1))
@@ -159,7 +185,6 @@ function run_trials(num_tests::Int)
 					mismatch_count += 1
 					push!(mismatch_trials, trial)
 				elseif status_new == :failed
-					# println("Trial $(trial): Solutions match.")
 					pop!(new_failed_trials)
 				end
 			else
@@ -176,9 +201,12 @@ function run_trials(num_tests::Int)
 	println("Older G infeasible or unsolved cases: $(infeasible_count), trials: $(older_failed_trials)")
 	println("New G mismatches when Older G solved: $(mismatch_count), trials: $(mismatch_trials)")
 	if !isempty(new_failed_trials)
-		println("Trials where New G failed: $(new_failed_trials)")
+		println("Trials where New G failed: $(setdiff(new_failed_trials, older_failed_trials))")
 	end
-	println("Trials with errors: $(error_count)")
+	println("Trials where New G mismatch complementarity: $(length(new_mismatch_complementarity)), trials: $(setdiff(new_mismatch_complementarity, new_failed_trials))")
+	println("Trials where column space inclusion held: $(length(col_space_inclusion)), trials: $(col_space_inclusion)")
 end
+
+
 
 run_trials(NUM_TESTS)

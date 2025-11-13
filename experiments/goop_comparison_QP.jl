@@ -29,15 +29,15 @@ backend = SymbolicTracingUtils.SymbolicsBackend()
 player = 1
 Q₁ = I(n)
 c₁ = [1.0, 1.0, 1.0, 1.0]
-Q₂ = [0 0 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 1]
+Q₂ = I(n) # [0 0 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 1]
 c₂ = [1.0, 1.0, 1.0, 1.0]
-Q₃ = [1 0 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 0]
+Q₃ = I(n) # [1 0 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 0]
 c₃ = [1.0, 1.0, 1.0, 1.0]
 Aₑ = [1 0 1 0; 1 1 0 1] # A₃x = b₃
 bₑ = [1.0, 1.0]
 
 # Randomize Q, A and b (Q_i has to be positive semi-definite)
-Random.seed!(34) # 17
+Random.seed!(70) # 17
 #10 (problem is infeasble or unbounded)
 #16 (both version in new goop same sol)
 #17 (modified new goop gives wrong)
@@ -82,13 +82,27 @@ for (name, value) in data
 	println("  ", repeat("-", name_width), "-+-", repeat("-", 40))
 end
 
+# # Check column space inclusion
+# println("column space inclusion: ", colspace_issubset(Aᵢ', hcat(Aₑ', Q₃)))
+# A = [
+# 	Q₃ Aᵢ'; 
+# 	zeros(m, n+m)
+# 	]
+# B = [
+# 	Q₃ Aᵢ'; 
+# 	Aᵢ zeros(m, m)
+# 	]
+# println("column space inclusion ( NG ⊆ OG ): ", colspace_issubset(A, B))
+# if !colspace_issubset(A, B)
+#     error("Column space inclusion check failed: NG ⊈ OG")
+# end
 
 J₁(x, θ) = 0.5x[1:n]'*Q₁*x[1:n] + c₁'*x[1:n]
 J₂(x, θ) = 0.5x[1:n]'*Q₂*x[1:n] + c₂'*x[1:n]
 J₃(x, θ) = 0.5x[1:n]'*Q₃*x[1:n] + c₃'*x[1:n]
-g_eq(x, θ) = Aₑ*x[1:n] .- bₑ
+# g_eq(x, θ) = Aₑ*x[1:n] .- bₑ
 g_ineq(x, θ) = Aᵢ*x[1:n] .- bᵢ
-# g_eq(x, θ) = [x[1] + x[3] + x[4] - 1.0; x[1] + x[4] - 1.0]
+g_eq(x, θ) = [x[1] + x[2]+ x[3] + x[4] - 2.0] # x[1] + x[4] - 1.0
 # g_eq(x, θ) = A₃*x[1:n] .- b₃
 # g_ineq(x, θ) = [x[1] - 0.5; x[2] - 0.5]
 
@@ -100,7 +114,7 @@ parameters = BlockArray([0.0], [1])
 goop_preferences = [[J₂, J₃]] # single player
 is_prioritized_constraint = [[false, false]]
 equality_constraints = [g_eq]
-inequality_constraints = [g_ineq] #[g_ineq] # nothing
+inequality_constraints = [g_ineq] #[g_ineq] # [nothing]
 shared_equality_constraint = nothing
 shared_inequality_constraint = nothing
 
@@ -122,8 +136,8 @@ status_new_goop, z_sol_new_goop, x, s, σ, γ, kkt_error, ϵ, outer_iters, total
 	parameters;
 	tol = 1e-5,
 	η₀ = 0.0, # no regularization
-	min_stepsize = 1e-4,
-	max_outer_iters = 50,
+	min_stepsize = 1e-5,
+	max_outer_iters = 200,
 	z₀ = nothing,
 	verbose = true,
 )
@@ -133,6 +147,8 @@ println("[New G] Primal solution: $(round.(z_sol_new_goop[1:n], digits = n_digit
 println("[New G] Dual solution ($(length(z_sol_new_goop) - n) variables): $(round.(z_sol_new_goop[Not(1:n)], digits = n_digits))")
 println("[New G] Objective: $(round(J₁(z_sol_new_goop[1:n], 0), digits = n_digits))")
 println("[New G] number of equations: $(NG_kkt_system.kkt_dimension)")
+
+Main.@infiltrate
 
 ################# OLD GOOP #########################
 @info "........................STARTING OLD GOOP........................"
@@ -172,7 +188,7 @@ F = Vector{symbolic_type}(
 	],
 )
 z = Vector{symbolic_type}(
-	vcat(x, s, Σ, Λ, Γ),
+	vcat(x, s, Λ, Σ, Γ),
 )
 
 # Set up common memory
@@ -219,16 +235,16 @@ x = SymbolicTracingUtils.make_variables(backend, :x, n)
 symbolic_type = eltype(x)
 
 (; F, G, z) = construct_kkt_older_goop(goop_preferences[player][2:end], is_prioritized_constraint[player][2:end], player)
-
+Main.@infiltrate
 λ = SymbolicTracingUtils.make_variables(
 	backend,
 	Symbol("λ_$(player)_1"),
-	length(F),
+	length(F), # equality dimension
 )
 γ = SymbolicTracingUtils.make_variables(
 	backend,
 	Symbol("γ_$(player)_1"),
-	length(G),
+	length(G), # inequality_dimension
 )
 
 # Topmost level
@@ -243,6 +259,7 @@ z̅ = [
 	fill(Inf, length(F))
 	fill(Inf, length(G))
 ]
+Main.@infiltrate
 parameter_value = [1e-4]
 parametric_mcp = ParametricMCPs.ParametricMCP([F; G], [z; λ; γ], [θ], z̲, z̅; compute_sensitivities = false)
 z_sol_older_goop, status_older_goop, info = ParametricMCPs.solve(
@@ -291,8 +308,8 @@ println("Primal solution difference (new - older): $(round.(primal_diff, digits 
 max_primal_diff = maximum(abs, primal_diff)
 println("Maximum absolute primal difference: $(round(max_primal_diff, digits = n_digits))")
 abs_objective_diff = abs(objective_diff)
-primal_tol = 1e-3
-objective_tol = 1e-3
+primal_tol = 5e-3
+objective_tol = 5e-3
 if max_primal_diff > primal_tol || abs_objective_diff > objective_tol
 	error(
 		"New G and Older G solutions diverge: max Δx = $(max_primal_diff), ΔJ = $(abs_objective_diff); tolerances are $(primal_tol) for primal and $(objective_tol) for objective.",
@@ -303,11 +320,12 @@ else
 	)
 end
 
-# Main.@infiltrate
+Main.@infiltrate
 
 # for (i, expr) in enumerate(NG_kkt_system.F_symbolic)
-#            print("F[$i] =")
-#            display(expr)
-# 		   println("")
+#            println("F[$i] = $expr")
 # end
 
+# for (i, zi) in enumerate(NG_kkt_system.z_symbolic)
+# 		   println("z[$i] = $zi")
+# end

@@ -181,16 +181,26 @@ function construct_kkt_older_goop(preferences, is_prioritized_constraint, player
 			J = only(preferences)(x, θ)
 			L = J - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g)
 			∇L = Symbolics.gradient(L, x)
-			F = Vector{symbolic_type}([∇L; f])
+			F = Vector{symbolic_type}(
+				filter!(
+					!isnothing,
+					[
+						∇L; 
+						f; 
+						isnothing(g) ? nothing : θ .- γ .* g;
+					],
+				),
+			)
 			G = Vector{symbolic_type}(
 				filter!(
-					!isnothing, 
+					!isnothing,
 					[
 						isnothing(g) ? nothing : g;
 						isnothing(g) ? nothing : γ;
-						isnothing(g) ? nothing : θ - γ'*g;
+						# isnothing(g) ? nothing : θ - γ'*g;
+
 					],
-				),	
+				),
 			) #ϵ - γ'*g
 			z = Vector{symbolic_type}(
 				vcat(x, (isnothing(f) ? [] : λ), (isnothing(g) ? [] : γ)),
@@ -216,8 +226,48 @@ function construct_kkt_older_goop(preferences, is_prioritized_constraint, player
 	)
 	L = J - λ'*F - γ'*G
 	∇L = Symbolics.gradient(L, z)
-	F̃ = Vector{symbolic_type}([∇L; F])
-	G̃ = Vector{symbolic_type}([G; γ; θ - γ'*G])
+	F̃ = Vector{symbolic_type}([∇L; F; θ .- γ .* G])
+	G̃ = Vector{symbolic_type}([G; γ])
 	# return level == 1 ? (; F = F̃, G = G̃, z = z) : (; F = F̃, G = G̃, z = [z; λ; γ])
+	Main.@infiltrate
 	return (; F = F̃, G = G̃, z = [z; λ; γ])
+end
+
+
+using LinearAlgebra
+
+"""
+	colspace_issubset(A, B; atol=1e-10, rtol=1e-8, pivot=true) -> Bool
+
+Return `true` iff col(A) ⊆ col(B) numerically.
+
+Implementation: for each column (or all at once), solve the least-squares
+problem B*X ≈ A and check that the residuals ‖A - B*X‖ are small.
+This uses `\` (QR or pivoted-QR under the hood).
+"""
+function colspace_issubset(A::AbstractMatrix, B::AbstractMatrix;
+	atol::Real = 1e-10, rtol::Real = 1e-8, pivot::Bool = true)
+	size(A, 1) == size(B, 1) || throw(ArgumentError("A and B must have the same number of rows"))
+
+	# Empty span(B): only true if A is (numerically) zero
+	if size(B, 2) == 0
+		return isapprox(A, zero(A); atol = atol, rtol = 0.0)
+	end
+
+	# Solve B * X ≈ A in least squares sense.
+	# With pivoting for rank-deficient/ill-conditioned B if `pivot=true`.
+	X = pivot ? (qr(B, ColumnNorm()) \ A) : (B \ A)
+
+	R = A - B*X                    # residuals in orthogonal complement of span(B)
+	# Columnwise mixed tolerance
+	# tiny = eps(real(eltype(A)))
+	tiny = eps(Float64)
+	for j in axes(A, 2)
+		aj = view(A, :, j)
+		rj = view(R, :, j)
+		if norm(rj) > atol + rtol*max(norm(aj), tiny)
+			return false
+		end
+	end
+	return true
 end

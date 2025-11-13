@@ -101,9 +101,11 @@ function generate_slacked_kkt_system(
 
 	# Keep track of all equality constraint duals (λ) that we create.
 	Λ = symbolic_type[]
+	Φ = symbolic_type[] # 10/25: store duals for complementarity slackness 
 
 	# Keep track of all inequality constraint duals (γ) that we create.
 	Γ = symbolic_type[]
+	Γ_cs = symbolic_type[] # 10/25: store duals for complementarity slackness
 
 	# Keep track of all lower level policy constraint duals (ψ) that we create.
 	Ψ = symbolic_type[]
@@ -135,6 +137,7 @@ function generate_slacked_kkt_system(
 			goop.inequality_dims[player],
 		)
 		push!(Γ, γ...)
+		push!(Γ_cs, γ...) # 10/25
 
 		# # Shared constraints exist at every level. https://github.com/CLeARoboticsLab/Quasi-GOOP/issues/6
 		# Option (1): Share the multipliers only at all players' innermost levels, but let successive outer levels have their own separate multipliers for all players.
@@ -235,7 +238,6 @@ function generate_slacked_kkt_system(
 						],
 					),
 				)
-
 				return (; F, π = ∇L)
 			end
 		end
@@ -254,6 +256,14 @@ function generate_slacked_kkt_system(
 			length(π),
 		)
 		push!(Ψ, ψ...)
+
+		# 10/25: added duals for complementarity slackness for lower levels
+		ϕ = SymbolicTracingUtils.make_variables(
+			backend,
+			Symbol("ϕ_$(player)_$(level)"),
+			goop.inequality_dims[player],
+		)
+		push!(Φ, ϕ...)
 
 		λ̃ₛ = SymbolicTracingUtils.make_variables(
 			backend,
@@ -328,22 +338,22 @@ function generate_slacked_kkt_system(
 		else
 			@assert length(h) == 1 "Expected a single preference function at the level $(level), but got $(length(h))"
 			# Current priority is a cost.
+			# 10/25: added last term for lower-level complementarity slackness
 			L = h - ψ' * π - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
-				(isnothing(fₛ) ? 0 : λ̃ₛ' * fₛ) - (isnothing(gₛ) ? 0 : γ̃ₛ' * gₛ)
+				(isnothing(fₛ) ? 0 : λ̃ₛ' * fₛ) - (isnothing(gₛ) ? 0 : γ̃ₛ' * gₛ) + (isnothing(g) ? 0 : ϕ' * (g .* Γ[3:4])) #TODO: Note dim of Γ_cs will change for higher levels
 			∇L = Symbolics.gradient(L, x[Block(player)])
 			F̃ = Vector{symbolic_type}(
 				filter!(
 					!isnothing,
 					[
 						∇L .+ η * x[Block(player)]
-						# (isnothing(g) ? nothing : g .- σ) # 10/20: Added? -> performs badly
+						(isnothing(g) ? nothing : g .- σ)
 						(isnothing(g) ? nothing : σ .* γ .- ϵ)
 						(isnothing(gₛ) ? nothing : σₛ .* γ̃ₛ .- ϵ)
 						F
 					],
 				),
 			)
-
 			return (; F = F̃, π = vcat(∇L, π))
 		end
 	end
@@ -384,15 +394,19 @@ function generate_slacked_kkt_system(
 
 	# Pack all variables together.
 	z = Vector{symbolic_type}(
-		vcat(x, s, Σ, Λ, Γ, Ψ, λₛ, γₛ, σₛ),
+		vcat(x, s, Σ, Λ, Γ, Ψ, λₛ, γₛ, σₛ, Φ), # 10/25: added ϕ
+		# vcat(x, s, Σ, Λ, Γ, Ψ, λₛ, γₛ, σₛ),
 	)
 	θ = Vector{symbolic_type}(θ)
 
-	idx = blockedrange(length.([x, s, Σ, Λ, Γ, Ψ, λₛ, γₛ, σₛ]))
+	idx = blockedrange(length.([x, s, Σ, Λ, Γ, Ψ, λₛ, γₛ, σₛ, Φ])) # 10/25: added ϕ
+	# idx = blockedrange(length.([x, s, Σ, Λ, Γ, Ψ, λₛ, γₛ, σₛ]))
 	primal_dims = idx[Block(1)] # x
 	preference_slack_dims = idx[Block(2)] # s
 	interior_point_slack_dims = vcat(idx[Block(3)], idx[Block(9)]) # Σ, σₛ
 	inequality_constraint_dual_dims = vcat(idx[Block(5)], idx[Block(8)]) # Γ, γₛ
+
+	# Main.@infiltrate
 
 	BuildGOOPKKTSystem(
 		F,
