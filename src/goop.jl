@@ -116,8 +116,9 @@ function generate_slacked_kkt_system(
 		is_prioritized_constraint;
 		player,
 	)
+		num_levels = length(goop.preferences[player]) # Kⁱ
 		@assert length(preferences) == length(is_prioritized_constraint)
-		level = 1 + length(goop.preferences[player]) - length(preferences)
+		level = 1 + num_levels - length(preferences)
 
 		f = isnothing(goop.equality_constraints[player]) ? nothing :
 			goop.equality_constraints[player](x, θ)
@@ -149,12 +150,6 @@ function generate_slacked_kkt_system(
 			goop.inequality_dims[player],
 		)
 		push!(Σ, σ...)
-		# σ = SymbolicTracingUtils.make_variables(
-		# 	backend,
-		# 	Symbol("σ_$(player)_$(length(goop.preferences[player]))"),
-		# 	goop.inequality_dims[player],
-		# )
-		# (level == length(goop.preferences[player])) && push!(Σ, σ...)
 
 		# Base case is the inner-most layer.
 		if length(preferences) == 1
@@ -235,6 +230,7 @@ function generate_slacked_kkt_system(
 							f
 							(isnothing(g) ? nothing : g .- σ)
 							(isnothing(g) ? nothing : σ .* γ .- ϵ)
+							# Missing terms for shared constraints?
 						],
 					),
 				)
@@ -261,7 +257,7 @@ function generate_slacked_kkt_system(
 		ϕ = SymbolicTracingUtils.make_variables(
 			backend,
 			Symbol("ϕ_$(player)_$(level)"),
-			goop.inequality_dims[player],
+			goop.inequality_dims[player] * (num_levels - level), # ℓ = 1 to Kⁱ - k
 		)
 		push!(Φ, ϕ...)
 
@@ -338,16 +334,19 @@ function generate_slacked_kkt_system(
 		else
 			@assert length(h) == 1 "Expected a single preference function at the level $(level), but got $(length(h))"
 			# Current priority is a cost.
-			# 10/25: added last term for lower-level complementarity slackness
+			# 10/25: added last term for lower-level complementarity slackness.
+		    # TODO: do the same for preference constraints and shared inequality constraints.
+			# TODO: Keep Γ_cs separate from Γ to avoid confusion and similarly for preference and shared constraints.
+			blocked_Γ_cs = BlockArray(Γ_cs, fill(goop.inequality_dims[player], length(Γ_cs) ÷ goop.inequality_dims[player]))
+			@assert length(ϕ) == length(blocked_Γ_cs[Block(level+1):Block(num_levels)]) 
 			L = h - ψ' * π - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
-				(isnothing(fₛ) ? 0 : λ̃ₛ' * fₛ) - (isnothing(gₛ) ? 0 : γ̃ₛ' * gₛ) + (isnothing(g) ? 0 : ϕ' * (g .* Γ[3:4])) #TODO: Note dim of Γ_cs will change for higher levels
+				(isnothing(fₛ) ? 0 : λ̃ₛ' * fₛ) - (isnothing(gₛ) ? 0 : γ̃ₛ' * gₛ) - (isnothing(g) ? 0 : ϕ' * (repeat(g, num_levels - level) .* blocked_Γ_cs[Block(level+1):Block(num_levels)])) 
 			∇L = Symbolics.gradient(L, x[Block(player)])
 			F̃ = Vector{symbolic_type}(
 				filter!(
 					!isnothing,
 					[
 						∇L .+ η * x[Block(player)]
-						(isnothing(g) ? nothing : g .- σ)
 						(isnothing(g) ? nothing : σ .* γ .- ϵ)
 						(isnothing(gₛ) ? nothing : σₛ .* γ̃ₛ .- ϵ)
 						F

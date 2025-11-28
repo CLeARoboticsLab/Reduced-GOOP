@@ -90,7 +90,7 @@ function construct_kkt_old_goop(preferences, is_prioritized_constraint, player)
 			z = Vector{symbolic_type}(
 				vcat(x, (isnothing(f) ? [] : λ), (isnothing(g) ? [] : γ)),
 				# vcat(x, (isnothing(f) ? [] : λ), (isnothing(g) ? [] : γ), (isnothing(g) ? [] : σ)),
-				)
+			)
 
 			return (; F, z)
 		end
@@ -185,9 +185,9 @@ function construct_kkt_older_goop(preferences, is_prioritized_constraint, player
 				filter!(
 					!isnothing,
 					[
-						∇L; 
-						f; 
-						isnothing(g) ? nothing : θ .- γ .* g;
+						∇L;
+						f;
+						# isnothing(g) ? nothing : γ .* g .- θ;
 					],
 				),
 			)
@@ -197,9 +197,7 @@ function construct_kkt_older_goop(preferences, is_prioritized_constraint, player
 					[
 						isnothing(g) ? nothing : g;
 						isnothing(g) ? nothing : γ;
-						# isnothing(g) ? nothing : θ - γ'*g;
-
-					],
+						isnothing(g) ? nothing : θ - γ'*g;],
 				),
 			) #ϵ - γ'*g
 			z = Vector{symbolic_type}(
@@ -226,10 +224,11 @@ function construct_kkt_older_goop(preferences, is_prioritized_constraint, player
 	)
 	L = J - λ'*F - γ'*G
 	∇L = Symbolics.gradient(L, z)
-	F̃ = Vector{symbolic_type}([∇L; F; θ .- γ .* G])
-	G̃ = Vector{symbolic_type}([G; γ])
+	# F̃ = Vector{symbolic_type}([∇L; F; γ .* G .- θ])
+	# G̃ = Vector{symbolic_type}([G; γ])
+	F̃ = Vector{symbolic_type}([∇L; F])
+	G̃ = Vector{symbolic_type}([G; γ; θ - γ'*G])
 	# return level == 1 ? (; F = F̃, G = G̃, z = z) : (; F = F̃, G = G̃, z = [z; λ; γ])
-	Main.@infiltrate
 	return (; F = F̃, G = G̃, z = [z; λ; γ])
 end
 

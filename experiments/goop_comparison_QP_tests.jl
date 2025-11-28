@@ -87,8 +87,8 @@ function run_trials(num_tests::Int)
 		try
 			x_block = BlockArray(zeros(N), [N])
 
-			global goop_preferences = [[J₂, J₃]]
-			global is_prioritized_constraint = [[false, false]]
+			global goop_preferences = [[J₁, J₂, J₃]]
+			global is_prioritized_constraint = [[false, false, false]]
 			global equality_constraints = [g_eq]
 			global inequality_constraints = [g_ineq]
 

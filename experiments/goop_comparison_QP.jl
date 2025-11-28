@@ -37,7 +37,7 @@ Aₑ = [1 0 1 0; 1 1 0 1] # A₃x = b₃
 bₑ = [1.0, 1.0]
 
 # Randomize Q, A and b (Q_i has to be positive semi-definite)
-Random.seed!(70) # 17
+Random.seed!(3) # 17
 #10 (problem is infeasble or unbounded)
 #16 (both version in new goop same sol)
 #17 (modified new goop gives wrong)
@@ -100,19 +100,19 @@ end
 J₁(x, θ) = 0.5x[1:n]'*Q₁*x[1:n] + c₁'*x[1:n]
 J₂(x, θ) = 0.5x[1:n]'*Q₂*x[1:n] + c₂'*x[1:n]
 J₃(x, θ) = 0.5x[1:n]'*Q₃*x[1:n] + c₃'*x[1:n]
-# g_eq(x, θ) = Aₑ*x[1:n] .- bₑ
+g_eq(x, θ) = Aₑ*x[1:n] .- bₑ
 g_ineq(x, θ) = Aᵢ*x[1:n] .- bᵢ
-g_eq(x, θ) = [x[1] + x[2]+ x[3] + x[4] - 2.0] # x[1] + x[4] - 1.0
+# g_eq(x, θ) = [x[1] + x[2]+ x[3] + x[4] - 2.0]
 # g_eq(x, θ) = A₃*x[1:n] .- b₃
 # g_ineq(x, θ) = [x[1] - 0.5; x[2] - 0.5]
 
 ################# NEW GOOP #########################
 @info "........................STARTING NEW GOOP........................"
 
-x = BlockArray(zeros(n), [n]) # single player
+x = BlockArray(zeros(n), [n]) # single playerq
 parameters = BlockArray([0.0], [1])
-goop_preferences = [[J₂, J₃]] # single player
-is_prioritized_constraint = [[false, false]]
+goop_preferences = [[J₁, J₂, J₃]] # single player
+is_prioritized_constraint = [[false, false, false]]
 equality_constraints = [g_eq]
 inequality_constraints = [g_ineq] #[g_ineq] # [nothing]
 shared_equality_constraint = nothing
@@ -138,7 +138,7 @@ status_new_goop, z_sol_new_goop, x, s, σ, γ, kkt_error, ϵ, outer_iters, total
 	η₀ = 0.0, # no regularization
 	min_stepsize = 1e-5,
 	max_outer_iters = 200,
-	z₀ = nothing,
+	z₀ = [0.5032, 2.1336, -3.1896, 0.3465], # nothing
 	verbose = true,
 )
 
@@ -147,8 +147,6 @@ println("[New G] Primal solution: $(round.(z_sol_new_goop[1:n], digits = n_digit
 println("[New G] Dual solution ($(length(z_sol_new_goop) - n) variables): $(round.(z_sol_new_goop[Not(1:n)], digits = n_digits))")
 println("[New G] Objective: $(round(J₁(z_sol_new_goop[1:n], 0), digits = n_digits))")
 println("[New G] number of equations: $(NG_kkt_system.kkt_dimension)")
-
-Main.@infiltrate
 
 ################# OLD GOOP #########################
 @info "........................STARTING OLD GOOP........................"
@@ -250,6 +248,7 @@ Main.@infiltrate
 # Topmost level
 L = first(goop_preferences[player][1](z, θ)) - λ'*F - γ'*G
 ∇L = Symbolics.gradient(L, z)
+Main.@infiltrate
 F = Vector{symbolic_type}([∇L; F])
 z̲ = [
 	fill(-Inf, length(F))
