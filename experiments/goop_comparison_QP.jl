@@ -37,7 +37,7 @@ Aₑ = [1 0 1 0; 1 1 0 1] # A₃x = b₃
 bₑ = [1.0, 1.0]
 
 # Randomize Q, A and b (Q_i has to be positive semi-definite)
-Random.seed!(3) # 17
+Random.seed!(1) # 17
 #10 (problem is infeasble or unbounded)
 #16 (both version in new goop same sol)
 #17 (modified new goop gives wrong)
@@ -50,8 +50,8 @@ Q₃ = rand_psd(n, 1);
 c₃ = rand(n);
 Aₑ = rand(m, n);
 bₑ = rand(m);
-Aᵢ = [1 0 0 0; 0 1 0 0];
-bᵢ = [0.5, 0.5] # x₁ ≥ 0.5, x₂ ≥ 0.5
+Aᵢ = [0 0 1 0; 0 0 0 1];
+bᵢ = [0.5; 0.0]; 
 
 # Pretty-print randomized problem data in a compact table.
 println("Randomized problem data:")
@@ -106,13 +106,20 @@ g_ineq(x, θ) = Aᵢ*x[1:n] .- bᵢ
 # g_eq(x, θ) = A₃*x[1:n] .- b₃
 # g_ineq(x, θ) = [x[1] - 0.5; x[2] - 0.5]
 
+# nonlinear equality constraint 
+# g_eq(x, θ) = [x[1]^4 + x[2]^4 - 1.0]
+g_eq(x, θ) = [x[1]^4 - 1.0; x[2]^4 - 1.0]
+
+# initial warmstart
+warmstart_x = [0.8271, 0.8541, 0.5, 0.5]
+
 ################# NEW GOOP #########################
 @info "........................STARTING NEW GOOP........................"
 
 x = BlockArray(zeros(n), [n]) # single playerq
 parameters = BlockArray([0.0], [1])
-goop_preferences = [[J₁, J₂, J₃]] # single player
-is_prioritized_constraint = [[false, false, false]]
+goop_preferences = [[J₂, J₃]] # single player
+is_prioritized_constraint = [[false, false]]
 equality_constraints = [g_eq]
 inequality_constraints = [g_ineq] #[g_ineq] # [nothing]
 shared_equality_constraint = nothing
@@ -138,7 +145,7 @@ status_new_goop, z_sol_new_goop, x, s, σ, γ, kkt_error, ϵ, outer_iters, total
 	η₀ = 0.0, # no regularization
 	min_stepsize = 1e-5,
 	max_outer_iters = 200,
-	z₀ = [0.5032, 2.1336, -3.1896, 0.3465], # nothing
+	z₀ = warmstart_x, #[0.5032, 2.1336, -3.1896, 0.3465], # nothing
 	verbose = true,
 )
 
@@ -147,6 +154,8 @@ println("[New G] Primal solution: $(round.(z_sol_new_goop[1:n], digits = n_digit
 println("[New G] Dual solution ($(length(z_sol_new_goop) - n) variables): $(round.(z_sol_new_goop[Not(1:n)], digits = n_digits))")
 println("[New G] Objective: $(round(J₁(z_sol_new_goop[1:n], 0), digits = n_digits))")
 println("[New G] number of equations: $(NG_kkt_system.kkt_dimension)")
+
+Main.@infiltrate
 
 ################# OLD GOOP #########################
 @info "........................STARTING OLD GOOP........................"
@@ -233,7 +242,7 @@ x = SymbolicTracingUtils.make_variables(backend, :x, n)
 symbolic_type = eltype(x)
 
 (; F, G, z) = construct_kkt_older_goop(goop_preferences[player][2:end], is_prioritized_constraint[player][2:end], player)
-Main.@infiltrate
+
 λ = SymbolicTracingUtils.make_variables(
 	backend,
 	Symbol("λ_$(player)_1"),
@@ -264,7 +273,7 @@ parametric_mcp = ParametricMCPs.ParametricMCP([F; G], [z; λ; γ], [θ], z̲, z�
 z_sol_older_goop, status_older_goop, info = ParametricMCPs.solve(
 	parametric_mcp,
 	parameter_value;
-	initial_guess = zeros(length([z; λ; γ])),
+	initial_guess = vcat(warmstart_x, zeros(length([z;λ;γ])-n)),#zeros(length([z; λ; γ])),
 	verbose = false,
 	cumulative_iteration_limit = 100000,
 	proximal_perturbation = 1e-2,
