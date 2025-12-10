@@ -11,7 +11,8 @@ using InvertedIndices: Not
 using Random
 
 # include("Intersection.jl")
-include("goop_comparison_QP.jl")
+# include("goop_comparison_QP.jl")
 # include("trilevel_QP.jl")
+include("nonlinear_goop_test.jl")
 
 end

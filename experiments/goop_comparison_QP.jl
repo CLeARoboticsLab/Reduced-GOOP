@@ -33,8 +33,8 @@ Q₂ = I(n) # [0 0 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 1]
 c₂ = [1.0, 1.0, 1.0, 1.0]
 Q₃ = I(n) # [1 0 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 0]
 c₃ = [1.0, 1.0, 1.0, 1.0]
-Aₑ = [1 0 1 0; 1 1 0 1] # A₃x = b₃
-bₑ = [1.0, 1.0]
+# Aₑ = [1 0 1 0; 1 1 0 1] # A₃x = b₃
+# bₑ = [1.0, 1.0]
 
 # Randomize Q, A and b (Q_i has to be positive semi-definite)
 Random.seed!(1) # 17
@@ -53,34 +53,34 @@ bₑ = rand(m);
 Aᵢ = [0 0 1 0; 0 0 0 1];
 bᵢ = [0.5; 0.0]; 
 
-# Pretty-print randomized problem data in a compact table.
-println("Randomized problem data:")
-data = [
-	"Q₁" => Q₁,
-	"c₁" => c₁,
-	"Q₂" => Q₂,
-	"c₂" => c₂,
-	"Q₃" => Q₃,
-	"c₃" => c₃,
-	"Aₑ" => Aₑ,
-	"bₑ" => bₑ,
-	"Aᵢ" => Aᵢ,
-	"bᵢ" => bᵢ,
-]
-name_width = maximum(length(name) for (name, _) in data)
-println("  ", rpad("Name", name_width), " | Value")
-println("  ", repeat("-", name_width), "-+-", repeat("-", 40))
-for (name, value) in data
-	rounded_value = round.(value; digits = n_digits)
-	value_str = sprint(io -> show(io, "text/plain", rounded_value))
-	value_lines = split(value_str, '\n'; keepempty = false)
-	first_line = isempty(value_lines) ? "" : value_lines[1]
-	println("  ", rpad(name, name_width), " | ", first_line)
-	for line in value_lines[2:end]
-		println("  ", repeat(" ", name_width), " | ", line)
-	end
-	println("  ", repeat("-", name_width), "-+-", repeat("-", 40))
-end
+# # Pretty-print randomized problem data in a compact table.
+# println("Randomized problem data:")
+# data = [
+# 	"Q₁" => Q₁,
+# 	"c₁" => c₁,
+# 	"Q₂" => Q₂,
+# 	"c₂" => c₂,
+# 	"Q₃" => Q₃,
+# 	"c₃" => c₃,
+# 	"Aₑ" => Aₑ,
+# 	"bₑ" => bₑ,
+# 	"Aᵢ" => Aᵢ,
+# 	"bᵢ" => bᵢ,
+# ]
+# name_width = maximum(length(name) for (name, _) in data)
+# println("  ", rpad("Name", name_width), " | Value")
+# println("  ", repeat("-", name_width), "-+-", repeat("-", 40))
+# for (name, value) in data
+# 	rounded_value = round.(value; digits = n_digits)
+# 	value_str = sprint(io -> show(io, "text/plain", rounded_value))
+# 	value_lines = split(value_str, '\n'; keepempty = false)
+# 	first_line = isempty(value_lines) ? "" : value_lines[1]
+# 	println("  ", rpad(name, name_width), " | ", first_line)
+# 	for line in value_lines[2:end]
+# 		println("  ", repeat(" ", name_width), " | ", line)
+# 	end
+# 	println("  ", repeat("-", name_width), "-+-", repeat("-", 40))
+# end
 
 # # Check column space inclusion
 # println("column space inclusion: ", colspace_issubset(Aᵢ', hcat(Aₑ', Q₃)))
@@ -101,27 +101,27 @@ J₁(x, θ) = 0.5x[1:n]'*Q₁*x[1:n] + c₁'*x[1:n]
 J₂(x, θ) = 0.5x[1:n]'*Q₂*x[1:n] + c₂'*x[1:n]
 J₃(x, θ) = 0.5x[1:n]'*Q₃*x[1:n] + c₃'*x[1:n]
 g_eq(x, θ) = Aₑ*x[1:n] .- bₑ
-g_ineq(x, θ) = Aᵢ*x[1:n] .- bᵢ
+# g_ineq(x, θ) = Aᵢ*x[1:n] .- bᵢ
 # g_eq(x, θ) = [x[1] + x[2]+ x[3] + x[4] - 2.0]
 # g_eq(x, θ) = A₃*x[1:n] .- b₃
 # g_ineq(x, θ) = [x[1] - 0.5; x[2] - 0.5]
 
 # nonlinear equality constraint 
 # g_eq(x, θ) = [x[1]^4 + x[2]^4 - 1.0]
-g_eq(x, θ) = [x[1]^4 - 1.0; x[2]^4 - 1.0]
+g_eq(x, θ) = [x[1]^4 + x[2]^4 + x[3]^4 + x[4]^4 - 1.0]
 
 # initial warmstart
-warmstart_x = [0.8271, 0.8541, 0.5, 0.5]
+warmstart_x = [0.7613, 0.5384, 0.7484, 0.7185]
 
 ################# NEW GOOP #########################
 @info "........................STARTING NEW GOOP........................"
 
-x = BlockArray(zeros(n), [n]) # single playerq
+x = BlockArray(zeros(n), [n]) # single player
 parameters = BlockArray([0.0], [1])
-goop_preferences = [[J₂, J₃]] # single player
-is_prioritized_constraint = [[false, false]]
+goop_preferences = [[J₁, J₂, J₃]] # single player
+is_prioritized_constraint = [[false, false, false]]
 equality_constraints = [g_eq]
-inequality_constraints = [g_ineq] #[g_ineq] # [nothing]
+inequality_constraints = [nothing] #[g_ineq] # [nothing]
 shared_equality_constraint = nothing
 shared_inequality_constraint = nothing
 

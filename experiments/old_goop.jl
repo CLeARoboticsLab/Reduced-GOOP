@@ -233,8 +233,6 @@ function construct_kkt_older_goop(preferences, is_prioritized_constraint, player
 end
 
 
-using LinearAlgebra
-
 """
 	colspace_issubset(A, B; atol=1e-10, rtol=1e-8, pivot=true) -> Bool
 
@@ -269,4 +267,10 @@ function colspace_issubset(A::AbstractMatrix, B::AbstractMatrix;
 		end
 	end
 	return true
+end
+
+function rand_psd(n, r)
+	# n: primal dimension, r: matrix rank (<=n)
+	R = randn(r, n);
+	R' * R;
 end

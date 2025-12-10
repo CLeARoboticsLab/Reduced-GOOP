@@ -337,8 +337,8 @@ function generate_slacked_kkt_system(
 			# 10/25: added last term for lower-level complementarity slackness.
 		    # TODO: do the same for preference constraints and shared inequality constraints.
 			# TODO: Keep Γ_cs separate from Γ to avoid confusion and similarly for preference and shared constraints.
-			blocked_Γ_cs = BlockArray(Γ_cs, fill(goop.inequality_dims[player], length(Γ_cs) ÷ goop.inequality_dims[player]))
-			@assert length(ϕ) == length(blocked_Γ_cs[Block(level+1):Block(num_levels)]) 
+			# blocked_Γ_cs = BlockArray(Γ_cs, fill(goop.inequality_dims[player], length(Γ_cs) ÷ goop.inequality_dims[player]))
+			# @assert length(ϕ) == length(blocked_Γ_cs[Block(level+1):Block(num_levels)]) 
 			L = h - ψ' * π - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
 				(isnothing(fₛ) ? 0 : λ̃ₛ' * fₛ) - (isnothing(gₛ) ? 0 : γ̃ₛ' * gₛ) - (isnothing(g) ? 0 : ϕ' * (repeat(g, num_levels - level) .* blocked_Γ_cs[Block(level+1):Block(num_levels)])) 
 			∇L = Symbolics.gradient(L, x[Block(player)])
