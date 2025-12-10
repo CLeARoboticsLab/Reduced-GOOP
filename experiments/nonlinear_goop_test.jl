@@ -15,7 +15,7 @@ c₂ = [1.0, 1.0, 1.0, 1.0]
 Q₃ = I(n) # [1 0 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 0]
 c₃ = [1.0, 1.0, 1.0, 1.0]
 
-Random.seed!(00126784657016) # 31, 0845, 5677, 00126784657016
+Random.seed!(090133845) # 31, 0845, 5677, 00126784657016, 090133845
 Q₁ = rand_psd(n, 1);
 c₁ = rand(n);
 Q₂ = rand_psd(n, 1);
@@ -25,7 +25,7 @@ c₃ = rand(n);
 J₁(x, θ) = 0.5x[1:n]'*Q₁*x[1:n] + c₁'*x[1:n] + x[1]^3 # non quadratic objective 
 J₂(x, θ) = 0.5x[1:n]'*Q₂*x[1:n] + c₂'*x[1:n] + sin(x[2]) # non quadratic objective
 J₃(x, θ) = 0.5x[1:n]'*Q₃*x[1:n] + c₃'*x[1:n] + x[3]^4
-g_eq(x, θ) = [x[1]^3 + x[2]^4 + x[3]^4 + x[4]^4 - 1.0]
+g_eq(x, θ) = [x[1]^3 + x[2]^4 + x[3]^4 + x[4]^4 - 1.0; cos(x[3])]
 
 warmstart_x = [0.0; 1.0; 0.0; 0.0]
 
@@ -184,9 +184,9 @@ sol = NonlinearSolve.solve(prob)
 @info "sol.retcode(sol) is $(sol.retcode)"
 
 # Check λ₃, λ₂, ψ₂
-@info "λ₃ from NG: $(z_sol_new_goop[7]), λ₃ from OG (via nonlinearsolve): $(sol.u[1])"
-@info "λ₂ from NG: $(z_sol_new_goop[6]), λ₂ from OG (via nonlinearsolve): $(sol.u[6])"
-@info "ψ₂ from NG: $(z_sol_new_goop[8:11]), ψ₂ from OG (via nonlinearsolve): $(sol.u[2:5])"
+@info "λ₃ from NG: $(z_sol_new_goop[9:10]), λ₃ from OG (via nonlinearsolve): $(sol.u[1:2])"
+@info "λ₂ from NG: $(z_sol_new_goop[7:8]), λ₂ from OG (via nonlinearsolve): $(sol.u[7:8])"      # λ_1_2[5]
+@info "ψ₂ from NG: $(z_sol_new_goop[11:14]), ψ₂ from OG (via nonlinearsolve): $(sol.u[3:6])" # λ_1_2[1:4]
 
 # Sanity check
 F_eval_full, _ = Symbolics.build_function(
@@ -196,12 +196,6 @@ F_eval_full, _ = Symbolics.build_function(
 )
 
 @info "maximum(abs.(F_eval_full(vcat(z_new_sol_new_goop[1:n], sol.u)): $(maximum(abs.(F_eval_full(vcat(z_sol_new_goop[1:n], sol.u)))))"
-
-# Main.@infiltrate
-
-# Compare Lagrangian gradients at level 2
-# ∇J₂ - 
-
 
 
 # compute l1 difference between two solutions
