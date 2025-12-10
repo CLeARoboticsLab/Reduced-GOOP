@@ -15,17 +15,17 @@ c₂ = [1.0, 1.0, 1.0, 1.0]
 Q₃ = I(n) # [1 0 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 0]
 c₃ = [1.0, 1.0, 1.0, 1.0]
 
-Random.seed!(090133845) # 31, 0845, 5677, 00126784657016, 090133845
-Q₁ = rand_psd(n, 1);
+Random.seed!() # 31, 0845, 5677, 00126784657016, 090133845, 090133845
+Q₁ = rand_psd(n, 2);
 c₁ = rand(n);
-Q₂ = rand_psd(n, 1);
+Q₂ = rand_psd(n, 2);
 c₂ = rand(n);
-Q₃ = rand_psd(n, 1);
+Q₃ = rand_psd(n, 2);
 c₃ = rand(n);
 J₁(x, θ) = 0.5x[1:n]'*Q₁*x[1:n] + c₁'*x[1:n] + x[1]^3 # non quadratic objective 
-J₂(x, θ) = 0.5x[1:n]'*Q₂*x[1:n] + c₂'*x[1:n] + sin(x[2]) # non quadratic objective
+J₂(x, θ) = 0.5x[1:n]'*Q₂*x[1:n] + c₂'*x[1:n] + x[2]^3 # non quadratic objective
 J₃(x, θ) = 0.5x[1:n]'*Q₃*x[1:n] + c₃'*x[1:n] + x[3]^4
-g_eq(x, θ) = [x[1]^3 + x[2]^4 + x[3]^4 + x[4]^4 - 1.0; cos(x[3])]
+g_eq(x, θ) = [sin(x[1]); cos(x[3])]
 
 warmstart_x = [0.0; 1.0; 0.0; 0.0]
 
@@ -62,10 +62,10 @@ status_new_goop, z_sol_new_goop, x, s, σ, γ, kkt_error, ϵ, outer_iters, total
 	min_stepsize = 1e-5,
 	max_outer_iters = 100,
 	z₀ = warmstart_x,
-	verbose = true,
+	verbose = false,
 )
 
-@assert status_new_goop == :solved "New GOOP did not solve successfully!"
+@info status_new_goop == :solved "New GOOP did not solve successfully!"
 println("[New G] status = $(status_new_goop)")
 println("[New G] Primal solution: $(round.(z_sol_new_goop[1:n], digits = n_digits))")
 println("[New G] Dual solution ($(length(z_sol_new_goop) - n) variables): $(round.(z_sol_new_goop[Not(1:n)], digits = n_digits))")
@@ -134,7 +134,8 @@ OG_kkt_system = QuasiGOOP.BuildGOOPKKTSystem(
 )
 
 ### Check if there exists OG duals given NG primal solutions via NonlinearSolve
-x = SymbolicTracingUtils.make_variables(backend, :x, n)
+x = SymbolicTracingUtils.make_variables(backend, :x, n) 
+λ₃ = SymbolicTracingUtils.make_variables(backend, Symbol("λ_1_3"), 2) # length(λ₃) = 2
 ϵ = only(SymbolicTracingUtils.make_variables(backend, :ϵ, 1))
 η = only(SymbolicTracingUtils.make_variables(backend, :η, 1))
 F_symbolic = OG_kkt_system.F_symbolic
@@ -149,7 +150,9 @@ F_symbolic_after_sub = Vector{symbolic_type}(
 			x[2] => z_sol_new_goop[2],
 			x[3] => z_sol_new_goop[3],
 			x[4] => z_sol_new_goop[4],
-			# todo add \lambda3
+			# Add λ₃
+            λ₃[1] => z_sol_new_goop[9],
+            λ₃[2] => z_sol_new_goop[10],
 			ϵ => 0, η => 0]
 		),
 	),
@@ -158,7 +161,7 @@ F_symbolic_after_sub = Vector{symbolic_type}(
 # Compile the numeric function (returns F given z)
 F_eval, F_eval_ip! = Symbolics.build_function(
 	F_symbolic_after_sub,
-	z_symbolic[Not(1:n)];
+	z_symbolic[Not(1:n+2)]; # +2 for λ₃
 	expression = Val(false),
 )
 
@@ -169,24 +172,24 @@ function test_f!(u, p)
 end
 
 # Initial guess and parameters
-z_val = zeros(length(z_symbolic) - n)
+z_val = zeros(length(z_symbolic) - n - 2)
 
 # Construct the problem (3 positional args max) and solve it
 prob = isnothing(inequality_constraints[1]) ? NonlinearProblem(test_f!, z_val) : NonlinearLeastSquaresProblem(test_f!, z_val)
 sol = NonlinearSolve.solve(prob)
-@assert length(sol.u) == length(z_symbolic) - n
+@assert length(sol.u) == length(z_symbolic) - n - 2
 
+@info "sol.retcode(sol) is $(sol.retcode)"
 @info "OG Duals from nonlinear solve: $(sol.u), length: $(length(sol.u))"
 
-# Check sol.u is indeed the dual OG solution
-@info "maximum(abs.(F_eval(sol.u))): $(maximum(abs.(F_eval(sol.u))))"
-@assert maximum(abs.(F_eval(sol.u))) < 1e-5 " OG KKT conditions not satisfied!"
-@info "sol.retcode(sol) is $(sol.retcode)"
-
 # Check λ₃, λ₂, ψ₂
-@info "λ₃ from NG: $(z_sol_new_goop[9:10]), λ₃ from OG (via nonlinearsolve): $(sol.u[1:2])"
-@info "λ₂ from NG: $(z_sol_new_goop[7:8]), λ₂ from OG (via nonlinearsolve): $(sol.u[7:8])"      # λ_1_2[5]
-@info "ψ₂ from NG: $(z_sol_new_goop[11:14]), ψ₂ from OG (via nonlinearsolve): $(sol.u[3:6])" # λ_1_2[1:4]
+# @info "λ₃ from NG: $(z_sol_new_goop[9:10]), λ₃ from OG (via nonlinearsolve): $(sol.u[1:2])"
+# @info "λ₂ from NG: $(z_sol_new_goop[7:8]), λ₂ from OG (via nonlinearsolve): $(sol.u[7:8])"      # λ_1_2[5]
+# @info "ψ₂ from NG: $(z_sol_new_goop[11:14]), ψ₂ from OG (via nonlinearsolve): $(sol.u[3:6])" # λ_1_2[1:4]
+
+@info "λ₂ from NG: $(z_sol_new_goop[7:8]), λ₂ from OG (via nonlinearsolve): $(sol.u[5:6])"      # λ_1_2[5]
+@info "ψ₂ from NG: $(z_sol_new_goop[11:14]), ψ₂ from OG (via nonlinearsolve): $(sol.u[1:4])" # λ_1_2[1:4]
+
 
 # Sanity check
 F_eval_full, _ = Symbolics.build_function(
@@ -195,8 +198,17 @@ F_eval_full, _ = Symbolics.build_function(
 	expression = Val(false),
 )
 
-@info "maximum(abs.(F_eval_full(vcat(z_new_sol_new_goop[1:n], sol.u)): $(maximum(abs.(F_eval_full(vcat(z_sol_new_goop[1:n], sol.u)))))"
+# Check sol.u is indeed the dual OG solution
+@info "maximum(abs.(F_eval(sol.u))): $(maximum(abs.(F_eval(sol.u))))"
+@info "maximum(abs.(F_eval_full(vcat(z_new_sol_new_goop[1:n], sol.u)): $(maximum(abs.(F_eval_full(vcat(z_sol_new_goop[1:n], z_sol_new_goop[9:10], sol.u)))))"
+@assert maximum(abs.(F_eval(sol.u))) < 1e-5 " OG KKT conditions not satisfied!"
 
+# Final check 
+if status_new_goop == :solved && maximum(abs.(F_eval(sol.u))) < 1e-5
+    
+else
+    @error "FAILURE: Counter example found"
+end
 
 # compute l1 difference between two solutions
 # @show sol.u .- z_sol_new_goop[Not(1:n)]
