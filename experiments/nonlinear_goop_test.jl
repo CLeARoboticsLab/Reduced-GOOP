@@ -15,19 +15,19 @@ c₂ = [1.0, 1.0, 1.0, 1.0]
 Q₃ = I(n) # [1 0 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 0]
 c₃ = [1.0, 1.0, 1.0, 1.0]
 
-Random.seed!(26) # 17
+Random.seed!(00126784657016) # 31, 0845, 5677, 00126784657016
 Q₁ = rand_psd(n, 1);
 c₁ = rand(n);
 Q₂ = rand_psd(n, 1);
 c₂ = rand(n);
 Q₃ = rand_psd(n, 1);
 c₃ = rand(n);
-J₁(x, θ) = 0.5x[1:n]'*Q₁*x[1:n] + c₁'*x[1:n]
-J₂(x, θ) = 0.5x[1:n]'*Q₂*x[1:n] + c₂'*x[1:n]
-J₃(x, θ) = 0.5x[1:n]'*Q₃*x[1:n] + c₃'*x[1:n]
+J₁(x, θ) = 0.5x[1:n]'*Q₁*x[1:n] + c₁'*x[1:n] + x[1]^3 # non quadratic objective 
+J₂(x, θ) = 0.5x[1:n]'*Q₂*x[1:n] + c₂'*x[1:n] + sin(x[2]) # non quadratic objective
+J₃(x, θ) = 0.5x[1:n]'*Q₃*x[1:n] + c₃'*x[1:n] + x[3]^4
 g_eq(x, θ) = [x[1]^3 + x[2]^4 + x[3]^4 + x[4]^4 - 1.0]
 
-warmstart_x = [2.0; 0.0; 0.0; 0.0]
+warmstart_x = [0.0; 1.0; 0.0; 0.0]
 
 @info "........................STARTING NEW GOOP........................"
 x = BlockArray(zeros(n), [n]) # single player
@@ -60,7 +60,7 @@ status_new_goop, z_sol_new_goop, x, s, σ, γ, kkt_error, ϵ, outer_iters, total
 	tol = 1e-5,
 	η₀ = 0.0, # no regularization
 	min_stepsize = 1e-5,
-	max_outer_iters = 200,
+	max_outer_iters = 100,
 	z₀ = warmstart_x,
 	verbose = true,
 )
@@ -182,6 +182,26 @@ sol = NonlinearSolve.solve(prob)
 @info "maximum(abs.(F_eval(sol.u))): $(maximum(abs.(F_eval(sol.u))))"
 @assert maximum(abs.(F_eval(sol.u))) < 1e-5 " OG KKT conditions not satisfied!"
 @info "sol.retcode(sol) is $(sol.retcode)"
+
+# Check λ₃, λ₂, ψ₂
+@info "λ₃ from NG: $(z_sol_new_goop[7]), λ₃ from OG (via nonlinearsolve): $(sol.u[1])"
+@info "λ₂ from NG: $(z_sol_new_goop[6]), λ₂ from OG (via nonlinearsolve): $(sol.u[6])"
+@info "ψ₂ from NG: $(z_sol_new_goop[8:11]), ψ₂ from OG (via nonlinearsolve): $(sol.u[2:5])"
+
+# Sanity check
+F_eval_full, _ = Symbolics.build_function(
+	F_symbolic,
+	z_symbolic;
+	expression = Val(false),
+)
+
+@info "maximum(abs.(F_eval_full(vcat(z_new_sol_new_goop[1:n], sol.u)): $(maximum(abs.(F_eval_full(vcat(z_sol_new_goop[1:n], sol.u)))))"
+
+# Main.@infiltrate
+
+# Compare Lagrangian gradients at level 2
+# ∇J₂ - 
+
 
 
 # compute l1 difference between two solutions
