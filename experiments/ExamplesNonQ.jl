@@ -1,4 +1,4 @@
-module ExamplesQP
+module ExamplesNonQ
 using QuasiGOOP
 
 using ParametricMCPs
@@ -10,9 +10,7 @@ using NonlinearSolve
 using InvertedIndices: Not
 using Random
 
-# include("Intersection.jl")
-# include("goop_comparison_QP.jl")
-# include("trilevel_QP.jl")
-# include("bilevel_QP.jl")
+
+include("run_nonlinear_goop_exp.jl")
 
 end
