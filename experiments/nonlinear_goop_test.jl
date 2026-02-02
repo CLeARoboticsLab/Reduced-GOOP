@@ -21,7 +21,7 @@ shared_inequality_constraint = nothing
 
 Random.seed!()
 
-for iteration in 1:100
+for iteration in 1:1
 	@info "........................STARTING NEW GOOP (iteration $(iteration))........................"
 	Q₁ = rand_psd(n, 1)
 	c₁ = rand(n)
