@@ -257,8 +257,8 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 
 	num_players = 2
 	control_bounds = (; lb = [-2.0, -2.0], ub = [2.0, 2.0])
-	dynamics = planar_double_integrator(; dt = 0.3, control_bounds) # x := (px, py, vx, vy) and u := (ax, ay).
-	planning_horizon = 10
+	dynamics = planar_double_integrator(; dt = 0.4, control_bounds) # x := (px, py, vx, vy) and u := (ax, ay).
+	planning_horizon = 15
 	collision_avoidance = 1.5
 
 	(; problem, flatten_parameters) = get_setup(
@@ -287,7 +287,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 				tol = 5e-3, # 5e-3
 				η₀ = 0.5, # 0.5
 				ϵ₀ = 5.0, # 5.0
-				max_inner_iters = 30, # 20
+				max_inner_iters = 50, # 20
 				max_outer_iters = 50, # 50
 				tightening_rate = 0.01, # 0.1
 				loosening_rate = 0.05, # 0.5
@@ -371,7 +371,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 
 	# Warmstart solution
 	warmstart_x = [[initial_state1[]], [initial_state2[]]]
-	warmstart_u = [[[2.0, 0.0]], [[0.0, 4.0]]] # some constant control
+	warmstart_u = [[[1.0, 0.0]], [[0.0, 2.0]]] # some constant control
 	warmstart_solution = build_warmstart_solution(num_players, planning_horizon, dynamics, warmstart_x, warmstart_u)
 	# warmstart_solution = nothing 
 
