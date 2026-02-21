@@ -117,7 +117,7 @@ function solve(
 			# @assert all(.!isnan.(∇F)) "Found NaN in ∇F - aborting!"
 			verbose && println("condition number of ∇F = $(cond(collect(∇F),2))")
 			# Check the primals
-			verbose && println("current primal x: ", round.(z[mcp.primal_dims]; digits = 4))
+			# verbose && println("current primal x: ", round.(z[mcp.primal_dims]; digits = 4))
 
 			linsolve.A = ∇F
 			linsolve.b = -F
@@ -133,7 +133,7 @@ function solve(
 
 			δz .= solution.u
 
-			verbose && println("current δx: ", round.(δz[mcp.primal_dims]; digits = 4))
+			# verbose && println("current δx: ", round.(δz[mcp.primal_dims]; digits = 4))
 
 
 			# Fraction to the boundary linesearch.

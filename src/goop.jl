@@ -102,10 +102,12 @@ function generate_slacked_kkt_system(
 	# Keep track of all equality constraint duals (λ) that we create.
 	Λ = symbolic_type[]
 	Φ = symbolic_type[] # 10/25: store duals for complementarity slackness 
+	Φₛ = symbolic_type[] # store duals for complementarity slackness for shared constraints
 
 	# Keep track of all inequality constraint duals (γ) that we create.
 	Γ = symbolic_type[]
 	Γ_cs = symbolic_type[] # 10/25: store duals for complementarity slackness
+	Γ_cs_shared = symbolic_type[] # store duals for complementarity slackness for shared constraints
 
 	# Keep track of all lower level policy constraint duals (ψ) that we create.
 	Ψ = symbolic_type[]
@@ -139,6 +141,14 @@ function generate_slacked_kkt_system(
 		)
 		push!(Γ, γ...)
 		push!(Γ_cs, γ...) # 10/25
+
+		γ̃ₛ = SymbolicTracingUtils.make_variables(
+			backend,
+			Symbol("γ̃ₛ_$(player)_$(level)"),
+			goop.shared_inequality_dims,
+		)
+		push!(Γ, γ̃ₛ...)
+		push!(Γ_cs_shared, γ̃ₛ...) # 10/25
 
 		# # Shared constraints exist at every level. https://github.com/CLeARoboticsLab/Quasi-GOOP/issues/6
 		# Option (1): Share the multipliers only at all players' innermost levels, but let successive outer levels have their own separate multipliers for all players.
@@ -230,7 +240,6 @@ function generate_slacked_kkt_system(
 							f
 							(isnothing(g) ? nothing : g .- σ)
 							(isnothing(g) ? nothing : σ .* γ .- ϵ)
-							# Missing terms for shared constraints?
 						],
 					),
 				)
@@ -261,6 +270,13 @@ function generate_slacked_kkt_system(
 		)
 		push!(Φ, ϕ...)
 
+		ϕₛ = SymbolicTracingUtils.make_variables(
+			backend,
+			Symbol("ϕₛ_$(player)_$(level)"),
+			goop.shared_inequality_dims * (num_levels - level), # ℓ = 1 to Kⁱ - k
+		)
+		push!(Φₛ, ϕₛ...)
+
 		λ̃ₛ = SymbolicTracingUtils.make_variables(
 			backend,
 			Symbol("λ̃ₛ_$(player)_$(level)"),
@@ -268,12 +284,13 @@ function generate_slacked_kkt_system(
 		)
 		push!(Λ, λ̃ₛ...)
 
-		γ̃ₛ = SymbolicTracingUtils.make_variables(
-			backend,
-			Symbol("γ̃ₛ_$(player)_$(level)"),
-			goop.shared_inequality_dims,
-		)
-		push!(Γ, γ̃ₛ...)
+		# γ̃ₛ = SymbolicTracingUtils.make_variables(
+		# 	backend,
+		# 	Symbol("γ̃ₛ_$(player)_$(level)"),
+		# 	goop.shared_inequality_dims,
+		# )
+		# push!(Γ, γ̃ₛ...)
+		# push!(Γ_cs_shared, γ̃ₛ...) # 10/25
 
 		if first(is_prioritized_constraint)
 			# Highest priority is a constraint.
@@ -313,9 +330,14 @@ function generate_slacked_kkt_system(
 			push!(Γ, μₛ...)
 
 			# Form partial Lagrangian at this stage.
-			L = sum(preference_slack) - γₚ' * (h .+ preference_slack) - μₛ' * preference_slack -
+			blocked_Γ_cs = g === nothing ? nothing : make_blocks(Γ_cs, goop.inequality_dims[player])
+			blocked_Γ_cs_shared = gₛ === nothing ? nothing : make_blocks(Γ_cs_shared, goop.shared_inequality_dims)
+			L =
+				sum(preference_slack) - γₚ' * (h .+ preference_slack) - μₛ' * preference_slack -
 				ψ' * π - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
-				(isnothing(fₛ) ? 0 : λ̃ₛ' * fₛ) - (isnothing(gₛ) ? 0 : γ̃ₛ' * gₛ)
+				(isnothing(fₛ) ? 0 : λ̃ₛ' * fₛ) - (isnothing(gₛ) ? 0 : γ̃ₛ' * gₛ) 
+				(isnothing(g) ? 0 : ϕ' * (repeat(g, num_levels - level) .* blocked_Γ_cs[Block(level+1):Block(num_levels)])) - 
+				(isnothing(gₛ) ? 0 : ϕₛ' * (repeat(gₛ, num_levels - level) .* blocked_Γ_cs_shared[Block(level+1):Block(num_levels)]))
 
 			∇L = Symbolics.gradient(L, vcat(x[Block(player)], preference_slack))
 
@@ -334,13 +356,15 @@ function generate_slacked_kkt_system(
 		else
 			@assert length(h) == 1 "Expected a single preference function at the level $(level), but got $(length(h))"
 			# Current priority is a cost.
-			# 10/25: added last term for lower-level complementarity slackness.
-		    # TODO: do the same for preference constraints and shared inequality constraints.
-			# TODO: Keep Γ_cs separate from Γ to avoid confusion and similarly for preference and shared constraints.
-			# blocked_Γ_cs = BlockArray(Γ_cs, fill(goop.inequality_dims[player], length(Γ_cs) ÷ goop.inequality_dims[player]))
-			# @assert length(ϕ) == length(blocked_Γ_cs[Block(level+1):Block(num_levels)]) 
-			L = h - ψ' * π - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
-				(isnothing(fₛ) ? 0 : λ̃ₛ' * fₛ) - (isnothing(gₛ) ? 0 : γ̃ₛ' * gₛ) - (isnothing(g) ? 0 : ϕ' * (repeat(g, num_levels - level) .* blocked_Γ_cs[Block(level+1):Block(num_levels)])) 
+			# TODO: dual variables for preference inequalities
+			blocked_Γ_cs = g === nothing ? nothing : make_blocks(Γ_cs, goop.inequality_dims[player])
+			blocked_Γ_cs_shared = gₛ === nothing ? nothing : make_blocks(Γ_cs_shared, goop.shared_inequality_dims)
+			L =
+				h - ψ' * π - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
+				(isnothing(fₛ) ? 0 : λ̃ₛ' * fₛ) - (isnothing(gₛ) ? 0 : γ̃ₛ' * gₛ) -
+				(isnothing(g) ? 0 : ϕ' * (repeat(g, num_levels - level) .* blocked_Γ_cs[Block(level+1):Block(num_levels)])) - 
+				(isnothing(gₛ) ? 0 : ϕₛ' * (repeat(gₛ, num_levels - level) .* blocked_Γ_cs_shared[Block(level+1):Block(num_levels)]))
+
 			∇L = Symbolics.gradient(L, x[Block(player)])
 			F̃ = Vector{symbolic_type}(
 				filter!(
@@ -393,12 +417,12 @@ function generate_slacked_kkt_system(
 
 	# Pack all variables together.
 	z = Vector{symbolic_type}(
-		vcat(x, s, Σ, Λ, Γ, Ψ, λₛ, γₛ, σₛ, Φ), # 10/25: added ϕ
+		vcat(x, s, Σ, Λ, Γ, Ψ, λₛ, γₛ, σₛ, Φ, Φₛ), # 10/25: added ϕ
 		# vcat(x, s, Σ, Λ, Γ, Ψ, λₛ, γₛ, σₛ),
 	)
 	θ = Vector{symbolic_type}(θ)
 
-	idx = blockedrange(length.([x, s, Σ, Λ, Γ, Ψ, λₛ, γₛ, σₛ, Φ])) # 10/25: added ϕ
+	idx = blockedrange(length.([x, s, Σ, Λ, Γ, Ψ, λₛ, γₛ, σₛ, Φ, Φₛ])) # 10/25: added ϕ
 	# idx = blockedrange(length.([x, s, Σ, Λ, Γ, Ψ, λₛ, γₛ, σₛ]))
 	primal_dims = idx[Block(1)] # x
 	preference_slack_dims = idx[Block(2)] # s
@@ -421,3 +445,5 @@ function generate_slacked_kkt_system(
 
 end
 
+# Helper functions
+make_blocks(vec, b) = (@assert length(vec) % b == 0; BlockArray(vec, fill(b, length(vec) ÷ b)))

@@ -67,6 +67,7 @@ function run_goop_experiments(; num_iters::Int = 100, seed::Int = 0)
             shared_inequality_constraint = shared_inequality_constraint,
         )
 
+        Main.@infiltrate
         NG_kkt_system = QuasiGOOP.generate_slacked_kkt_system(GOOP_trial)
 
         # Solve reduced GOOP
