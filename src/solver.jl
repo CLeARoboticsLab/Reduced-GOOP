@@ -32,6 +32,7 @@ Keyword arguments:
 	- `min_stepsize::Real = 1e-2`: the minimum step size for the linesearch.
 	- `verbose::Bool = false`: whether to print debug information.
 	- `linear_solve_algorithm::LinearSolve.SciMLLinearSolveAlgorithm`: the linear solve algorithm to use. Any solver from `LinearSolve.jl` that can handle nonsquare system can be used.
+	- `convergence_log::Union{Nothing,AbstractDict} = nothing`: optional output dictionary populated with convergence traces.
 """
 function solve(
 	::InteriorPoint,
@@ -48,6 +49,7 @@ function solve(
 	min_stepsize = 1e-4,
 	verbose = false,
 	linear_solve_algorithm = LinearSolve.KrylovJL_LSMR(), # LinearSolve.KrylovJL_LSMR(), # KrylovJL_CRAIGMR() for non-square KKT systems
+	convergence_log = nothing,
 )
 	# z = @something(z₀, begin
 	# 	z = zeros(mcp.variable_dimension)
@@ -100,6 +102,13 @@ function solve(
 	inner_iters = 1
 	outer_iters = 1
 	kkt_error = Inf
+	has_convergence_log = !isnothing(convergence_log)
+	kkt_error_history = Float64[]
+	total_iteration_history = Int[]
+	outer_iteration_history = Int[]
+	inner_iteration_history = Int[]
+	outer_end_total_iterations = Int[]
+	outer_end_trace_indices = Int[]
 	while outer_iters < max_outer_iters || iszero(total_iters)
 		inner_iters = 1
 		status = :solved
@@ -164,10 +173,22 @@ function solve(
 			@. γ += α_γ * δγ
 
 			kkt_error = norm(F, Inf)
+			if has_convergence_log
+				push!(kkt_error_history, kkt_error)
+				push!(total_iteration_history, total_iters)
+				push!(outer_iteration_history, outer_iters)
+				push!(inner_iteration_history, inner_iters)
+			end
 
 			verbose && println("KKT error = $kkt_error")
 
 			inner_iters += 1
+		end
+		if has_convergence_log &&
+		   !isempty(total_iteration_history) &&
+		   (isempty(outer_end_total_iterations) || last(outer_end_total_iterations) != total_iters)
+			push!(outer_end_total_iterations, total_iters)
+			push!(outer_end_trace_indices, length(total_iteration_history))
 		end
 
 		if kkt_error <= ϵ <= tol
@@ -185,6 +206,14 @@ function solve(
 
 	if outer_iters == max_outer_iters
 		status = :failed
+	end
+	if has_convergence_log
+		convergence_log["kkt_error_history"] = kkt_error_history
+		convergence_log["total_iteration_history"] = total_iteration_history
+		convergence_log["outer_iteration_history"] = outer_iteration_history
+		convergence_log["inner_iteration_history"] = inner_iteration_history
+		convergence_log["outer_end_total_iterations"] = outer_end_total_iterations
+		convergence_log["outer_end_trace_indices"] = outer_end_trace_indices
 	end
 
 	(; status, z, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters)

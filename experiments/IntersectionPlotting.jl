@@ -1,3 +1,7 @@
+# using TrajectoryGamesBase: OpenLoopStrategy
+# using GLMakie: GLMakie
+# using LaTeXStrings: @L_str
+
 function draw_intersection_map!(ax; map_end, lane_width, offset = 0.2)
 	vertical_road_background = GLMakie.Polygon(
 		GLMakie.Point2f[
@@ -172,3 +176,50 @@ function plot_intersection_trajectories(;
 
 	return figure, ax
 end
+
+
+function plot_convergence_plot(;
+	kkt_error_history,
+	total_iteration_history,
+	outer_end_total_iterations = Int[],
+	outer_end_trace_indices = Int[],
+)
+	figure = GLMakie.Figure()
+	ax = GLMakie.Axis(
+		figure[1, 1];
+		xlabel = L"\text{iteration} ~\ell",
+		ylabel = L"$\log(|| \mathcal{K}_{\rho}^{(\ell)} ||_\infty)$",
+		yscale = log10,
+	)
+
+	safe_kkt_error = max.(kkt_error_history, eps(Float64))
+	GLMakie.lines!(ax, total_iteration_history, safe_kkt_error, color = :dodgerblue, linewidth = 2)
+	GLMakie.scatter!(ax, total_iteration_history, safe_kkt_error, color = :dodgerblue, markersize = 6)
+
+	if !isempty(outer_end_total_iterations)
+		GLMakie.vlines!(
+			ax,
+			outer_end_total_iterations;
+			color = (:gray, 0.4),
+			linestyle = :dash,
+			linewidth = 1,
+		)
+	end
+
+	if !isempty(outer_end_trace_indices)
+		end_x = total_iteration_history[outer_end_trace_indices]
+		end_y = safe_kkt_error[outer_end_trace_indices]
+		GLMakie.scatter!(
+			ax,
+			end_x,
+			end_y;
+			color = :crimson,
+			markersize = 12,
+			marker = :utriangle,
+		)
+	end
+
+	return figure, ax
+end
+
+
