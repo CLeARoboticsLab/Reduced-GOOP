@@ -251,8 +251,8 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 	# Problem setup
 	num_players = 2
 	control_bounds = (; lb = [-2.0, -2.0], ub = [2.0, 2.0])
-	dynamics = planar_double_integrator(; dt = 0.3, control_bounds) # x := (px, py, vx, vy) and u := (ax, ay).
-	planning_horizon = 15
+	dynamics = planar_double_integrator(; dt = 0.2, control_bounds) # x := (px, py, vx, vy) and u := (ax, ay).
+	planning_horizon = 20
 	collision_avoidance = 1.5
 	num_instances = 10
 	receding_horizon_steps = 0 # 0 for single-step only
@@ -285,7 +285,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 				ϵ₀ = 5.0, # 5.0
 				max_inner_iters = 50, # 20
 				max_outer_iters = 50, # 50
-				tightening_rate = 0.001, # 0.1
+				tightening_rate = 0.01, # 0.1
 				loosening_rate = 0.05, # 0.5
 				min_stepsize = 1e-5,
 				z₀ = warmstart_solution,
