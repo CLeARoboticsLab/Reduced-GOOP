@@ -257,7 +257,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 
 	num_players = 2
 	control_bounds = (; lb = [-2.0, -2.0], ub = [2.0, 2.0])
-	dynamics = planar_double_integrator(; dt = 0.4, control_bounds) # x := (px, py, vx, vy) and u := (ax, ay).
+	dynamics = planar_double_integrator(; dt = 0.2, control_bounds) # x := (px, py, vx, vy) and u := (ax, ay).
 	planning_horizon = 15
 	collision_avoidance = 1.5
 
@@ -289,8 +289,8 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 				ϵ₀ = 5.0, # 5.0
 				max_inner_iters = 50, # 20
 				max_outer_iters = 50, # 50
-				tightening_rate = 0.01, # 0.1
-				loosening_rate = 0.05, # 0.5
+				tightening_rate = 0.001, # 0.1
+				loosening_rate = 0.02, # 0.5
 				min_stepsize = 1e-5,
 				z₀ = warmstart_solution,
 				verbose = true,
@@ -333,8 +333,8 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 
 	obstacle_position = Observable([0.25, 0.15]) # placeholder
 	# Player 1
-	initial_state1 = Observable([-6.0, -1.0, 1.5, 0.0])
-	# initial_state1 = Observable([-4.16585, -1.21562, 2.16838, -0.431245])
+	# initial_state1 = Observable([-6.0, -1.0, 1.5, 0.0])
+	initial_state1 = Observable([-5.660, -1.00, 1.898, -0.0014]) #, Observable([-5.240, -1.004, 2.297, -0.040])
 	goal_position1 = Observable([6.0, -1.0])
 	θ1 = GLMakie.@lift flatten_parameters(; # θ is a flat (column) vector of parameters
 		initial_state = $initial_state1,
@@ -343,8 +343,8 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 	)
 
 	# Player 2
-	initial_state2 = Observable([1.0, -5.0, 0.0, 1.0])
-	# initial_state2 = Observable([0.808618, -3.75084, -0.382764, 1.49955])
+	# initial_state2 = Observable([1.0, -5.0, 0.0, 1.0])
+	initial_state2 = Observable([1.1015, -4.764, 0.153, 1.359])#, Observable([1.057, -4.457, 0.263, 1.712])
 	goal_position2 = Observable([1.0, 6.0])
 	θ2 = GLMakie.@lift flatten_parameters(;
 		initial_state = $initial_state2,
@@ -369,7 +369,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 		problem_data,
 	)
 
-	# Warmstart solution
+	# Warmstart solution (TODO: optimize this code)
 	warmstart_x = [[initial_state1[]], [initial_state2[]]]
 	warmstart_u = [[[1.0, 0.0]], [[0.0, 2.0]]] # some constant control
 	warmstart_solution = build_warmstart_solution(num_players, planning_horizon, dynamics, warmstart_x, warmstart_u)
@@ -377,7 +377,10 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 
 	strategy = GLMakie.@lift let
 		result = get_receding_horizon_solution($θ; warmstart_solution)
-		warmstart_solution = nothing # TODO
+		# update warmstart for next iteration
+		next_x = [[result[i].xs[2]] for i in 1:num_players]
+		next_u = [[[0.0, 0.0]], [[0.0, 0.0]]] # [[result[i].us[2]] for i in 1:num_players]
+		warmstart_solution = build_warmstart_solution(num_players, planning_horizon, dynamics, next_x, next_u) 
 		result
 	end
 
@@ -399,7 +402,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 
 	# closed_loop + receding horizon demo
 	time_step = 1
-	while time_step < 1 #15
+	while time_step <= 10 #15
 		println("time_step: ", time_step)
 		GLMakie.save("data/Intersection_closed_loop/trajectory$(time_step-1).png", figure)
 		# Update the positions of the vehicles
