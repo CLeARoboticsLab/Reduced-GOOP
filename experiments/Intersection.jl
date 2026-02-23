@@ -251,7 +251,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 	# Problem setup
 	num_players = 2
 	control_bounds = (; lb = [-2.0, -2.0], ub = [2.0, 2.0])
-	dynamics = planar_double_integrator(; dt = 0.4, control_bounds) # x := (px, py, vx, vy) and u := (ax, ay).
+	dynamics = planar_double_integrator(; dt = 0.3, control_bounds) # x := (px, py, vx, vy) and u := (ax, ay).
 	planning_horizon = 15
 	collision_avoidance = 1.5
 	num_instances = 10
@@ -286,7 +286,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 				max_inner_iters = 50, # 20
 				max_outer_iters = 50, # 50
 				tightening_rate = 0.001, # 0.1
-				loosening_rate = 0.005, # 0.5
+				loosening_rate = 0.05, # 0.5
 				min_stepsize = 1e-5,
 				z₀ = warmstart_solution,
 				verbose = true,
@@ -361,7 +361,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 	# Player 2
 	initial_state2 = Observable([1.0, -5.0, 0.0, 1.0])
 	# initial_state2 = Observable([1.1015, -4.764, 0.153, 1.359])#, Observable([1.057, -4.457, 0.263, 1.712])
-	goal_position2 = Observable([1.0, 6.0])
+	goal_position2 = Observable([1.0, 6.5])
 	θ2 = GLMakie.@lift flatten_parameters(;
 		initial_state = $initial_state2,
 		goal_position = $goal_position2,
@@ -387,7 +387,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 
 	# Warmstart solution (TODO: optimize this code)
 	warmstart_x = [[initial_state1[]], [initial_state2[]]]
-	warmstart_u = [[[1.0, 0.0]], [[0.0, 2.0]]] # some constant control
+	warmstart_u = [[[1.5, 0.0]], [[0.0, 3.0]]] # some constant control
 	warmstart_solution = build_warmstart_solution(num_players, planning_horizon, dynamics, warmstart_x, warmstart_u)
 	# warmstart_solution = nothing 
 
