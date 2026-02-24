@@ -30,6 +30,7 @@ Keyword arguments:
 	- `tightening_rate::Real = 0.1`: the rate at which to tighten the tolerance.
 	- `loosening_rate::Real = 0.5`: the rate at which to loosen the tolerance.
 	- `min_stepsize::Real = 1e-2`: the minimum step size for the linesearch.
+	- `linesearch::Symbol = :backtracking`: linesearch mode (`:backtracking` or `:fraction_to_boundary`).
 	- `verbose::Bool = false`: whether to print debug information.
 	- `linear_solve_algorithm::LinearSolve.SciMLLinearSolveAlgorithm`: the linear solve algorithm to use. Any solver from `LinearSolve.jl` that can handle nonsquare system can be used.
 	- `convergence_log::Union{Nothing,AbstractDict} = nothing`: optional output dictionary populated with convergence traces.
@@ -47,6 +48,7 @@ function solve(
 	tightening_rate = 0.1,
 	loosening_rate = 0.5,
 	min_stepsize = 1e-4,
+	linesearch = :backtracking,
 	verbose = false,
 	linear_solve_algorithm = LinearSolve.KrylovJL_LSMR(), # LinearSolve.KrylovJL_LSMR(), # KrylovJL_CRAIGMR() for non-square KKT systems
 	convergence_log = nothing,
@@ -98,6 +100,8 @@ function solve(
 	η = η₀
 
 	status = :solved
+	linesearch ∈ (:backtracking, :fraction_to_boundary) ||
+		throw(ArgumentError("Unsupported linesearch $(linesearch). Use :backtracking or :fraction_to_boundary."))
 	total_iters = 0
 	inner_iters = 1
 	outer_iters = 1
@@ -144,26 +148,50 @@ function solve(
 
 			# verbose && println("current δx: ", round.(δz[mcp.primal_dims]; digits = 4))
 
+			if linesearch == :fraction_to_boundary
+				α_σ = fraction_to_the_boundary_linesearch(σ, δσ; tol = min_stepsize)
+				α_γ = fraction_to_the_boundary_linesearch(γ, δγ; tol = min_stepsize)
+				verbose && println("fraction_to_boundary linesearch α_σ = $α_σ, α_γ = $α_γ")
+				if isnan(α_σ) || isnan(α_γ)
+					verbose && @warn "Fraction-to-boundary linesearch failed. Exiting prematurely."
+					status = :failed
+					break
+				end
 
-			# Fraction to the boundary linesearch.
-			α_σ = fraction_to_the_boundary_linesearch(σ, δσ; tol = min_stepsize)
-			α_γ = fraction_to_the_boundary_linesearch(γ, δγ; tol = min_stepsize)
-
-			verbose && println("α_σ = $α_σ, α_γ = $α_γ")
-
-			if isnan(α_γ) || isnan(α_σ)
-				verbose && @warn "Linesearch failed. Exiting prematurely."
-				status = :failed
-				break
-			end
-
-			# Update regularization parameter.
-			if min(α_σ, α_γ) == 1.0
-				verbose && printstyled("Full step taken... Decreasing η. ($η -> $(η * (1 - exp(-tightening_rate * inner_iters))))\n"; color = :blue)
-				η *= 1 - exp(-tightening_rate * inner_iters)
+				# Update regularization parameter.
+				if min(α_σ, α_γ) == 1.0
+					verbose && printstyled("Full step taken... Decreasing η. ($η -> $(η * (1 - exp(-tightening_rate * inner_iters))))\n"; color = :blue)
+					η *= 1 - exp(-tightening_rate)
+				else
+					verbose && printstyled("Partial step (<1.0) taken... Increasing η. ($η -> $(η * (1 + exp(-loosening_rate * inner_iters))))\n"; color = :red)
+					η *= 1 + exp(-loosening_rate)
+				end
 			else
-				verbose && printstyled("Partial step (<1.0) taken... Increasing η. ($η -> $(η * (1 + exp(-loosening_rate * inner_iters))))\n"; color = :red)
-				η *= 1 + exp(-loosening_rate * inner_iters)
+				# backtracking linesearch
+				α = 1.0
+				F_z = norm(F, Inf)
+				z_trial = similar(z)
+				@. z_trial = z + α * δz
+				mcp.F!(F, z_trial; θ, ϵ, η)
+				F_z_next = norm(F, Inf)
+				while F_z_next >= F_z || any(@. σ + α * δσ < 0) || any(@. γ + α * δγ < 0)
+					if α < min_stepsize
+						verbose && @warn "Backtracking linesearch failed. Exiting prematurely."
+						status = :failed
+						break
+					end
+
+					α *= 0.7 # decay
+					@. z_trial = z + α * δz
+					mcp.F!(F, z_trial; θ, ϵ, η)
+					F_z_next = norm(F, Inf)
+				end
+				if status === :failed
+					break
+				end
+				verbose && println("backtracking linesearch α = $α")
+				α_σ = α
+				α_γ = α
 			end
 
 			# Update variables accordingly.
@@ -184,6 +212,7 @@ function solve(
 
 			inner_iters += 1
 		end
+
 		if has_convergence_log &&
 		   !isempty(total_iteration_history) &&
 		   (isempty(outer_end_total_iterations) || last(outer_end_total_iterations) != total_iters)
@@ -195,12 +224,19 @@ function solve(
 			break
 		end
 
-		ϵ *= if status === :solved
-			1 - exp(-tightening_rate * inner_iters)
+		if linesearch == :fraction_to_boundary
+			ϵ *= if status === :solved
+				1 - exp(-tightening_rate)
+			else
+				1 + exp(-loosening_rate)
+			end
+			ϵ = min(ϵ, one(ϵ))
 		else
-			1 + exp(-loosening_rate * inner_iters)
+			if status === :solved
+				ϵ *= 0.7
+			end
 		end
-		ϵ = min(ϵ, one(ϵ))
+
 		outer_iters += 1
 	end
 

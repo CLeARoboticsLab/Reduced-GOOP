@@ -6,10 +6,11 @@ using TrajectoryGamesBase:
 using GLMakie: GLMakie, Observable
 using LaTeXStrings: @L_str
 using BlockArrays
-using JLD2, ProgressMeter, Dates
+using JLD2, ProgressMeter, Dates, Distributions
+using Random
 using QuasiGOOP
 
-include("IntersectionPlotting.jl")
+include(joinpath(@__DIR__, "IntersectionPlotting.jl"))
 
 function get_setup(
 	num_players;
@@ -280,8 +281,8 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 				QuasiGOOP.InteriorPoint(),
 				GOOP_kkt_system,
 				θ;
-				tol = 5e-3, # 5e-3
-				η₀ = 0.5, # 0.5
+				tol = 1e-3, # 5e-3
+				η₀ = 0.01, # 0.5
 				ϵ₀ = 5.0, # 5.0
 				max_inner_iters = 50, # 20
 				max_outer_iters = 50, # 50
@@ -291,11 +292,12 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 				z₀ = warmstart_solution,
 				verbose = true,
 				convergence_log = convergence_log,
+				linesearch = :backtracking, # :backtracking, :fraction_to_boundary
 			)
 		end
 		push!(runtime, elapsed_time)
 		if status == :failed
-			error("GOOP solver failed to converge.")
+			return nothing
 		end
 
 		strategies = mapreduce(vcat, 1:num_players) do i
@@ -326,162 +328,119 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 			"outer_end_total_iterations" => get(convergence_log, "outer_end_total_iterations", Int[]),
 			"outer_end_trace_indices" => get(convergence_log, "outer_end_trace_indices", Int[]),
 		)
-		file_name = "intersection_"*string(now())*".jld2"
-		# JLD2.save_object(
-		# 	"./data/Intersection_closed_loop/GOOP_solution/$(file_name)",
-		# 	solution_dict,
-		# )
+		(; strategies, solution_dict)
+	end
 
-		convergence_fig, _ = plot_convergence_plot(
+	obstacle_position = [0.25, 0.15] # placeholder
+	base_initial_state1 = [-6.0, -1.0, 1.5, 0.0]
+	base_initial_state2 = [1.0, -5.0, 0.0, 1.0]
+	goal_position1 = [6.0, -1.0]
+	goal_position2 = [1.0, 6.5]
+	perturbation_scale = 0.1
+
+	instance_problem_data = Dict{String,Any}[]
+	log_kkt_error_histories = Vector{Float64}[]
+	solved_attempts = 0
+	total_attempts = 0
+
+	while solved_attempts < num_instances
+		total_attempts += 1 
+		initial_state1 = base_initial_state1 .+ rand(Uniform(-perturbation_scale, perturbation_scale), state_dim(dynamics))
+		initial_state2 = base_initial_state2 .+ rand(Uniform(-perturbation_scale, perturbation_scale), state_dim(dynamics))
+		println(
+			"solved $(solved_attempts)/$(num_instances), attempt $(total_attempts): "
+		)
+		println("initial_state1:", initial_state1)
+		println("goal_position1:", goal_position1)
+		println("initial_state2:", initial_state2)
+		println("goal_position2:", goal_position2)
+
+		θ1 = flatten_parameters(;
+			initial_state = initial_state1,
+			goal_position = goal_position1,
+			obstacle_position = obstacle_position,
+		)
+		θ2 = flatten_parameters(;
+			initial_state = initial_state2,
+			goal_position = goal_position2,
+			obstacle_position = obstacle_position,
+		)
+		θ = [θ1..., θ2...]
+
+		warmstart_x = [[initial_state1], [initial_state2]]
+		warmstart_u = [[[1.5, 0.0]], [[0.0, 3.0]]] # some constant control
+		warmstart_solution = build_warmstart_solution(
+			num_players,
+			planning_horizon,
+			dynamics,
+			warmstart_x,
+			warmstart_u,
+		)
+
+		result = try
+			get_receding_horizon_solution(θ; warmstart_solution)
+		catch err
+			rethrow(err)
+		end
+		if isnothing(result)
+			println(
+				"attempt $(total_attempts): failed to converge, resampling.",
+			)
+			# TODO: Speed this up using GLMakie observable, toggling  only initial state
+			continue
+		end
+
+		push!(instance_problem_data, Dict(
+			"attempt_idx" => total_attempts,
+			"initial_state1" => initial_state1,
+			"goal_position1" => goal_position1,
+			"initial_state2" => initial_state2,
+			"goal_position2" => goal_position2,
+		))
+
+		strategies = result.strategies
+		kkt_error_history = result.solution_dict["kkt_error_history"]
+		push!(log_kkt_error_histories, log10.(max.(kkt_error_history, eps(Float64))))
+
+		figure, _ = plot_intersection_trajectories(
 			;
-			kkt_error_history = solution_dict["kkt_error_history"],
-			total_iteration_history = solution_dict["total_iteration_history"],
-			outer_end_total_iterations = solution_dict["outer_end_total_iterations"],
-			outer_end_trace_indices = solution_dict["outer_end_trace_indices"],
+			map_end,
+			lane_width,
+			strategy = Observable(strategies),
+			θ1 = Observable(θ1),
+			θ2 = Observable(θ2),
+			goal_position1 = Observable(goal_position1),
+			goal_position2 = Observable(goal_position2),
 		)
-		convergence_plot_name = replace(file_name, ".jld2" => "_convergence.png")
+
+
+		JLD2.save_object(
+		"./data/Intersection_closed_loop/problem/problem_data_$(solved_attempts).jld2",
+		instance_problem_data,
+		)
+
+		solved_attempts += 1
 		GLMakie.save(
-			"./data/Intersection_closed_loop/GOOP_plots/$(convergence_plot_name)",
-			convergence_fig,
+			"data/Intersection_closed_loop/trajectory_instance_$(solved_attempts).png",
+			figure,
 		)
-		strategies
 	end
 
-	obstacle_position = Observable([0.25, 0.15]) # placeholder
-	# Player 1
-	initial_state1 = Observable([-6.0, -1.0, 1.5, 0.0])
-	# initial_state1 = Observable([-5.660, -1.00, 1.898, -0.0014]) #, Observable([-5.240, -1.004, 2.297, -0.040])
-	goal_position1 = Observable([6.0, -1.0])
-	θ1 = GLMakie.@lift flatten_parameters(; # θ is a flat (column) vector of parameters
-		initial_state = $initial_state1,
-		goal_position = $goal_position1,
-		obstacle_position = $obstacle_position,
-	)
-
-	# Player 2
-	initial_state2 = Observable([1.0, -5.0, 0.0, 1.0])
-	# initial_state2 = Observable([1.1015, -4.764, 0.153, 1.359])#, Observable([1.057, -4.457, 0.263, 1.712])
-	goal_position2 = Observable([1.0, 6.5])
-	θ2 = GLMakie.@lift flatten_parameters(;
-		initial_state = $initial_state2,
-		goal_position = $goal_position2,
-		obstacle_position = $obstacle_position,
-	)
-	θ = GLMakie.@lift [$θ1..., $θ2...]
-
-	println("initial_state1:", initial_state1)
-	println("goal_position1:", goal_position1)
-	println("initial_state2:", initial_state2)
-	println("goal_position2:", goal_position2)
-
-	problem_data = Dict(
-		"initial_state1" => initial_state1[],
-		"goal_position1" => goal_position1[],
-		"initial_state2" => initial_state2[],
-		"goal_position2" => goal_position2[],
-	)
-	JLD2.save_object(
-		"./data/Intersection_closed_loop/problem/problem_data.jld2",
-		problem_data,
-	)
-
-	# Warmstart solution (TODO: optimize this code)
-	warmstart_x = [[initial_state1[]], [initial_state2[]]]
-	warmstart_u = [[[1.5, 0.0]], [[0.0, 3.0]]] # some constant control
-	warmstart_solution = build_warmstart_solution(num_players, planning_horizon, dynamics, warmstart_x, warmstart_u)
-	# warmstart_solution = nothing 
-
-	strategy = GLMakie.@lift let
-		result = get_receding_horizon_solution($θ; warmstart_solution)
-		# update warmstart for next iteration
-		next_x = [[result[i].xs[2]] for i in 1:num_players]
-		next_u = [[[0.0, 0.0]], [[0.0, 0.0]]] # [[result[i].us[2]] for i in 1:num_players]
-		warmstart_solution = build_warmstart_solution(num_players, planning_horizon, dynamics, next_x, next_u) 
-		result
-	end
-
-	figure, ax = plot_intersection_trajectories(
+	aggregate_convergence_fig, _ = plot_convergence_plot_aggregate(
 		;
-		map_end,
-		lane_width,
-		strategy,
-		θ1,
-		θ2,
-		goal_position1,
-		goal_position2,
+		log_kkt_error_histories,
+	)
+	GLMakie.save(
+		"./data/Intersection_closed_loop/GOOP_plots/convergence_aggregate.png",
+		aggregate_convergence_fig,
 	)
 
-	# Save img 
-	# Main.@infiltrate
-	GLMakie.save("data/Intersection_closed_loop/trajectory.png", figure)
-	Main.@infiltrate
+	JLD2.save_object(
+		"./data/Intersection_closed_loop/problem/log_kkt_error_histories.jld2",
+		log_kkt_error_histories,
+	)
 
-	# closed_loop + receding horizon demo
-	time_step = 1
-	while time_step <= receding_horizon_steps
-		println("time_step: ", time_step)
-		GLMakie.save("data/Intersection_closed_loop/trajectory$(time_step-1).png", figure)
-		# Update the positions of the vehicles
-		println("Update initial state1")
-		θ1.val[1:state_dim(dynamics)] = first(strategy[]).xs[begin+1] # Asynchronous update: mutate p1's initial state without triggering others
-		println("Update initial state2")
-		initial_state2[] = strategy[][2].xs[begin+1]
-		# Main.@infiltrate
-		time_step += 1
-	end
-
-	# Store speed data for Intersection
-	horizontal_speed_data = Vector{Vector{Float64}}[]
-	vertical_speed_data = Vector{Vector{Float64}}[]
-	openloop_distance1 = Vector{Float64}[]
-
-	# Store openloop speed data
-	push!(horizontal_speed_data, [vcat(strategy[][1].xs...)[3:4:end], vcat(strategy[][2].xs...)[3:4:end]])#, vcat(strategy[3].xs...)[3:4:end]])
-	push!(vertical_speed_data, [vcat(strategy[][1].xs...)[4:4:end], vcat(strategy[][2].xs...)[4:4:end]])#, vcat(strategy[3].xs...)[4:4:end]])
-
-	# Store openloop distance data
-	push!(openloop_distance1, [sqrt(sum((strategy[][1].xs[k][1:2] - strategy[][2].xs[k][1:2]) .^ 2)) for k in 1:planning_horizon])
-
-	# Visualize horizontal speed
-	T = 1
-	fig = GLMakie.Figure() # limits = (nothing, (nothing, 0.7))
-	ax2 = GLMakie.Axis(fig[1, 1]; xlabel = "time step", ylabel = "speed", title = "Horizontal Speed")
-	GLMakie.scatterlines!(ax2, 0:(planning_horizon-1), horizontal_speed_data[T][1], label = "Vehicle 1", color = :blue)
-	GLMakie.scatterlines!(ax2, 0:(planning_horizon-1), horizontal_speed_data[T][2], label = "Vehicle 2", color = :red)
-	GLMakie.lines!(ax2, 0:(planning_horizon-1), [1.5 for _ in 0:(planning_horizon-1)], color = :black, linestyle = :dash)
-	fig[2, 1:2] = GLMakie.Legend(fig, ax2, framevisible = false, orientation = :horizontal)
-
-	# Visualize vertical speed
-	ax3 = GLMakie.Axis(fig[1, 2]; xlabel = "time step", ylabel = "speed", title = "Vertical Speed")
-	GLMakie.scatterlines!(ax3, 0:(planning_horizon-1), vertical_speed_data[T][1], label = "Vehicle 1", color = :blue)
-	GLMakie.scatterlines!(ax3, 0:(planning_horizon-1), vertical_speed_data[T][2], label = "Vehicle 2", color = :red)
-	GLMakie.lines!(ax3, 0:(planning_horizon-1), [1.5 for _ in 0:(planning_horizon-1)], color = :black, linestyle = :dash)
-
-	GLMakie.save("./data/Intersection_closed_loop/GOOP_plots/speed.png", fig)
-
-	# Visualize distance bw vehicles , limits = (nothing, (collision_avoidance-0.05, 0.4)) 
-	fig = GLMakie.Figure() # limits = (nothing, (nothing, 0.7))
-	ax4 = GLMakie.Axis(fig[1, 1]; xlabel = "time step", ylabel = "distance", title = "Distance bw vehicles")
-	GLMakie.scatterlines!(ax4, 0:(planning_horizon-1), openloop_distance1[T], label = "B/w Agent 1 & Agent 2", color = :black, marker = :star5, markersize = 20)
-	GLMakie.lines!(ax4, 0:(planning_horizon-1), [1.0 for _ in 0:(planning_horizon-1)], color = :black, linestyle = :dash)
-	fig[2, 1] = GLMakie.Legend(fig, ax4, framevisible = false, orientation = :horizontal)
-
-	GLMakie.save("./data/Intersection_closed_loop/GOOP_plots/" * "distance_bw_vehicles.png", fig)
-
-	# Store distance from center yellow line 
-	distance_from_center = Vector{Vector{Float64}}[]
-	push!(distance_from_center, [vcat(strategy[][1].xs...)[2:4:end], vcat(-strategy[][2].xs...)[1:4:end]])#, vcat(strategy[3].xs...)[2:4:end]])
-
-	# Visualize distance from center yellow line
-	fig = GLMakie.Figure() # limits = (nothing, (nothing, 0.7))
-	ax5 = GLMakie.Axis(fig[1, 1]; xlabel = "time step", ylabel = "distance", title = "Position from center yellow line")
-	GLMakie.scatterlines!(ax5, 0:(planning_horizon-1), distance_from_center[T][1], label = "Vehicle 1", color = :blue)
-	GLMakie.scatterlines!(ax5, 0:(planning_horizon-1), distance_from_center[T][2], label = "Vehicle 2", color = :red)
-	GLMakie.lines!(ax5, 0:(planning_horizon-1), [0.0 for _ in 0:(planning_horizon-1)], color = :black, linestyle = :dash)
-	fig[2, 1] = GLMakie.Legend(fig, ax5, framevisible = false, orientation = :horizontal)
-
-	GLMakie.save("./data/Intersection_closed_loop/GOOP_plots/" * "position_from_center.png", fig)
-
+	return (; log_kkt_error_histories)
 end
 
 function build_warmstart_solution(num_players, planning_horizon, dynamics, warmstart_x, warmstart_u)
