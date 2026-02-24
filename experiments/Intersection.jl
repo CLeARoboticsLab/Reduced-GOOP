@@ -255,7 +255,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 	dynamics = planar_double_integrator(; dt = 0.3, control_bounds) # x := (px, py, vx, vy) and u := (ax, ay).
 	planning_horizon = 15
 	collision_avoidance = 1.5
-	num_instances = 10
+	num_instances = 50
 	receding_horizon_steps = 0 # 0 for single-step only
 
 	(; problem, flatten_parameters) = get_setup(
@@ -282,7 +282,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 				GOOP_kkt_system,
 				θ;
 				tol = 1e-3, # 5e-3
-				η₀ = 0.01, # 0.5
+				η₀ = 0.0, # 0.5
 				ϵ₀ = 5.0, # 5.0
 				max_inner_iters = 50, # 20
 				max_outer_iters = 50, # 50
@@ -336,7 +336,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false)
 	base_initial_state2 = [1.0, -5.0, 0.0, 1.0]
 	goal_position1 = [6.0, -1.0]
 	goal_position2 = [1.0, 6.5]
-	perturbation_scale = 0.1
+	perturbation_scale = 0.5
 
 	instance_problem_data = Dict{String,Any}[]
 	log_kkt_error_histories = Vector{Float64}[]

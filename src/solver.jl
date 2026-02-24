@@ -169,22 +169,22 @@ function solve(
 			else
 				# backtracking linesearch
 				α = 1.0
-				F_z = norm(F, Inf)
+				F_z = norm(F, 2)
 				z_trial = similar(z)
 				@. z_trial = z + α * δz
 				mcp.F!(F, z_trial; θ, ϵ, η)
-				F_z_next = norm(F, Inf)
-				while F_z_next >= F_z || any(@. σ + α * δσ < 0) || any(@. γ + α * δγ < 0)
+				F_z_next = norm(F, 2)
+				while (F_z_next >= F_z) || (any(@. σ + α * δσ < 0) || any(@. γ + α * δγ < 0))
 					if α < min_stepsize
 						verbose && @warn "Backtracking linesearch failed. Exiting prematurely."
 						status = :failed
 						break
 					end
 
-					α *= 0.7 # decay
+					α *= 0.5 # decay
 					@. z_trial = z + α * δz
 					mcp.F!(F, z_trial; θ, ϵ, η)
-					F_z_next = norm(F, Inf)
+					F_z_next = norm(F, 2)
 				end
 				if status === :failed
 					break
@@ -200,7 +200,7 @@ function solve(
 			@. σ += α_σ * δσ
 			@. γ += α_γ * δγ
 
-			kkt_error = norm(F, Inf)
+			kkt_error = norm(F, 2)
 			if has_convergence_log
 				push!(kkt_error_history, kkt_error)
 				push!(total_iteration_history, total_iters)
