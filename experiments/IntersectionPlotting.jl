@@ -258,7 +258,7 @@ function plot_convergence_plot_aggregate(; log_kkt_error_histories)
 	ax = GLMakie.Axis(
 		figure[1, 1];
 		xlabel = L"\text{iteration} ~\ell",
-		ylabel = L"$\log(|| \mathcal{K}_{\rho}^{(\ell)} ||_2$",
+		ylabel = L"$\log(|| \mathcal{K}_{\rho}^{(\ell)} ||_2)$",
 	)
 
 	GLMakie.band!(ax, x, y_lower, y_upper; color = (:dodgerblue, 0.25))

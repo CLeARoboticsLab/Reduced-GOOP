@@ -118,8 +118,8 @@ function solve(
 		status = :solved
 
 		verbose && @info "Outer iteration $(outer_iters): ϵ = $ϵ, kkt_error = $kkt_error"
-		# Main.@infiltrate
-		while kkt_error > ϵ && inner_iters < max_inner_iters
+		
+		while kkt_error > tol && inner_iters < max_inner_iters
 			total_iters += 1
 			# Compute the Newton step.
 			# TODO: Can add some adaptive regularization.
@@ -220,28 +220,23 @@ function solve(
 			push!(outer_end_trace_indices, length(total_iteration_history))
 		end
 
-		if kkt_error <= ϵ <= tol
-			break
-		end
-
 		if linesearch == :fraction_to_boundary
+			if kkt_error <= ϵ <= tol
+				break
+			end
 			ϵ *= if status === :solved
 				1 - exp(-tightening_rate)
 			else
 				1 + exp(-loosening_rate)
 			end
 			ϵ = min(ϵ, one(ϵ))
-		else
-			if status === :solved
-				ϵ *= 0.7
-			end
 		end
 
 		outer_iters += 1
 	end
-
+	
 	if outer_iters == max_outer_iters
-		status = :failed
+		status = (kkt_error <= tol) ? :solved : :failed
 	end
 	if has_convergence_log
 		convergence_log["kkt_error_history"] = kkt_error_history
