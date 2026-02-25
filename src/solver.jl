@@ -119,7 +119,8 @@ function solve(
 
 		verbose && @info "Outer iteration $(outer_iters): ϵ = $ϵ, kkt_error = $kkt_error"
 		
-		while kkt_error > tol && inner_iters < max_inner_iters
+		# while kkt_error > tol && inner_iters < max_inner_iters
+		while inner_iters < max_inner_iters
 			total_iters += 1
 			# Compute the Newton step.
 			# TODO: Can add some adaptive regularization.

@@ -222,20 +222,20 @@ function plot_convergence_plot(;
 	return figure, ax
 end
 
-function plot_convergence_plot_aggregate(; log_kkt_error_histories)
-	if isempty(log_kkt_error_histories)
-		error("log_kkt_error_histories must be non-empty.")
+function plot_convergence_plot_aggregate(; kkt_error_histories)
+	if isempty(kkt_error_histories)
+		error("kkt_error_histories must be non-empty.")
 	end
 
-	max_trace_length = maximum(length, log_kkt_error_histories)
-	num_instances = length(log_kkt_error_histories)
-	mean_log_kkt_error = fill(NaN, max_trace_length)
-	std_log_kkt_error = fill(NaN, max_trace_length)
+	max_trace_length = maximum(length, kkt_error_histories)
+	num_instances = length(kkt_error_histories)
+	mean_kkt_error = fill(NaN, max_trace_length)
+	std_kkt_error = fill(NaN, max_trace_length)
 
 	for iteration_idx in 1:max_trace_length
 		values_at_iteration = Float64[]
 		for instance_idx in 1:num_instances
-			trace = log_kkt_error_histories[instance_idx]
+			trace = kkt_error_histories[instance_idx]
 			if iteration_idx <= length(trace)
 				push!(values_at_iteration, trace[iteration_idx])
 			end
@@ -243,16 +243,20 @@ function plot_convergence_plot_aggregate(; log_kkt_error_histories)
 		if !isempty(values_at_iteration)
 			mean_value = sum(values_at_iteration) / length(values_at_iteration)
 			variance = sum((v - mean_value)^2 for v in values_at_iteration) / length(values_at_iteration)
-			mean_log_kkt_error[iteration_idx] = mean_value
-			std_log_kkt_error[iteration_idx] = sqrt(variance)
+			mean_kkt_error[iteration_idx] = mean_value
+			std_kkt_error[iteration_idx] = sqrt(variance)
 		end
 	end
 
-	valid_indices = findall(!isnan, mean_log_kkt_error)
+	# Main.@infiltrate
+
+	valid_indices = findall(!isnan, mean_kkt_error)
 	x = collect(valid_indices)
-	y_mean = mean_log_kkt_error[valid_indices]
-	y_lower = y_mean .- std_log_kkt_error[valid_indices]
-	y_upper = y_mean .+ std_log_kkt_error[valid_indices]
+	y_mean = mean_kkt_error[valid_indices]
+	y_lower = y_mean .- std_kkt_error[valid_indices]
+	y_upper = y_mean .+ std_kkt_error[valid_indices]
+
+	# Main.@infiltrate
 
 	figure = GLMakie.Figure()
 	ax = GLMakie.Axis(
@@ -261,6 +265,7 @@ function plot_convergence_plot_aggregate(; log_kkt_error_histories)
 		ylabel = L"$\log(|| \mathcal{K}_{\rho}^{(\ell)} ||_2)$",
 	)
 
+	# Main.@infiltrate
 	GLMakie.band!(ax, x, y_lower, y_upper; color = (:dodgerblue, 0.25))
 	GLMakie.lines!(ax, x, y_mean; color = :dodgerblue, linewidth = 3)
 	set_unit_interval_yticks!(ax, y_lower, y_upper)

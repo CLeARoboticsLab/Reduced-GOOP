@@ -285,7 +285,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 1234)
 				tol = 1e-4, # 5e-3
 				η₀ = 0.0, # 0.5
 				ϵ₀ = 1.0, # 5.0
-				max_inner_iters = 50, # 20
+				max_inner_iters = 35, # 20
 				max_outer_iters = 2, # 50
 				tightening_rate = 0.001, # 0.1
 				loosening_rate = 0.05, # 0.5
@@ -340,7 +340,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 1234)
 	perturbation_scale = 0.1
 
 	instance_problem_data = Dict{String,Any}[]
-	log_kkt_error_histories = Vector{Float64}[]
+	kkt_error_histories = Vector{Float64}[]
 	solved_attempts = 0
 	total_attempts = 0
 
@@ -401,7 +401,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 1234)
 
 		strategies = result.strategies
 		kkt_error_history = result.solution_dict["kkt_error_history"]
-		push!(log_kkt_error_histories, log10.(max.(kkt_error_history, eps(Float64))))
+		push!(kkt_error_histories, log10.(kkt_error_history))
 
 		figure, _ = plot_intersection_trajectories(
 			;
@@ -429,7 +429,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 1234)
 
 	aggregate_convergence_fig, _ = plot_convergence_plot_aggregate(
 		;
-		log_kkt_error_histories,
+		kkt_error_histories,
 	)
 	GLMakie.save(
 		"./data/Intersection_closed_loop/GOOP_plots/convergence_aggregate.png",
@@ -437,11 +437,11 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 1234)
 	)
 
 	JLD2.save_object(
-		"./data/Intersection_closed_loop/problem/log_kkt_error_histories.jld2",
-		log_kkt_error_histories,
+		"./data/Intersection_closed_loop/problem/kkt_error_histories.jld2",
+		kkt_error_histories,
 	)
 
-	return (; log_kkt_error_histories)
+	return (; kkt_error_histories)
 end
 
 function build_warmstart_solution(num_players, planning_horizon, dynamics, warmstart_x, warmstart_u)
