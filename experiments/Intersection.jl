@@ -248,7 +248,7 @@ function get_setup(
 	(; problem, flatten_parameters)
 end
 
-function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 1234)
+function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 	Random.seed!(rng_seed)
 
 	# Problem setup
@@ -257,8 +257,9 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 1234)
 	dynamics = planar_double_integrator(; dt = 0.3, control_bounds) # x := (px, py, vx, vy) and u := (ax, ay).
 	planning_horizon = 15
 	collision_avoidance = 1.5
-	num_instances = 2
-	epsilon_schedule = [1.0]
+	num_instances = 10
+	epsilon_schedule = [1.0, 0.1]
+	max_inner_iters_schedule = [35, 50]
 	perturbation_scale = 0.2
 	receding_horizon_steps = 0 # 0 for single-step only
 
@@ -277,7 +278,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 1234)
 	# Run-time record
 	runtime = Float64[]
 
-	function get_receding_horizon_solution(θ; z₀, ϵ₀)
+	function get_receding_horizon_solution(θ; z₀, ϵ₀, max_inner_iters)
 		GOOP_kkt_system = QuasiGOOP.generate_slacked_kkt_system(problem)
 		convergence_log = Dict{String,Any}()
 		elapsed_time = @elapsed begin
@@ -288,7 +289,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 1234)
 				tol = 1e-4, # 5e-3
 				η₀ = 0.0, # 0.5
 				ϵ₀, # 5.0
-				max_inner_iters = 35, # 20
+				max_inner_iters, # 20
 				max_outer_iters = 2, # 50
 				tightening_rate = 0.001, # 0.1
 				loosening_rate = 0.05, # 0.5
@@ -401,9 +402,9 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 1234)
 		epsilon_results = Pair{Float64,Any}[]
 		stage_warmstart = warmstart_solution
 		solve_sequence_succeeded = true
-		for ϵ₀ in epsilon_schedule
+		for (ϵ₀, max_inner_iters) in zip(epsilon_schedule, max_inner_iters_schedule)
 			result = try
-				get_receding_horizon_solution(θ; z₀ = stage_warmstart, ϵ₀)
+				get_receding_horizon_solution(θ; z₀ = stage_warmstart, ϵ₀, max_inner_iters)
 			catch err
 				rethrow(err)
 			end
@@ -495,6 +496,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 1234)
 			"rng_seed" => rng_seed,
 			"num_instances" => num_instances,
 			"epsilon_schedule" => epsilon_schedule,
+			"max_inner_iters_schedule" => max_inner_iters_schedule,
 			"perturbation_scale" => perturbation_scale,
 		),
 	)
