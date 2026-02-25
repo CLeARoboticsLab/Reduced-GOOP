@@ -4,6 +4,7 @@ using TrajectoryGamesExamples: UnicycleDynamics, planar_double_integrator
 using TrajectoryGamesBase:
 	OpenLoopStrategy, unflatten_trajectory, state_dim, control_dim, control_bounds
 using GLMakie: GLMakie, Observable
+using CairoMakie: CairoMakie
 using LaTeXStrings: @L_str
 using BlockArrays
 using JLD2, ProgressMeter, Dates, Distributions
@@ -256,7 +257,9 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 1234)
 	dynamics = planar_double_integrator(; dt = 0.3, control_bounds) # x := (px, py, vx, vy) and u := (ax, ay).
 	planning_horizon = 15
 	collision_avoidance = 1.5
-	num_instances = 10
+	num_instances = 2
+	epsilon_schedule = [1.0]
+	perturbation_scale = 0.2
 	receding_horizon_steps = 0 # 0 for single-step only
 
 	(; problem, flatten_parameters) = get_setup(
@@ -274,7 +277,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 1234)
 	# Run-time record
 	runtime = Float64[]
 
-	function get_receding_horizon_solution(θ; warmstart_solution)
+	function get_receding_horizon_solution(θ; z₀, ϵ₀)
 		GOOP_kkt_system = QuasiGOOP.generate_slacked_kkt_system(problem)
 		convergence_log = Dict{String,Any}()
 		elapsed_time = @elapsed begin
@@ -284,13 +287,13 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 1234)
 				θ;
 				tol = 1e-4, # 5e-3
 				η₀ = 0.0, # 0.5
-				ϵ₀ = 1.0, # 5.0
+				ϵ₀, # 5.0
 				max_inner_iters = 35, # 20
 				max_outer_iters = 2, # 50
 				tightening_rate = 0.001, # 0.1
 				loosening_rate = 0.05, # 0.5
 				min_stepsize = 1e-5,
-				z₀ = warmstart_solution,
+				z₀,
 				verbose = true,
 				convergence_log = convergence_log,
 				linesearch = :backtracking, # :backtracking, :fraction_to_boundary
@@ -328,6 +331,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 1234)
 			"inner_iteration_history" => get(convergence_log, "inner_iteration_history", Int[]),
 			"outer_end_total_iterations" => get(convergence_log, "outer_end_total_iterations", Int[]),
 			"outer_end_trace_indices" => get(convergence_log, "outer_end_trace_indices", Int[]),
+			"runtime" => runtime,
 		)
 		(; strategies, solution_dict)
 	end
@@ -337,10 +341,26 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 1234)
 	base_initial_state2 = [1.0, -5.0, 0.0, 1.0]
 	goal_position1 = [6.0, -1.0]
 	goal_position2 = [1.0, 6.5]
-	perturbation_scale = 0.2
+
+	run_id = "run_1"
+	run_dir = joinpath("data", "Intersection_open_loop", "runs", run_id)
+	data_dir = joinpath(run_dir, "data")
+	problem_data_dir = joinpath(data_dir, "problem")
+	histories_data_dir = joinpath(data_dir, "histories")
+	plots_dir = joinpath(run_dir, "plots")
+	trajectory_plots_dir = joinpath(plots_dir, "trajectories")
+	convergence_plots_dir = joinpath(plots_dir, "convergence")
+	for dir in (
+		problem_data_dir,
+		histories_data_dir,
+		trajectory_plots_dir,
+		convergence_plots_dir,
+	)
+		mkpath(dir)
+	end
 
 	instance_problem_data = Dict{String,Any}[]
-	kkt_error_histories = Vector{Float64}[]
+	kkt_error_histories_per_eps = Dict(ϵ => Vector{Vector{Float64}}() for ϵ in epsilon_schedule)
 	solved_attempts = 0
 	total_attempts = 0
 
@@ -378,16 +398,29 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 1234)
 			warmstart_u,
 		)
 
-		result = try
-			get_receding_horizon_solution(θ; warmstart_solution)
-		catch err
-			rethrow(err)
+		epsilon_results = Pair{Float64,Any}[]
+		stage_warmstart = warmstart_solution
+		solve_sequence_succeeded = true
+		for ϵ₀ in epsilon_schedule
+			result = try
+				get_receding_horizon_solution(θ; z₀ = stage_warmstart, ϵ₀)
+			catch err
+				rethrow(err)
+			end
+			if isnothing(result)
+				println(
+					"attempt $(total_attempts): failed to converge for ϵ₀ = $(ϵ₀), resampling.",
+				)
+				solve_sequence_succeeded = false
+				break
+			end
+			push!(epsilon_results, ϵ₀ => result)
+
+			# warmstart next solve with the previous solution's primal variables
+			stage_warmstart = result.solution_dict["z"][1:num_players * primal_dimension] 
 		end
-		if isnothing(result)
-			println(
-				"attempt $(total_attempts): failed to converge, resampling.",
-			)
-			# TODO: Speed this up using GLMakie observable, toggling  only initial state
+		if !solve_sequence_succeeded
+			# TODO: Speed this up using GLMakie observable, toggling only initial state
 			continue
 		end
 
@@ -399,49 +432,73 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 1234)
 			"goal_position2" => goal_position2,
 		))
 
-		strategies = result.strategies
-		kkt_error_history = result.solution_dict["kkt_error_history"]
-		push!(kkt_error_histories, log10.(kkt_error_history))
-
-		figure, _ = plot_intersection_trajectories(
-			;
-			map_end,
-			lane_width,
-			strategy = Observable(strategies),
-			θ1 = Observable(θ1),
-			θ2 = Observable(θ2),
-			goal_position1 = Observable(goal_position1),
-			goal_position2 = Observable(goal_position2),
-		)
-
-
-		JLD2.save_object(
-		"./data/Intersection_closed_loop/problem/problem_data_$(solved_attempts).jld2",
-		instance_problem_data,
-		)
-
 		solved_attempts += 1
-		GLMakie.save(
-			"data/Intersection_closed_loop/trajectory_instance_$(solved_attempts).png",
-			figure,
+		JLD2.save_object(
+			joinpath(problem_data_dir, "problem_data_instance_$(solved_attempts).jld2"),
+			instance_problem_data,
+		)
+		for (ϵ₀, result) in epsilon_results
+			push!(kkt_error_histories_per_eps[ϵ₀], log10.(result.solution_dict["kkt_error_history"]))
+			convergence_fig, _ = plot_convergence_plot(
+				;
+				kkt_error_history = result.solution_dict["kkt_error_history"],
+				total_iteration_history = result.solution_dict["total_iteration_history"],
+				outer_end_total_iterations = result.solution_dict["outer_end_total_iterations"],
+				outer_end_trace_indices = result.solution_dict["outer_end_trace_indices"],
+			)
+			trajectory_fig, _ = plot_intersection_trajectories(
+				;
+				map_end,
+				lane_width,
+				strategy = Observable(result.strategies),
+				θ1 = Observable(θ1),
+				θ2 = Observable(θ2),
+				goal_position1 = Observable(goal_position1),
+				goal_position2 = Observable(goal_position2),
+			)
+			CairoMakie.save(
+				joinpath(
+					convergence_plots_dir,
+					"convergence_instance_$(solved_attempts)_eps$(ϵ₀).pdf",
+				),
+				convergence_fig,
+			)
+			CairoMakie.save(
+				joinpath(
+					trajectory_plots_dir,
+					"trajectory_instance_$(solved_attempts)_eps$(ϵ₀).pdf",
+				),
+				trajectory_fig,
+			)
+		end
+	end
+
+	for ϵ₀ in epsilon_schedule
+		aggregate_convergence_fig, _ = plot_convergence_plot_aggregate(
+			;
+			kkt_error_histories = kkt_error_histories_per_eps[ϵ₀],
+		)
+		CairoMakie.save(
+			joinpath(convergence_plots_dir, "convergence_aggregate_eps$(ϵ₀).pdf"),
+			aggregate_convergence_fig,
 		)
 	end
 
-	aggregate_convergence_fig, _ = plot_convergence_plot_aggregate(
-		;
-		kkt_error_histories,
-	)
-	GLMakie.save(
-		"./data/Intersection_closed_loop/GOOP_plots/convergence_aggregate.png",
-		aggregate_convergence_fig,
-	)
-
 	JLD2.save_object(
-		"./data/Intersection_closed_loop/problem/kkt_error_histories.jld2",
-		kkt_error_histories,
+		joinpath(histories_data_dir, "kkt_error_histories_per_eps.jld2"),
+		kkt_error_histories_per_eps,
+	)
+	JLD2.save_object(
+		joinpath(problem_data_dir, "run_metadata.jld2"),
+		Dict(
+			"run_id" => run_id,
+			"rng_seed" => rng_seed,
+			"num_instances" => num_instances,
+			"epsilon_schedule" => epsilon_schedule,
+			"perturbation_scale" => perturbation_scale,
+		),
 	)
 
-	return (; kkt_error_histories)
 end
 
 function build_warmstart_solution(num_players, planning_horizon, dynamics, warmstart_x, warmstart_u)

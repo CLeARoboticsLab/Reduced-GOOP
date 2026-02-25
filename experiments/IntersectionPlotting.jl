@@ -1,39 +1,39 @@
 # using TrajectoryGamesBase: OpenLoopStrategy
-# using GLMakie: GLMakie
+using CairoMakie: CairoMakie
 # using LaTeXStrings: @L_str
 
 function draw_intersection_map!(ax; map_end, lane_width, offset = 0.2)
-	vertical_road_background = GLMakie.Polygon(
-		GLMakie.Point2f[
+	vertical_road_background = CairoMakie.Polygon(
+		CairoMakie.Point2f[
 			(-lane_width - offset, -map_end),
 			(lane_width + offset, -map_end),
 			(lane_width + offset, map_end),
 			(-lane_width - offset, map_end),
 		],
 	)
-	GLMakie.poly!(ax, vertical_road_background, color = :white)
-	GLMakie.lines!(
+	CairoMakie.poly!(ax, vertical_road_background, color = :white)
+	CairoMakie.lines!(
 		ax,
 		[-lane_width - offset, -lane_width - offset],
 		[-map_end, -lane_width],
 		color = :black,
 		linewidth = 1,
 	)
-	GLMakie.lines!(
+	CairoMakie.lines!(
 		ax,
 		[-lane_width - offset, -lane_width - offset],
 		[map_end, lane_width],
 		color = :black,
 		linewidth = 1,
 	)
-	GLMakie.lines!(
+	CairoMakie.lines!(
 		ax,
 		[lane_width + offset, lane_width + offset],
 		[-map_end, -lane_width],
 		color = :black,
 		linewidth = 1,
 	)
-	GLMakie.lines!(
+	CairoMakie.lines!(
 		ax,
 		[lane_width + offset, lane_width + offset],
 		[map_end, lane_width],
@@ -41,37 +41,37 @@ function draw_intersection_map!(ax; map_end, lane_width, offset = 0.2)
 		linewidth = 1,
 	)
 
-	horizontal_road_background = GLMakie.Polygon(
-		GLMakie.Point2f[
+	horizontal_road_background = CairoMakie.Polygon(
+		CairoMakie.Point2f[
 			(-map_end, -lane_width - offset),
 			(map_end, -lane_width - offset),
 			(map_end, lane_width + offset),
 			(-map_end, lane_width + offset),
 		],
 	)
-	GLMakie.poly!(ax, horizontal_road_background, color = :white)
-	GLMakie.lines!(
+	CairoMakie.poly!(ax, horizontal_road_background, color = :white)
+	CairoMakie.lines!(
 		ax,
 		[-lane_width - offset, -map_end],
 		[-lane_width - offset, -lane_width - offset],
 		color = :black,
 		linewidth = 1,
 	)
-	GLMakie.lines!(
+	CairoMakie.lines!(
 		ax,
 		[-lane_width - offset, -map_end],
 		[lane_width + offset, lane_width + offset],
 		color = :black,
 		linewidth = 1,
 	)
-	GLMakie.lines!(
+	CairoMakie.lines!(
 		ax,
 		[lane_width + offset, map_end],
 		[lane_width + offset, lane_width + offset],
 		color = :black,
 		linewidth = 1,
 	)
-	GLMakie.lines!(
+	CairoMakie.lines!(
 		ax,
 		[lane_width + offset, map_end],
 		[-lane_width - offset, -lane_width - offset],
@@ -79,38 +79,38 @@ function draw_intersection_map!(ax; map_end, lane_width, offset = 0.2)
 		linewidth = 1,
 	)
 
-	vertical_road = GLMakie.Polygon(
-		GLMakie.Point2f[
+	vertical_road = CairoMakie.Polygon(
+		CairoMakie.Point2f[
 			(-lane_width, -map_end),
 			(lane_width, -map_end),
 			(lane_width, map_end),
 			(-lane_width, map_end),
 		],
 	)
-	GLMakie.poly!(ax, vertical_road, color = :gray)
+	CairoMakie.poly!(ax, vertical_road, color = :gray)
 
-	horizontal_road = GLMakie.Polygon(
-		GLMakie.Point2f[
+	horizontal_road = CairoMakie.Polygon(
+		CairoMakie.Point2f[
 			(-map_end, -lane_width),
 			(map_end, -lane_width),
 			(map_end, lane_width),
 			(-map_end, lane_width),
 		],
 	)
-	GLMakie.poly!(ax, horizontal_road, color = :gray)
+	CairoMakie.poly!(ax, horizontal_road, color = :gray)
 
 	# Lane center lines
-	GLMakie.lines!(ax, [-lane_width, -map_end], [0, 0], color = :yellow, linewidth = 2)
-	GLMakie.lines!(ax, [lane_width, map_end], [0, 0], color = :yellow, linewidth = 2)
-	GLMakie.lines!(ax, [0, 0], [-lane_width, -map_end], color = :yellow, linewidth = 2)
-	GLMakie.lines!(ax, [0, 0], [lane_width, map_end], color = :yellow, linewidth = 2)
+	CairoMakie.lines!(ax, [-lane_width, -map_end], [0, 0], color = :yellow, linewidth = 2)
+	CairoMakie.lines!(ax, [lane_width, map_end], [0, 0], color = :yellow, linewidth = 2)
+	CairoMakie.lines!(ax, [0, 0], [-lane_width, -map_end], color = :yellow, linewidth = 2)
+	CairoMakie.lines!(ax, [0, 0], [lane_width, map_end], color = :yellow, linewidth = 2)
 
 	# Direction arrows
 	xs = [-3.0, 3.0, 1.0, -1.0]
 	ys = [-1.0, 1.0, -3.0, 3.0]
 	us = [1.0, -1.0, 0.0, 0.0]
 	vs = [0.0, 0.0, 1.0, -1.0]
-	GLMakie.arrows!(
+	CairoMakie.arrows!(
 		ax,
 		xs,
 		ys,
@@ -135,40 +135,40 @@ function plot_intersection_trajectories(;
 	goal_position1,
 	goal_position2,
 )
-	figure = GLMakie.Figure()
-	ax = GLMakie.Axis(
+	figure = CairoMakie.Figure()
+	ax = CairoMakie.Axis(
 		figure[1, 1];
 		aspect = 1,
 		xgridvisible = false,
 		ygridvisible = false,
 		backgroundcolor = :lightgreen,
 	)
-	GLMakie.hidedecorations!(ax)
-	GLMakie.hidespines!(ax)
+	CairoMakie.hidedecorations!(ax)
+	CairoMakie.hidespines!(ax)
 
 	draw_intersection_map!(ax; map_end, lane_width)
 
-	strategy1 = GLMakie.@lift OpenLoopStrategy($strategy[1].xs, $strategy[1].us)
-	strategy2 = GLMakie.@lift OpenLoopStrategy($strategy[2].xs, $strategy[2].us)
-	GLMakie.plot!(ax, strategy1, color = :blue)
-	GLMakie.plot!(ax, strategy2, color = :red)
+	strategy1 = CairoMakie.@lift OpenLoopStrategy($strategy[1].xs, $strategy[1].us)
+	strategy2 = CairoMakie.@lift OpenLoopStrategy($strategy[2].xs, $strategy[2].us)
+	CairoMakie.plot!(ax, strategy1, color = :blue)
+	CairoMakie.plot!(ax, strategy2, color = :red)
 
-	GLMakie.scatter!(
+	CairoMakie.scatter!(
 		ax,
-		GLMakie.@lift([GLMakie.Point2f($θ1[1:2]), GLMakie.Point2f($θ2[1:2])]),
+		CairoMakie.@lift([CairoMakie.Point2f($θ1[1:2]), CairoMakie.Point2f($θ2[1:2])]),
 		markersize = 20,
 		color = [:blue, :red],
 	)
-	GLMakie.scatter!(
+	CairoMakie.scatter!(
 		ax,
-		GLMakie.@lift(GLMakie.Point2f($goal_position1)),
+		CairoMakie.@lift(CairoMakie.Point2f($goal_position1)),
 		markersize = 20,
 		marker = :star5,
 		color = :blue,
 	)
-	GLMakie.scatter!(
+	CairoMakie.scatter!(
 		ax,
-		GLMakie.@lift(GLMakie.Point2f($goal_position2)),
+		CairoMakie.@lift(CairoMakie.Point2f($goal_position2)),
 		markersize = 20,
 		marker = :star5,
 		color = :red,
@@ -184,8 +184,8 @@ function plot_convergence_plot(;
 	outer_end_total_iterations = Int[],
 	outer_end_trace_indices = Int[],
 )
-	figure = GLMakie.Figure()
-	ax = GLMakie.Axis(
+	figure = CairoMakie.Figure()
+	ax = CairoMakie.Axis(
 		figure[1, 1];
 		xlabel = L"\text{iteration} ~\ell",
 		ylabel = L"$\log(|| \mathcal{K}_{\rho}^{(\ell)} ||_\infty)$",
@@ -193,11 +193,11 @@ function plot_convergence_plot(;
 	)
 
 	safe_kkt_error = max.(kkt_error_history, eps(Float64))
-	GLMakie.lines!(ax, total_iteration_history, safe_kkt_error, color = :dodgerblue, linewidth = 2)
-	GLMakie.scatter!(ax, total_iteration_history, safe_kkt_error, color = :dodgerblue, markersize = 6)
+	CairoMakie.lines!(ax, total_iteration_history, safe_kkt_error, color = :dodgerblue, linewidth = 2)
+	CairoMakie.scatter!(ax, total_iteration_history, safe_kkt_error, color = :dodgerblue, markersize = 6)
 
 	if !isempty(outer_end_total_iterations)
-		GLMakie.vlines!(
+		CairoMakie.vlines!(
 			ax,
 			outer_end_total_iterations;
 			color = (:gray, 0.4),
@@ -209,7 +209,7 @@ function plot_convergence_plot(;
 	if !isempty(outer_end_trace_indices)
 		end_x = total_iteration_history[outer_end_trace_indices]
 		end_y = safe_kkt_error[outer_end_trace_indices]
-		GLMakie.scatter!(
+		CairoMakie.scatter!(
 			ax,
 			end_x,
 			end_y;
@@ -226,7 +226,7 @@ function plot_convergence_plot_aggregate(; kkt_error_histories)
 	if isempty(kkt_error_histories)
 		error("kkt_error_histories must be non-empty.")
 	end
-
+	
 	max_trace_length = maximum(length, kkt_error_histories)
 	num_instances = length(kkt_error_histories)
 	mean_kkt_error = fill(NaN, max_trace_length)
@@ -248,39 +248,34 @@ function plot_convergence_plot_aggregate(; kkt_error_histories)
 		end
 	end
 
-	# Main.@infiltrate
-
 	valid_indices = findall(!isnan, mean_kkt_error)
 	x = collect(valid_indices)
 	y_mean = mean_kkt_error[valid_indices]
 	y_lower = y_mean .- std_kkt_error[valid_indices]
 	y_upper = y_mean .+ std_kkt_error[valid_indices]
 
-	# Main.@infiltrate
-
-	figure = GLMakie.Figure()
-	ax = GLMakie.Axis(
+	figure = CairoMakie.Figure()
+	ax = CairoMakie.Axis(
 		figure[1, 1];
 		xlabel = L"\text{iteration} ~\ell",
 		ylabel = L"$\log(|| \mathcal{K}_{\rho}^{(\ell)} ||_2)$",
 	)
 
-	# Main.@infiltrate
-	GLMakie.band!(ax, x, y_lower, y_upper; color = (:dodgerblue, 0.25))
-	GLMakie.lines!(ax, x, y_mean; color = :dodgerblue, linewidth = 3)
-	set_unit_interval_yticks!(ax, y_lower, y_upper)
+	CairoMakie.band!(ax, x, y_lower, y_upper; color = (:dodgerblue, 0.25))
+	CairoMakie.lines!(ax, x, y_mean; color = :dodgerblue, linewidth = 3)
+	# set_unit_interval_yticks!(ax, y_lower, y_upper)
 
 	return figure, ax
 end
 
-function set_unit_interval_yticks!(ax, ys...)
-	all_values = reduce(vcat, ys)
-	if isempty(all_values)
-		return
-	end
-	ymin = floor(minimum(all_values))
-	ymax = ceil(maximum(all_values))
-	ytick_values = collect(ymin:1.0:ymax)
-	ytick_labels = [string(round(y; digits = 1)) for y in ytick_values]
-	ax.yticks = (ytick_values, ytick_labels)
-end
+# function set_unit_interval_yticks!(ax, ys...)
+# 	all_values = reduce(vcat, ys)
+# 	if isempty(all_values)
+# 		return
+# 	end
+# 	ymin = floor(minimum(all_values))
+# 	ymax = ceil(maximum(all_values))
+# 	ytick_values = collect(ymin:1.0:ymax)
+# 	ytick_labels = [string(round(y; digits = 1)) for y in ytick_values]
+# 	ax.yticks = (ytick_values, ytick_labels)
+# end
