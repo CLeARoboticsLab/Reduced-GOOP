@@ -337,7 +337,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 1234)
 	base_initial_state2 = [1.0, -5.0, 0.0, 1.0]
 	goal_position1 = [6.0, -1.0]
 	goal_position2 = [1.0, 6.5]
-	perturbation_scale = 0.1
+	perturbation_scale = 0.2
 
 	instance_problem_data = Dict{String,Any}[]
 	kkt_error_histories = Vector{Float64}[]
