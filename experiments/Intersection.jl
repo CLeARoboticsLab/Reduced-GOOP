@@ -262,10 +262,10 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 	max_inner_iters_schedule = [50]
 	perturbation_scale = 0.2
 	linesearch = :backtracking # :backtracking, :fraction_to_boundary
-	goop_version = :reduced # :complete, :reduced 
+	goop_version = :complete # :complete, :reduced 
 	receding_horizon_steps = 0 # 0 for single-step only
 
-	run_id = "run_3_$goop_version"
+	run_id = "run_3_$(goop_version)_system"
 
 	(; problem, flatten_parameters) = get_setup(
 		num_players;

@@ -259,23 +259,11 @@ function plot_convergence_plot_aggregate(; kkt_error_histories)
 		figure[1, 1];
 		xlabel = L"\text{iteration} ~\ell",
 		ylabel = L"$\log(|| \mathcal{K}_{\rho}^{(\ell)} ||_2)$",
+		yticks = -10:4,
 	)
 
 	CairoMakie.band!(ax, x, y_lower, y_upper; color = (:dodgerblue, 0.25))
 	CairoMakie.lines!(ax, x, y_mean; color = :dodgerblue, linewidth = 3)
-	# set_unit_interval_yticks!(ax, y_lower, y_upper)
 
 	return figure, ax
 end
-
-# function set_unit_interval_yticks!(ax, ys...)
-# 	all_values = reduce(vcat, ys)
-# 	if isempty(all_values)
-# 		return
-# 	end
-# 	ymin = floor(minimum(all_values))
-# 	ymax = ceil(maximum(all_values))
-# 	ytick_values = collect(ymin:1.0:ymax)
-# 	ytick_labels = [string(round(y; digits = 1)) for y in ytick_values]
-# 	ax.yticks = (ytick_values, ytick_labels)
-# end
