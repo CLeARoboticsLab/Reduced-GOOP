@@ -129,7 +129,7 @@ function solve(
 			mcp.∇F_z!(∇F, z; θ, ϵ, η)
 			# @assert all(.!isnan.(F)) "Found NaN in F - aborting!"
 			# @assert all(.!isnan.(∇F)) "Found NaN in ∇F - aborting!"
-			verbose && println("condition number of ∇F = $(cond(collect(∇F),2))")
+			verbose && println("inner iter $inner_iters, condition number of ∇F = $(cond(collect(∇F),2))")
 			# Check the primals
 			# verbose && println("current primal x: ", round.(z[mcp.primal_dims]; digits = 4))
 

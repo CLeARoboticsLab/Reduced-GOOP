@@ -257,15 +257,15 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 	dynamics = planar_double_integrator(; dt = 0.5, control_bounds) # x := (px, py, vx, vy) and u := (ax, ay).
 	planning_horizon = 6
 	collision_avoidance = 1.5
-	num_instances = 1
-	epsilon_schedule = [1.0]
-	max_inner_iters_schedule = [50]
+	num_instances = 10
+	epsilon_schedule = [1.0, 0.1, 0.001]
+	max_inner_iters_schedule = [50, 100, 100]
 	perturbation_scale = 0.2
 	linesearch = :backtracking # :backtracking, :fraction_to_boundary
 	goop_version = :complete # :complete, :reduced 
 	receding_horizon_steps = 0 # 0 for single-step only
 
-	run_id = "run_3_$(goop_version)_system"
+	run_id = "run_4_$(goop_version)_system"
 
 	(; problem, flatten_parameters) = get_setup(
 		num_players;
@@ -296,7 +296,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 				QuasiGOOP.InteriorPoint(),
 				GOOP_kkt_system,
 				θ;
-				tol = 1e-4, # 5e-3
+				tol = 5e-3, # 5e-3
 				η₀ = 0.0, # 0.5
 				ϵ₀, # 5.0
 				max_inner_iters, # 20
