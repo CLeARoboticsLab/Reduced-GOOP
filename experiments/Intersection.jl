@@ -143,49 +143,49 @@ function get_setup(
 			# 	end
 			# end,
 
-			# Keep center (yellow) line
-			function (z, θ)
-				(; xs, us) = unflatten_trajectory(
-					z[Block(1)],
-					state_dimension,
-					control_dimension,
-				)
-				mapreduce(vcat, 1:length(xs)) do k
-					px, py, vx, vy = xs[k]
-					-py # py ≤ 0.0
-				end
-			end,
+			# # Keep center (yellow) line
+			# function (z, θ)
+			# 	(; xs, us) = unflatten_trajectory(
+			# 		z[Block(1)],
+			# 		state_dimension,
+			# 		control_dimension,
+			# 	)
+			# 	mapreduce(vcat, 1:length(xs)) do k
+			# 		px, py, vx, vy = xs[k]
+			# 		-py # py ≤ 0.0
+			# 	end
+			# end,
 
-			# reach the goal. (highest priority)
-			function (z, θ)
-				(; xs, us) = unflatten_trajectory(
-					z[Block(1)],
-					state_dimension,
-					control_dimension,
-				)
-				(; goal_position) = unflatten_parameters(θ[Block(1)]) # Player 1 θ[Block(i)] Ambuluance
-				goal_deviation = xs[end][1:2] .- goal_position
-				[
-					goal_deviation .+ 0.01
-					-goal_deviation .+ 0.01
-				]
-			end,
+			# # reach the goal. (highest priority)
+			# function (z, θ)
+			# 	(; xs, us) = unflatten_trajectory(
+			# 		z[Block(1)],
+			# 		state_dimension,
+			# 		control_dimension,
+			# 	)
+			# 	(; goal_position) = unflatten_parameters(θ[Block(1)]) # Player 1 θ[Block(i)] Ambuluance
+			# 	goal_deviation = xs[end][1:2] .- goal_position
+			# 	[
+			# 		goal_deviation .+ 0.01
+			# 		-goal_deviation .+ 0.01
+			# 	]
+			# end,
 		],
 		[
-			# reach the goal.
-			function (z, θ)
-				(; xs, us) = unflatten_trajectory(
-					z[Block(2)],
-					state_dimension,
-					control_dimension,
-				)
-				(; goal_position) = unflatten_parameters(θ[Block(2)]) # Player 2
-				goal_deviation = xs[end][1:2] .- goal_position
-				[
-					goal_deviation .+ 0.01
-					-goal_deviation .+ 0.01
-				]
-			end,
+			# # reach the goal.
+			# function (z, θ)
+			# 	(; xs, us) = unflatten_trajectory(
+			# 		z[Block(2)],
+			# 		state_dimension,
+			# 		control_dimension,
+			# 	)
+			# 	(; goal_position) = unflatten_parameters(θ[Block(2)]) # Player 2
+			# 	goal_deviation = xs[end][1:2] .- goal_position
+			# 	[
+			# 		goal_deviation .+ 0.01
+			# 		-goal_deviation .+ 0.01
+			# 	]
+			# end,
 
 			# # Drive under speed limit 
 			# function (z, θ)
@@ -200,23 +200,23 @@ function get_setup(
 			# 	end
 			# end,
 
-			# Keep center (yellow) line (highest priority)
-			function (z, θ)
-				(; xs, us) = unflatten_trajectory(
-					z[Block(2)],
-					state_dimension,
-					control_dimension,
-				)
-				mapreduce(vcat, 1:length(xs)) do k
-					px, py, vx, vy = xs[k]
-					px + 0.0 # px ≥ 0.0
-				end
-			end,
+			# # Keep center (yellow) line (highest priority)
+			# function (z, θ)
+			# 	(; xs, us) = unflatten_trajectory(
+			# 		z[Block(2)],
+			# 		state_dimension,
+			# 		control_dimension,
+			# 	)
+			# 	mapreduce(vcat, 1:length(xs)) do k
+			# 		px, py, vx, vy = xs[k]
+			# 		px + 0.0 # px ≥ 0.0
+			# 	end
+			# end,
 		],
 	]
 
 	# Specify prioritized constraint [lowest priority, ..., highest priority]
-	is_prioritized_constraint = [[false, true, true], [false, true, true]]
+	is_prioritized_constraint = [[false], [false]]
 	preferences = [vcat(objectives[player], prioritized_preferences[player]) for player in 1:num_players]
 
 	# Shared constraints
@@ -289,7 +289,9 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 		else
 			GOOP_kkt_system = QuasiGOOP.generate_slacked_reduced_kkt_system(problem)
 		end
-
+		println("MCP Dimension: ", GOOP_kkt_system.kkt_dimension)
+		println("variable Dimension: ", GOOP_kkt_system.variable_dimension)
+		Main.@infiltrate
 		convergence_log = Dict{String, Any}()
 		elapsed_time = @elapsed begin
 			(; status, z, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters) = QuasiGOOP.solve(

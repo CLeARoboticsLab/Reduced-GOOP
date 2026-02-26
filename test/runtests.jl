@@ -50,13 +50,14 @@ using BlockArrays: BlockArrays, BlockArray, Block, blocks, blocksizes
 		shared_inequality_constraint = nothing,
 	)
 
-	GOOP_kkt_system = QuasiGOOP.generate_slacked_kkt_system(GOOP_trial1)
+	GOOP_kkt_system = QuasiGOOP.generate_slacked_reduced_kkt_system(GOOP_trial1)
 	parameter_value = θ
 	(; status, z, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters) = QuasiGOOP.solve(
 		QuasiGOOP.InteriorPoint(),
 		GOOP_kkt_system,
 		parameter_value;
-		z₀ = nothing,
+		z₀ = nothing, #[0.0, 0.0, 0.0, 0.0],
+		ϵ₀ = 1e-5,
 	)
 	new_primals = x[1:n]
 	new_objective = J₁(new_primals, 0)

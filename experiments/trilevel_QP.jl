@@ -25,15 +25,31 @@ c₃ = -[0.5, -0.5, 1.0, 0.0]
 A₃ = [1 0 1 1; 1 0 0 1] # A₃x = b₃
 b₃ = [1.0, 1.0]
 
-Random.seed!(17) 
+Random.seed!(17)
 #16 (both version in new goop same sol)
 #17 (modified new goop gives wrong)
 #18,19,20 (old goop wrong)
-Q₁ = rand_psd(n, 1); c₁ = rand(n); 
-Q₂ = rand_psd(n, 1); c₂ = rand(n);
-Q₃ = rand_psd(n, 1); c₃ = rand(n);
-Aₑ = rand(m, n); bₑ = rand(m);
-Aᵢ = [1 0 0 0; 0 1 0 0]; bᵢ = [0.5, 0.5] # x₁ ≥ 0.5, x₂ ≥ 0.5
+Q₁ = rand_psd(n, 1);
+c₁ = rand(n);
+Q₂ = rand_psd(n, 1);
+c₂ = rand(n);
+Q₃ = rand_psd(n, 1);
+c₃ = rand(n);
+Aₑ = rand(m, n);
+bₑ = rand(m);
+Aᵢ = [1 0 0 0; 0 1 0 0];
+bᵢ = [0.5, 0.5] # x₁ ≥ 0.5, x₂ ≥ 0.5
+f(x, θ) = 0.5x[1:n]'*Q₁*x[1:n] + c₁'*x[1:n]
+
+
+Q₁ = I(n)
+c₁ = [1.0, 0.0, -1.0, 2.0]
+Q₂ = 2I(n) # [0 0 0 0; 0 1 0 0; 0 0 2 0; 0 0 0 1]
+c₂ = [-1.0, 2.0, 0.0, 1.0]
+Q₃ = [1 0 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 0] # I(n)
+c₃ = [0.5, -0.5, 1.0, 0.0]
+Aₑ = [1 0 1 1; 0 1 1 0]
+bₑ = [1.0, 2.0]
 f(x, θ) = 0.5x[1:n]'*Q₁*x[1:n] + c₁'*x[1:n]
 
 
@@ -91,16 +107,17 @@ GOOP_trial1 = QuasiGOOP.ParametricGOOP(
 	shared_inequality_constraint,
 )
 
-GOOP_kkt_system = QuasiGOOP.generate_slacked_kkt_system(GOOP_trial1)
+GOOP_kkt_system = QuasiGOOP.generate_slacked_reduced_kkt_system(GOOP_trial1)
 parameter_value = θ
 status, z_sol_new_goop, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters = QuasiGOOP.solve(
 	QuasiGOOP.InteriorPoint(),
 	GOOP_kkt_system,
 	parameter_value;
-	tol = 1e-6,
+	tol = 1e-3,
 	min_stepsize = 1e-4,
 	max_outer_iters = 50,
-	z₀ = nothing,
+	z₀ = zeros(n),
+	ϵ₀ = 1e-5,
 	verbose = true,
 )
 @show status
@@ -117,11 +134,11 @@ F_symbolic = GOOP_kkt_system.F_symbolic
 z_symbolic = GOOP_kkt_system.z_symbolic
 symbolic_type = eltype(x)
 F_symbolic_after_sub = Vector{symbolic_type}(
-	Symbolics.substitute(F_symbolic, Dict([x[1] => 0.5, x[2] => 1.0, x[3] => 1.0, x[4] => -0.5, ϵ => 0, η => 0]))
+	Symbolics.substitute(F_symbolic, Dict([x[1] => 0.5, x[2] => 1.0, x[3] => 1.0, x[4] => -0.5, ϵ => 0, η => 0])),
 )
 
 # Compile the numeric function (returns F given z)
-F_eval = first(Symbolics.build_function(F_symbolic_after_sub, z_symbolic[Not(1:n)]; expression=Val(false)))
+F_eval = first(Symbolics.build_function(F_symbolic_after_sub, z_symbolic[Not(1:n)]; expression = Val(false)))
 # Wrap it to match NonlinearSolve’s expected signature f(u, p)
 test_f(u, p) = F_eval(u)
 
@@ -129,9 +146,9 @@ test_f(u, p) = F_eval(u)
 z_val = zeros(length(z_symbolic) - n) #z[Not(1:n)] .+ 1e-2*rand() # z[Not(1:n)] # sanity check #zeros(length(z_symbolic) - n)
 
 # Construct the problem (3 positional args max) and solve it
-prob = isnothing(inequality_constraints[1]) ?  NonlinearProblem(test_f, z_val) : NonlinearLeastSquaresProblem(test_f, z_val)
+prob = isnothing(inequality_constraints[1]) ? NonlinearProblem(test_f, z_val) : NonlinearLeastSquaresProblem(test_f, z_val)
 sol = NonlinearSolve.solve(prob)
-@assert length(sol.u) ==  length(z_symbolic) - n
+@assert length(sol.u) == length(z_symbolic) - n
 # compute l1 difference between two solutions
 println("Duals from nonlinear solve: $(sol.u)")
 @show sol.u .- z_sol_new_goop[Not(1:n)]
@@ -222,13 +239,13 @@ function construct_kkt(preferences, is_prioritized_constraint, player)
 			F = Vector{symbolic_type}([∇L; f])
 			G = Vector{symbolic_type}(
 				filter!(
-					!isnothing, 
+					!isnothing,
 					[
 						isnothing(g) ? nothing : g;
 						isnothing(g) ? nothing : γ;
 						isnothing(g) ? nothing : θ - γ'*g;
 					],
-				),	
+				),
 			) #ϵ - γ'*g
 			z = Vector{symbolic_type}(
 				vcat(x, (isnothing(f) ? [] : λ), (isnothing(g) ? [] : γ)),
@@ -276,7 +293,7 @@ end
 # Topmost level
 L = first(goop_preferences[player][1](z, θ)) - λ'*F - γ'*G
 ∇L = Symbolics.gradient(L, z)
-Main.@infiltrate
+# Main.@infiltrate
 F = Vector{symbolic_type}([∇L; F])
 z̲ = [
 	fill(-Inf, length(F))
