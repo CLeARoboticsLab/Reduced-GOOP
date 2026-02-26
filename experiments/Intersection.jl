@@ -252,7 +252,6 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 	Random.seed!(rng_seed)
 
 	# Problem setup
-	run_id = "run_3_complete_system"
 	num_players = 2
 	control_bounds = (; lb = [-2.0, -2.0], ub = [2.0, 2.0])
 	dynamics = planar_double_integrator(; dt = 0.5, control_bounds) # x := (px, py, vx, vy) and u := (ax, ay).
@@ -263,8 +262,10 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 	max_inner_iters_schedule = [50]
 	perturbation_scale = 0.2
 	linesearch = :backtracking # :backtracking, :fraction_to_boundary
-	goop_version = :complete # :complete, :reduced 
+	goop_version = :reduced # :complete, :reduced 
 	receding_horizon_steps = 0 # 0 for single-step only
+
+	run_id = "run_3_$goop_version"
 
 	(; problem, flatten_parameters) = get_setup(
 		num_players;
