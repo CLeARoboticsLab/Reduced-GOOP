@@ -258,8 +258,8 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 	planning_horizon = 6
 	collision_avoidance = 1.5
 	num_instances = 10
-	epsilon_schedule = [1.0, 0.5, 0.1]
-	max_inner_iters_schedule = [50, 100, 100]
+	epsilon_schedule = [1.0]
+	max_inner_iters_schedule = [50]
 	perturbation_scale = 0.2
 	linesearch = :backtracking # :backtracking, :fraction_to_boundary
 	goop_version = :reduced # :complete, :reduced 
