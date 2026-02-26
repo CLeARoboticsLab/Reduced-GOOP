@@ -106,6 +106,7 @@ function solve(
 	inner_iters = 1
 	outer_iters = 1
 	kkt_error = Inf
+	is_fraction_to_boundary_linesearch = (linesearch == :fraction_to_boundary)
 	has_convergence_log = !isnothing(convergence_log)
 	kkt_error_history = Float64[]
 	total_iteration_history = Int[]
@@ -119,8 +120,7 @@ function solve(
 
 		verbose && @info "Outer iteration $(outer_iters): ϵ = $ϵ, kkt_error = $kkt_error"
 		
-		# while kkt_error > tol && inner_iters < max_inner_iters
-		while inner_iters < max_inner_iters
+		while inner_iters < max_inner_iters && (!is_fraction_to_boundary_linesearch || kkt_error > tol)
 			total_iters += 1
 			# Compute the Newton step.
 			# TODO: Can add some adaptive regularization.

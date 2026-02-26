@@ -130,18 +130,18 @@ function get_setup(
 
 	prioritized_preferences = [
 		[
-			# Drive under speed limit 
-			function (z, θ)
-				(; xs, us) = unflatten_trajectory(
-					z[Block(1)],
-					state_dimension,
-					control_dimension,
-				)
-				mapreduce(vcat, 1:length(xs)) do k
-					px, py, vx, vy = xs[k]
-					vcat(vx + 1.5, -vx + 1.5, vy + 1.5, -vy + 1.5)
-				end
-			end,
+			# # Drive under speed limit 
+			# function (z, θ)
+			# 	(; xs, us) = unflatten_trajectory(
+			# 		z[Block(1)],
+			# 		state_dimension,
+			# 		control_dimension,
+			# 	)
+			# 	mapreduce(vcat, 1:length(xs)) do k
+			# 		px, py, vx, vy = xs[k]
+			# 		vcat(vx + 1.5, -vx + 1.5, vy + 1.5, -vy + 1.5)
+			# 	end
+			# end,
 
 			# Keep center (yellow) line
 			function (z, θ)
@@ -187,18 +187,18 @@ function get_setup(
 				]
 			end,
 
-			# Drive under speed limit 
-			function (z, θ)
-				(; xs, us) = unflatten_trajectory(
-					z[Block(2)],
-					state_dimension,
-					control_dimension,
-				)
-				mapreduce(vcat, 1:length(xs)) do k
-					px, py, vx, vy = xs[k]
-					vcat(vx + 1.5, -vx + 1.5, vy + 1.5, -vy + 1.5)
-				end
-			end,
+			# # Drive under speed limit 
+			# function (z, θ)
+			# 	(; xs, us) = unflatten_trajectory(
+			# 		z[Block(2)],
+			# 		state_dimension,
+			# 		control_dimension,
+			# 	)
+			# 	mapreduce(vcat, 1:length(xs)) do k
+			# 		px, py, vx, vy = xs[k]
+			# 		vcat(vx + 1.5, -vx + 1.5, vy + 1.5, -vy + 1.5)
+			# 	end
+			# end,
 
 			# Keep center (yellow) line (highest priority)
 			function (z, θ)
@@ -216,7 +216,7 @@ function get_setup(
 	]
 
 	# Specify prioritized constraint [lowest priority, ..., highest priority]
-	is_prioritized_constraint = [[false, true, true, true], [false, true, true, true]]
+	is_prioritized_constraint = [[false, true, true], [false, true, true]]
 	preferences = [vcat(objectives[player], prioritized_preferences[player]) for player in 1:num_players]
 
 	# Shared constraints
@@ -252,15 +252,18 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 	Random.seed!(rng_seed)
 
 	# Problem setup
+	run_id = "run_3_complete_system"
 	num_players = 2
 	control_bounds = (; lb = [-2.0, -2.0], ub = [2.0, 2.0])
-	dynamics = planar_double_integrator(; dt = 0.3, control_bounds) # x := (px, py, vx, vy) and u := (ax, ay).
-	planning_horizon = 15
+	dynamics = planar_double_integrator(; dt = 0.5, control_bounds) # x := (px, py, vx, vy) and u := (ax, ay).
+	planning_horizon = 6
 	collision_avoidance = 1.5
-	num_instances = 10
-	epsilon_schedule = [1.0, 0.1]
-	max_inner_iters_schedule = [35, 50]
+	num_instances = 1
+	epsilon_schedule = [1.0]
+	max_inner_iters_schedule = [50]
 	perturbation_scale = 0.2
+	linesearch = :backtracking # :backtracking, :fraction_to_boundary
+	goop_version = :complete # :complete, :reduced 
 	receding_horizon_steps = 0 # 0 for single-step only
 
 	(; problem, flatten_parameters) = get_setup(
@@ -279,8 +282,14 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 	runtime = Float64[]
 
 	function get_receding_horizon_solution(θ; z₀, ϵ₀, max_inner_iters)
-		GOOP_kkt_system = QuasiGOOP.generate_slacked_kkt_system(problem)
-		convergence_log = Dict{String,Any}()
+
+		if goop_version === :complete
+			GOOP_kkt_system = QuasiGOOP.generate_slacked_complete_kkt_system(problem)
+		else
+			GOOP_kkt_system = QuasiGOOP.generate_slacked_reduced_kkt_system(problem)
+		end
+
+		convergence_log = Dict{String, Any}()
 		elapsed_time = @elapsed begin
 			(; status, z, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters) = QuasiGOOP.solve(
 				QuasiGOOP.InteriorPoint(),
@@ -297,7 +306,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 				z₀,
 				verbose = true,
 				convergence_log = convergence_log,
-				linesearch = :backtracking, # :backtracking, :fraction_to_boundary
+				linesearch, # :backtracking, :fraction_to_boundary
 			)
 		end
 		push!(runtime, elapsed_time)
@@ -332,7 +341,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 			"inner_iteration_history" => get(convergence_log, "inner_iteration_history", Int[]),
 			"outer_end_total_iterations" => get(convergence_log, "outer_end_total_iterations", Int[]),
 			"outer_end_trace_indices" => get(convergence_log, "outer_end_trace_indices", Int[]),
-			"runtime" => runtime,
+			"per iteration runtime" => mean(runtime),
 		)
 		(; strategies, solution_dict)
 	end
@@ -343,16 +352,17 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 	goal_position1 = [6.0, -1.0]
 	goal_position2 = [1.0, 6.5]
 
-	run_id = "run_1"
 	run_dir = joinpath("data", "Intersection_open_loop", "runs", run_id)
 	data_dir = joinpath(run_dir, "data")
 	problem_data_dir = joinpath(data_dir, "problem")
+	solution_data_dir = joinpath(problem_data_dir, "solution")
 	histories_data_dir = joinpath(data_dir, "histories")
 	plots_dir = joinpath(run_dir, "plots")
 	trajectory_plots_dir = joinpath(plots_dir, "trajectories")
 	convergence_plots_dir = joinpath(plots_dir, "convergence")
 	for dir in (
 		problem_data_dir,
+		solution_data_dir,
 		histories_data_dir,
 		trajectory_plots_dir,
 		convergence_plots_dir,
@@ -360,17 +370,17 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 		mkpath(dir)
 	end
 
-	instance_problem_data = Dict{String,Any}[]
+	instance_problem_data = Dict{String, Any}[]
 	kkt_error_histories_per_eps = Dict(ϵ => Vector{Vector{Float64}}() for ϵ in epsilon_schedule)
 	solved_attempts = 0
 	total_attempts = 0
 
 	while solved_attempts < num_instances
-		total_attempts += 1 
+		total_attempts += 1
 		initial_state1 = base_initial_state1 .+ rand(Uniform(-perturbation_scale, perturbation_scale), state_dim(dynamics))
 		initial_state2 = base_initial_state2 .+ rand(Uniform(-perturbation_scale, perturbation_scale), state_dim(dynamics))
 		println(
-			"solved $(solved_attempts)/$(num_instances), attempt $(total_attempts): "
+			"solved $(solved_attempts)/$(num_instances), attempt $(total_attempts), goop version $(goop_version): ",
 		)
 		println("initial_state1:", initial_state1)
 		println("goal_position1:", goal_position1)
@@ -399,7 +409,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 			warmstart_u,
 		)
 
-		epsilon_results = Pair{Float64,Any}[]
+		epsilon_results = Pair{Float64, Any}[]
 		stage_warmstart = warmstart_solution
 		solve_sequence_succeeded = true
 		for (ϵ₀, max_inner_iters) in zip(epsilon_schedule, max_inner_iters_schedule)
@@ -418,7 +428,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 			push!(epsilon_results, ϵ₀ => result)
 
 			# warmstart next solve with the previous solution's primal variables
-			stage_warmstart = result.solution_dict["z"][1:num_players * primal_dimension] 
+			stage_warmstart = result.solution_dict["z"][1:(num_players*primal_dimension)]
 		end
 		if !solve_sequence_succeeded
 			# TODO: Speed this up using GLMakie observable, toggling only initial state
@@ -439,6 +449,29 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 			instance_problem_data,
 		)
 		for (ϵ₀, result) in epsilon_results
+			JLD2.save_object(
+				joinpath(
+					solution_data_dir,
+					"solution_dict_instance_$(solved_attempts)_eps$(ϵ₀).jld2",
+				),
+				result.solution_dict,
+			)
+
+			# Compute and save distance between trajectories for the two players
+			xs1 = result.solution_dict["strategies"][1].xs
+			xs2 = result.solution_dict["strategies"][2].xs
+			trajectory_len = min(length(xs1), length(xs2))
+			trajectory_distance = [
+				sqrt(sum((xs1[k][1:2] - xs2[k][1:2]) .^ 2)) for k in 1:trajectory_len
+			]
+			JLD2.save_object(
+				joinpath(
+					histories_data_dir,
+					"trajectory_distance_instance_$(solved_attempts)_eps$(ϵ₀).jld2",
+				),
+				trajectory_distance,
+			)
+
 			push!(kkt_error_histories_per_eps[ϵ₀], log10.(result.solution_dict["kkt_error_history"]))
 			convergence_fig, _ = plot_convergence_plot(
 				;
