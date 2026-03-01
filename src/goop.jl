@@ -848,8 +848,6 @@ function generate_slacked_complete_kkt_system(
 	interior_point_slack_dims = vcat(idx[Block(3)]) # Σ
 	inequality_constraint_dual_dims = vcat(idx[Block(5)]) # Γ
 
-	# 
-
 	BuildGOOPKKTSystem(
 		F,
 		z,

@@ -75,7 +75,7 @@ function get_setup(n, num_players, mₑ, mᵢ; num_preferences = 2, r = 1)
 		preferences,
 		is_prioritized_constraint,
 		equality_constraints,
-		inequality_constraints,
+		inequality_constraints = [nothing for _ in 1:num_players],
 		shared_equality_constraint = nothing,
 		shared_inequality_constraint = nothing,
 	)
@@ -88,11 +88,11 @@ function demo(; num_players = 2, num_preferences = 5, rng_seed = 123)
 	# Quadratic GOOP Problem setup
 	n = 10 # x primal dimension (per player)
 	mₑ = 5 # equality constraint dimension
-	mᵢ = 2 # inequality constraint dimension
+	mᵢ = 0 # inequality constraint dimension
 	parameters = BlockArray(zeros(sum(fill(1, num_players))), fill(1, num_players))
 	num_instances = 10
 
-	run_id = "run_1_$(num_players)players_$(num_preferences)prefs"
+	run_id = "run_1_$(num_players)players_$(num_preferences)prefs_$(n)pdim_$(mₑ)mₑ_$(mᵢ)mᵢ"
 	linesearch = :backtracking # :backtracking, :fraction_to_boundary
 	verbose = false
 	tol = 1e-2
@@ -252,7 +252,6 @@ function demo(; num_players = 2, num_preferences = 5, rng_seed = 123)
 		elapsed_time_diff = reduced_elapsed_time - complete_elapsed_time
 		println("[Compare] elapsed time reduced (s): $(round(reduced_elapsed_time, digits = 6))")
 		println("[Compare] elapsed time complete (s): $(round(complete_elapsed_time, digits = 6))")
-		println("[Compare] elapsed time |reduced-complete| (s): $(round(abs(elapsed_time_diff), digits = 6))")
 
 		# Save KKT error histories
 		push!(kkt_error_histories_reduced, reduced_kkt_history)
