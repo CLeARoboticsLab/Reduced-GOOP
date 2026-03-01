@@ -6,18 +6,27 @@ using ParametricMCPs
 using LinearAlgebra: I, Diagonal, norm, pinv, qr, rank
 using Symbolics
 using SymbolicTracingUtils
+using LaTeXStrings: @L_str
 using BlockArrays: BlockArrays, BlockArray, Block, blocks, blocksizes, blockedrange
 using NonlinearSolve
 using InvertedIndices: Not
 using SparseArrays: sparse, SparseMatrixCSC
+using Statistics: mean, std
+using JLD2
 using Random
+
+include(joinpath(@__DIR__, "IntersectionPlotting.jl"))
 
 function print_preference_values(label, num_players, n, problem, z, θ)
 	println("[$(label)] Preference values at solution:")
-	for (player_idx, player_preferences) in enumerate(problem.preferences)
-		values = [pref(z[1:(num_players*n)], θ) for pref in player_preferences]
+	for (player_idx, values) in enumerate(get_preference_values(num_players, n, problem, z, θ))
 		println("  player $(player_idx): $(round.(values, digits = 6))")
 	end
+end
+
+function get_preference_values(num_players, n, problem, z, θ)
+	z_primal = z[1:(num_players*n)]
+	[[pref(z_primal, θ) for pref in player_preferences] for player_preferences in problem.preferences]
 end
 
 function get_setup(n, num_players, mₑ, mᵢ; num_preferences = 2, r = 1)
@@ -28,10 +37,10 @@ function get_setup(n, num_players, mₑ, mᵢ; num_preferences = 2, r = 1)
 
 	preferences = [Vector{Function}(undef, num_preferences) for _ in 1:num_players]
 	for i in 1:num_players, j in 1:num_preferences
-        Qk_local = rand_psd(n * num_players, r)
-        q_local = Qk_local * randn(n * num_players) # q ∈ Col(Qk) for boundedness
+		Qk_local = rand_psd(n * num_players, r)
+		q_local = Qk_local * randn(n * num_players) # q ∈ Col(Qk) for boundedness
 		preferences[i][j] = let Qk = Qk_local, q = q_local
-			(z, θ) -> 0.5 * z' * Qk * z + q' * z 
+			(z, θ) -> 0.5 * z' * Qk * z + q' * z
 		end
 	end
 
@@ -49,14 +58,15 @@ function get_setup(n, num_players, mₑ, mᵢ; num_preferences = 2, r = 1)
 		end
 	end
 
-	inequality_constraints = [
-		function (z, θ)
-			vcat(
-				z[Block(i)] .+ 1.0,  # z ≥ - 1.0
-				-z[Block(i)] .+ 1.0, # z ≤ 1.0
-			)
-		end for i in 1:num_players
-	]
+	inequality_constraints = Vector{Function}(undef, num_players)
+	for i in 1:num_players
+		Gⁱ1 = rand(mᵢ, n) # n > mᵢ for full row rank
+		Gⁱ2 = rand(mᵢ, n)
+		gⁱ = rand(mᵢ)
+		inequality_constraints[i] = let G = hcat(Gⁱ1, Gⁱ2), g = gⁱ
+			(z, θ) -> G * z - g
+		end
+	end
 
 
 	QuasiGOOP.ParametricGOOP(
@@ -65,29 +75,27 @@ function get_setup(n, num_players, mₑ, mᵢ; num_preferences = 2, r = 1)
 		preferences,
 		is_prioritized_constraint,
 		equality_constraints,
-		inequality_constraints = [nothing for _ in 1:num_players],
+		inequality_constraints,
 		shared_equality_constraint = nothing,
 		shared_inequality_constraint = nothing,
 	)
 end
 
 
-function demo(; rng_seed = 123)
+function demo(; num_players = 2, num_preferences = 5, rng_seed = 123)
 	Random.seed!(rng_seed)
 
 	# Quadratic GOOP Problem setup
-	num_players = 2
-	num_preferences = 3
-	n = 20 # x primal dimension (per player)
+	n = 10 # x primal dimension (per player)
 	mₑ = 5 # equality constraint dimension
-	mᵢ = 0 # inequality constraint dimension
+	mᵢ = 2 # inequality constraint dimension
 	parameters = BlockArray(zeros(sum(fill(1, num_players))), fill(1, num_players))
-	num_instances = 1
+	num_instances = 10
 
-	run_id = "run_1"
+	run_id = "run_1_$(num_players)players_$(num_preferences)prefs"
 	linesearch = :backtracking # :backtracking, :fraction_to_boundary
 	verbose = false
-	tol = 1e-3
+	tol = 1e-2
 	ϵ₀ = 1e-2
 	η₀ = 0.0
 	max_inner_iters = 50
@@ -117,12 +125,15 @@ function demo(; rng_seed = 123)
 	# kkt_error_histories_per_eps = Dict(ϵ => Vector{Vector{Float64}}() for ϵ in epsilon_schedule)
 	solved_attempts = 0
 	total_attempts = 0
+	pref_l2_diffs_per_player = [Float64[] for _ in 1:num_players]
+	reduced_elapsed_times = Float64[]
+	complete_elapsed_times = Float64[]
+	kkt_error_histories_reduced = Vector{Vector{Float64}}()
+	kkt_error_histories_complete = Vector{Vector{Float64}}()
 
 	while solved_attempts < num_instances
 		total_attempts += 1
-		println(
-			"solved $(solved_attempts)/$(num_instances), attempt $(total_attempts): ",
-		)
+		@info "solved $(solved_attempts)/$(num_instances), attempt $(total_attempts): "
 
 		# Generate problem instance 
 		problem = get_setup(n, num_players, mₑ, mᵢ; num_preferences)
@@ -132,7 +143,7 @@ function demo(; rng_seed = 123)
 		println("[Reduced] KKT Dimension: ", reduced_kkt_system.kkt_dimension)
 		println("[Reduced] Variable Dimension: ", reduced_kkt_system.variable_dimension)
 		convergence_log_reduced_system = Dict{String, Any}()
-		elapsed_time = @elapsed begin
+		reduced_elapsed_time = @elapsed begin
 			(; status, z, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters) = QuasiGOOP.solve(
 				QuasiGOOP.InteriorPoint(),
 				reduced_kkt_system,
@@ -149,17 +160,27 @@ function demo(; rng_seed = 123)
 				linesearch, # :backtracking, :fraction_to_boundary
 			)
 		end
+		println("[Reduced] Elapsed time: $(round(reduced_elapsed_time, digits = 3)) seconds")
 		println("[Reduced] status = $(status)")
-		println("[Reduced] Primal solution: $(round.(z[1:num_players * n], digits = 3))")
+		reduced_z = copy(z)
+		reduced_primal = copy(z[1:(num_players*n)])
+		reduced_pref_values = get_preference_values(num_players, n, problem, z, parameters)
+		println("[Reduced] Primal solution: $(round.(reduced_primal, digits = 3))")
 		print_preference_values("Reduced", num_players, n, problem, z, parameters)
 		println("[Reduced] kkt_error = $(kkt_error)")
+		reduced_kkt_history = log10.(get(convergence_log_reduced_system, "kkt_error_history", Float64[]))
+
+		if status != :solved
+			@info "[Reduced] Attempt $(total_attempts) failed. Retrying with a new instance..."
+			continue
+		end
 
 		# Solve problem with complete GOOP KKT system
 		complete_kkt_system = QuasiGOOP.generate_slacked_complete_kkt_system(problem)
 		println("[Complete] KKT Dimension: ", complete_kkt_system.kkt_dimension)
 		println("[Complete] Variable Dimension: ", complete_kkt_system.variable_dimension)
 		convergence_log_complete_system = Dict{String, Any}()
-		elapsed_time = @elapsed begin
+		complete_elapsed_time = @elapsed begin
 			(; status, z, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters) = QuasiGOOP.solve(
 				QuasiGOOP.InteriorPoint(),
 				complete_kkt_system,
@@ -176,19 +197,149 @@ function demo(; rng_seed = 123)
 				linesearch, # :backtracking, :fraction_to_boundary
 			)
 		end
+		println("[Complete] Elapsed time: $(round(complete_elapsed_time, digits = 3)) seconds")
 		println("[Complete] status = $(status)")
-		println("[Complete] Primal solution: $(round.(z[1:num_players * n], digits = 3))")
+		complete_z = copy(z)
+		complete_primal = copy(z[1:(num_players*n)])
+		complete_pref_values = get_preference_values(num_players, n, problem, z, parameters)
+		println("[Complete] Primal solution: $(round.(complete_primal, digits = 3))")
 		print_preference_values("Complete", num_players, n, problem, z, parameters)
 		println("[Complete] kkt_error = $(kkt_error)")
+		complete_kkt_history = log10.(get(convergence_log_complete_system, "kkt_error_history", Float64[]))
+
+		if status != :solved
+			@info "[Complete] Attempt $(total_attempts) failed. Retrying with a new instance..."
+			continue
+		end
+
+		# Save solutions for this instance
+		instance_idx = solved_attempts + 1
+		JLD2.save_object(
+			joinpath(solution_data_dir, "reduced_solution_instance_$(instance_idx).jld2"),
+			Dict(
+				"solved_instance_idx" => instance_idx,
+				"primal" => reduced_primal,
+				"z" => reduced_z,
+			),
+		)
+		JLD2.save_object(
+			joinpath(solution_data_dir, "complete_solution_instance_$(instance_idx).jld2"),
+			Dict(
+				"solved_instance_idx" => instance_idx,
+				"primal" => complete_primal,
+				"z" => complete_z,
+			),
+		)
+
 		# Solve problem with ParametricMCPs (TODO)
 
+		# Compare solutions (primal solution and preference values) and save result
+		primal_l2_diff = norm(reduced_primal - complete_primal, 2)
+		println("[Compare] L2 norm between reduced and complete primal solutions: $(round(primal_l2_diff, digits = 6))")
 
-		# Save problem and solution data 
+		for player_idx in 1:num_players
+			reduced_vals = reduced_pref_values[player_idx]
+			complete_vals = complete_pref_values[player_idx]
+			pref_diff = reduced_vals .- complete_vals
+			pref_l2_diff = norm(pref_diff, 2)
+			push!(pref_l2_diffs_per_player[player_idx], pref_l2_diff)
+			println("[Compare] player $(player_idx) preference L2 difference: $(round(pref_l2_diff, digits = 6))")
+		end
 
+		# Compare elapsed times and save results
+		push!(reduced_elapsed_times, reduced_elapsed_time)
+		push!(complete_elapsed_times, complete_elapsed_time)
+		elapsed_time_diff = reduced_elapsed_time - complete_elapsed_time
+		println("[Compare] elapsed time reduced (s): $(round(reduced_elapsed_time, digits = 6))")
+		println("[Compare] elapsed time complete (s): $(round(complete_elapsed_time, digits = 6))")
+		println("[Compare] elapsed time |reduced-complete| (s): $(round(abs(elapsed_time_diff), digits = 6))")
 
-		# Save KKT error histories and plot convergence
-        Main.@infiltrate
+		# Save KKT error histories
+		push!(kkt_error_histories_reduced, reduced_kkt_history)
+		push!(kkt_error_histories_complete, complete_kkt_history)
+		JLD2.save_object(
+			joinpath(
+				histories_data_dir,
+				"kkt_error_history_reduced_instance_$(solved_attempts + 1).jld2",
+			),
+			reduced_kkt_history,
+		)
+		JLD2.save_object(
+			joinpath(
+				histories_data_dir,
+				"kkt_error_history_complete_instance_$(solved_attempts + 1).jld2",
+			),
+			complete_kkt_history,
+		)
+
 		solved_attempts += 1
+	end
+
+	# Report aggregate results across instances
+	JLD2.save_object(
+		joinpath(histories_data_dir, "pref_l2_diffs_per_player.jld2"),
+		pref_l2_diffs_per_player,
+	)
+	JLD2.save_object(
+		joinpath(histories_data_dir, "kkt_error_histories_reduced.jld2"),
+		kkt_error_histories_reduced,
+	)
+	JLD2.save_object(
+		joinpath(histories_data_dir, "kkt_error_histories_complete.jld2"),
+		kkt_error_histories_complete,
+	)
+	JLD2.save_object(
+		joinpath(histories_data_dir, "elapsed_times.jld2"),
+		Dict(
+			"reduced_elapsed_times" => reduced_elapsed_times,
+			"complete_elapsed_times" => complete_elapsed_times,
+			"absolute_differences" => abs.(reduced_elapsed_times .- complete_elapsed_times),
+		),
+	)
+
+	if !isempty(kkt_error_histories_reduced) && any(!isempty, kkt_error_histories_reduced)
+		reduced_aggregate_convergence_fig, _ = plot_convergence_plot_aggregate(
+			;
+			kkt_error_histories = kkt_error_histories_reduced,
+		)
+		CairoMakie.save(
+			joinpath(convergence_plots_dir, "convergence_aggregate_reduced.pdf"),
+			reduced_aggregate_convergence_fig,
+		)
+	end
+	if !isempty(kkt_error_histories_complete) && any(!isempty, kkt_error_histories_complete)
+		complete_aggregate_convergence_fig, _ = plot_convergence_plot_aggregate(
+			;
+			kkt_error_histories = kkt_error_histories_complete,
+		)
+		CairoMakie.save(
+			joinpath(convergence_plots_dir, "convergence_aggregate_complete.pdf"),
+			complete_aggregate_convergence_fig,
+		)
+	end
+
+	println("==== Aggregate preference L2-difference stats across $(solved_attempts) instance(s) ====")
+	for player_idx in 1:num_players
+		vals = pref_l2_diffs_per_player[player_idx]
+		if isempty(vals)
+			println("[Aggregate] player $(player_idx): no solved instances")
+		else
+			mean_val = mean(vals)
+			std_val = length(vals) > 1 ? std(vals) : 0.0
+			println("[Aggregate] player $(player_idx): mean=$(round(mean_val, digits = 6)), std=$(round(std_val, digits = 6)), n=$(length(vals))")
+		end
+	end
+	println("==== Aggregate elapsed-time stats across $(solved_attempts) instance(s) ====")
+	if !isempty(reduced_elapsed_times) && !isempty(complete_elapsed_times)
+		time_abs_diff = abs.(reduced_elapsed_times .- complete_elapsed_times)
+		reduced_std = length(reduced_elapsed_times) > 1 ? std(reduced_elapsed_times) : 0.0
+		complete_std = length(complete_elapsed_times) > 1 ? std(complete_elapsed_times) : 0.0
+		diff_std = length(time_abs_diff) > 1 ? std(time_abs_diff) : 0.0
+		println("[Aggregate] reduced elapsed time (s): mean=$(round(mean(reduced_elapsed_times), digits = 6)), std=$(round(reduced_std, digits = 6)), n=$(length(reduced_elapsed_times))")
+		println("[Aggregate] complete elapsed time (s): mean=$(round(mean(complete_elapsed_times), digits = 6)), std=$(round(complete_std, digits = 6)), n=$(length(complete_elapsed_times))")
+		println("[Aggregate] |reduced-complete| elapsed time (s): mean=$(round(mean(time_abs_diff), digits = 6)), std=$(round(diff_std, digits = 6)), n=$(length(time_abs_diff))")
+	else
+		println("[Aggregate] elapsed time: no solved instances")
 	end
 
 
