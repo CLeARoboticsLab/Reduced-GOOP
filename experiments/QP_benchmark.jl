@@ -26,54 +26,54 @@ function get_setup(n, num_players, mₑ, mᵢ; num_preferences = 2, r = 1)
 	dummy_primals = BlockArray(zeros(sum(primal_dimensions)), primal_dimensions)
 	dummy_parameters = BlockArray(zeros(sum(parameter_dimensions)), parameter_dimensions)
 
-	# preferences = [Vector{Function}(undef, num_preferences) for _ in 1:num_players]
-	# for i in 1:num_players, j in 1:num_preferences
-	# 	Qs, Qblk_local, Qk_local, q_local = generate_block_quadratic_problem(n, num_players; r = r)
-	# 	preferences[i][j] = let Qk = Qk_local, q = q_local
-	# 		(z, θ) -> 0.5 * z' * Qk * z #+ q' * z # 0.5 * z' * I(n*num_players) * z #+ q' * z
-	# 	end
-	# end
+	preferences = [Vector{Function}(undef, num_preferences) for _ in 1:num_players]
+	for i in 1:num_players, j in 1:num_preferences
+		Qs, Qblk_local, Qk_local, q_local = generate_block_quadratic_problem(n, num_players; r = r)
+		preferences[i][j] = let Qk = Qk_local, q = q_local
+			(z, θ) -> 0.5 * z' * Qk * z + q' * z # 0.5 * z' * I(n*num_players) * z #+ q' * z
+		end
+	end
 
-	Q1_Km1 = [                 2.2783   -1.3220    0.3665   -0.2518    2.9666    1.9171
-		-1.3220    0.7672   -0.2127    0.1461   -1.7215   -1.1124
-		 0.3665   -0.2127    0.0589   -0.0405    0.4772    0.3084
-		-0.2518    0.1461   -0.0405    0.0278   -0.3279   -0.2119
-		 2.9666   -1.7215    0.4772   -0.3279    3.8629    2.4962
-		 1.9171   -1.1124    0.3084   -0.2119    2.4962    1.6131]
+	# Q1_Km1 = [                 2.2783   -1.3220    0.3665   -0.2518    2.9666    1.9171
+	# 	-1.3220    0.7672   -0.2127    0.1461   -1.7215   -1.1124
+	# 	 0.3665   -0.2127    0.0589   -0.0405    0.4772    0.3084
+	# 	-0.2518    0.1461   -0.0405    0.0278   -0.3279   -0.2119
+	# 	 2.9666   -1.7215    0.4772   -0.3279    3.8629    2.4962
+	# 	 1.9171   -1.1124    0.3084   -0.2119    2.4962    1.6131]
 
-	Q1_K = [               0.4212   -0.7666    0.4922    0.7202    0.5488    0.3717
-		-0.7666    1.3952   -0.8959   -1.3106   -0.9987   -0.6764
-		 0.4922   -0.8959    0.5753    0.8416    0.6413    0.4343
-		 0.7202   -1.3106    0.8416    1.2312    0.9382    0.6354
-		 0.5488   -0.9987    0.6413    0.9382    0.7150    0.4842
-		 0.3717   -0.6764    0.4343    0.6354    0.4842    0.3279]
+	# Q1_K = [               0.4212   -0.7666    0.4922    0.7202    0.5488    0.3717
+	# 	-0.7666    1.3952   -0.8959   -1.3106   -0.9987   -0.6764
+	# 	 0.4922   -0.8959    0.5753    0.8416    0.6413    0.4343
+	# 	 0.7202   -1.3106    0.8416    1.2312    0.9382    0.6354
+	# 	 0.5488   -0.9987    0.6413    0.9382    0.7150    0.4842
+	# 	 0.3717   -0.6764    0.4343    0.6354    0.4842    0.3279]
 
-	Q2_Km1 = [                  1.3810    2.3846   -0.3234    0.7094    2.0933    2.0844
-		 2.3846    4.1175   -0.5583    1.2249    3.6144    3.5990
-		-0.3234   -0.5583    0.0757   -0.1661   -0.4901   -0.4880
-		 0.7094    1.2249   -0.1661    0.3644    1.0753    1.0707
-		 2.0933    3.6144   -0.4901    1.0753    3.1729    3.1593
-		 2.0844    3.5990   -0.4880    1.0707    3.1593    3.1459]
+	# Q2_Km1 = [                  1.3810    2.3846   -0.3234    0.7094    2.0933    2.0844
+	# 	 2.3846    4.1175   -0.5583    1.2249    3.6144    3.5990
+	# 	-0.3234   -0.5583    0.0757   -0.1661   -0.4901   -0.4880
+	# 	 0.7094    1.2249   -0.1661    0.3644    1.0753    1.0707
+	# 	 2.0933    3.6144   -0.4901    1.0753    3.1729    3.1593
+	# 	 2.0844    3.5990   -0.4880    1.0707    3.1593    3.1459]
 
-	Q2_K = [              0.3121   -0.0997    0.1100   -0.3276    0.4759   -0.4471
-		-0.0997    0.0318   -0.0351    0.1046   -0.1520    0.1428
-		 0.1100   -0.0351    0.0388   -0.1154    0.1677   -0.1576
-		-0.3276    0.1046   -0.1154    0.3439   -0.4996    0.4693
-		 0.4759   -0.1520    0.1677   -0.4996    0.7257   -0.6818
-		-0.4471    0.1428   -0.1576    0.4693   -0.6818    0.6405]
+	# Q2_K = [              0.3121   -0.0997    0.1100   -0.3276    0.4759   -0.4471
+	# 	-0.0997    0.0318   -0.0351    0.1046   -0.1520    0.1428
+	# 	 0.1100   -0.0351    0.0388   -0.1154    0.1677   -0.1576
+	# 	-0.3276    0.1046   -0.1154    0.3439   -0.4996    0.4693
+	# 	 0.4759   -0.1520    0.1677   -0.4996    0.7257   -0.6818
+	# 	-0.4471    0.1428   -0.1576    0.4693   -0.6818    0.6405]
 
-	Main.@infiltrate
+	# Main.@infiltrate
 
-	preferences = Vector{Vector{Function}}([
-		Function[
-			(z, θ) -> 0.5 * z' * Q1_Km1 * z,
-			(z, θ) -> 0.5 * z' * Q1_K * z,
-		],
-		Function[
-			(z, θ) -> 0.5 * z' * Q2_Km1 * z,
-			(z, θ) -> 0.5 * z' * Q2_K * z,
-		],
-	])
+	# preferences = Vector{Vector{Function}}([
+	# 	Function[
+	# 		(z, θ) -> 0.5 * z' * Q1_Km1 * z,
+	# 		(z, θ) -> 0.5 * z' * Q1_K * z,
+	# 	],
+	# 	Function[
+	# 		(z, θ) -> 0.5 * z' * Q2_Km1 * z,
+	# 		(z, θ) -> 0.5 * z' * Q2_K * z,
+	# 	],
+	# ])
 
 
 	is_prioritized_constraint = [
@@ -95,7 +95,7 @@ function get_setup(n, num_players, mₑ, mᵢ; num_preferences = 2, r = 1)
 	# 	function (z, θ)
 	# 		vcat(
 	# 			z[Block(i)][1:2] .- 1.0,
-	# 			# sum(z[Block(i)]) - 10.0 # sum(z) - 10.0 # avoid same constraint for all players
+	# 			sum(z) - 10.0 
 	# 		)
 	# 	end for i in 1:num_players
 	# ]
@@ -109,6 +109,16 @@ function get_setup(n, num_players, mₑ, mᵢ; num_preferences = 2, r = 1)
 		(z, θ) -> A2 * z .- [0.2116; 0.2655],
 	]
 
+	# equality_constraints = Vector{Function}(undef, num_players)
+	# for i in 1:num_players
+	# 	Hⁱ = rand(mₑ, n * num_players)
+	# 	x = rand(n * num_players)
+	# 	hⁱ = Hⁱ * x
+	# 	equality_constraints[i] = let H = Hⁱ, h = hⁱ
+	# 		(z, θ) -> H * z - h
+	# 	end
+	# end
+
 	inequality_constraints = [
 		function (z, θ)
 			vcat(
@@ -119,29 +129,6 @@ function get_setup(n, num_players, mₑ, mᵢ; num_preferences = 2, r = 1)
 	]
 
 
-	shared_equality_constraint = nothing
-	shared_inequality_constraint = nothing
-
-	# Main.@infiltrate
-
-	# Q₁ = I(n)
-	# c₁ = [1.0, 0.0, -1.0, 2.0]
-	# Q₂ = 2I(n) # [0 0 0 0; 0 1 0 0; 0 0 2 0; 0 0 0 1]
-	# c₂ = [-1.0, 2.0, 0.0, 1.0]
-	# Q₃ = [1 0 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 0] # I(n)
-	# c₃ = [0.5, -0.5, 1.0, 0.0]
-	# J₁(x, θ) = 0.5x[1:n]'*Q₁*x[1:n] + c₁'*x[1:n]
-	# J₂(x, θ) = 0.5x[1:n]'*Q₂*x[1:n] + c₂'*x[1:n]
-	# J₃(x, θ) = 0.5x[1:n]'*Q₃*x[1:n] + c₃'*x[1:n]
-	# Aₑ = [1 0 1 1; 0 1 1 0]
-	# bₑ = [1.0, 2.0]
-	# g_eq(x, θ) = Aₑ*x[1:n] .- bₑ
-	# g_ineq(x, θ) = [x[1] - 0.5; x[2] - 0.5]
-	# preferences = [[J₁, J₂, J₃]]
-	# equality_constraints = [g_eq]
-	# inequality_constraints = [g_ineq]
-
-
 	QuasiGOOP.ParametricGOOP(
 		dummy_primals,
 		dummy_parameters;
@@ -149,8 +136,8 @@ function get_setup(n, num_players, mₑ, mᵢ; num_preferences = 2, r = 1)
 		is_prioritized_constraint,
 		equality_constraints,
 		inequality_constraints = [nothing for _ in 1:num_players],
-		shared_equality_constraint,
-		shared_inequality_constraint,
+		shared_equality_constraint = nothing,
+		shared_inequality_constraint = nothing,
 	)
 end
 
@@ -160,9 +147,9 @@ function demo(; rng_seed = 123)
 
 	# Quadratic GOOP Problem setup
 	num_players = 2
-	num_preferences = 2
+	num_preferences = 4
 	n = 3 # x primal dimension (per player)
-	mₑ = 2 # equality constraint dimension
+	mₑ = 1 # equality constraint dimension
 	mᵢ = 0 # inequality constraint dimension
 	parameters = BlockArray(zeros(sum(fill(1, num_players))), fill(1, num_players))
 	num_instances = 1
@@ -214,7 +201,6 @@ function demo(; rng_seed = 123)
 		reduced_kkt_system = QuasiGOOP.generate_slacked_reduced_kkt_system(problem)
 		println("[Reduced] KKT Dimension: ", reduced_kkt_system.kkt_dimension)
 		println("[Reduced] Variable Dimension: ", reduced_kkt_system.variable_dimension)
-		Main.@infiltrate
 		convergence_log_reduced_system = Dict{String, Any}()
 		elapsed_time = @elapsed begin
 			(; status, z, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters) = QuasiGOOP.solve(
@@ -273,7 +259,6 @@ function demo(; rng_seed = 123)
 
 		# Save KKT error histories and plot convergence
 
-		Main.@infiltrate
 		solved_attempts += 1
 	end
 
