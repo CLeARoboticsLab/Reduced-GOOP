@@ -229,6 +229,7 @@ function generate_slacked_reduced_kkt_system(
 			else
 				@assert length(h) == 1 "Expected a single preference function at the base level, but got $(length(h))"
 				# Highest priority is a cost. 
+				
 				L = h - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
 					(isnothing(fₛ) ? 0 : λₛ' * fₛ) - (isnothing(gₛ) ? 0 : γₛ' * gₛ)
 				∇L = Symbolics.gradient(L, x[Block(player)])
@@ -364,7 +365,7 @@ function generate_slacked_reduced_kkt_system(
 				(isnothing(fₛ) ? 0 : λ̃ₛ' * fₛ) - (isnothing(gₛ) ? 0 : γ̃ₛ' * gₛ) -
 				(isnothing(g) ? 0 : ϕ' * (repeat(g, num_levels - level) .* blocked_Γ_cs[Block(level+1):Block(num_levels)])) -
 				(isnothing(gₛ) ? 0 : ϕₛ' * (repeat(gₛ, num_levels - level) .* blocked_Γ_cs_shared[Block(level+1):Block(num_levels)]))
-
+			
 			∇L = Symbolics.gradient(L, x[Block(player)])
 			F̃ = Vector{symbolic_type}(
 				filter!(
@@ -413,7 +414,7 @@ function generate_slacked_reduced_kkt_system(
 		),
 	)
 
-	# Main.@infiltrate
+	# 
 
 	# Pack all variables together.
 	z = Vector{symbolic_type}(
@@ -429,7 +430,7 @@ function generate_slacked_reduced_kkt_system(
 	interior_point_slack_dims = vcat(idx[Block(3)], idx[Block(9)]) # Σ, σₛ
 	inequality_constraint_dual_dims = vcat(idx[Block(5)], idx[Block(8)]) # Γ, γₛ
 
-	# Main.@infiltrate
+	# 
 
 	BuildGOOPKKTSystem(
 		F,
@@ -833,7 +834,7 @@ function generate_slacked_complete_kkt_system(
 		),
 	)
 
-	# Main.@infiltrate
+	# 
 
 	# Pack all variables together.
 	z = Vector{symbolic_type}(
@@ -847,7 +848,7 @@ function generate_slacked_complete_kkt_system(
 	interior_point_slack_dims = vcat(idx[Block(3)]) # Σ
 	inequality_constraint_dual_dims = vcat(idx[Block(5)]) # Γ
 
-	# Main.@infiltrate
+	# 
 
 	BuildGOOPKKTSystem(
 		F,
