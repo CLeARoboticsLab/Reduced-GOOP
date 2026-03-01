@@ -29,7 +29,7 @@ function get_setup(n, num_players, mₑ, mᵢ; num_preferences = 2, r = 1)
 	preferences = [Vector{Function}(undef, num_preferences) for _ in 1:num_players]
 	for i in 1:num_players, j in 1:num_preferences
         Qk_local = rand_psd(n * num_players, r)
-        q_local = randn(n * num_players)
+        q_local = Qk_local * randn(n * num_players) # q ∈ Col(Qk) for boundedness
 		preferences[i][j] = let Qk = Qk_local, q = q_local
 			(z, θ) -> 0.5 * z' * Qk * z + q' * z 
 		end
@@ -77,9 +77,9 @@ function demo(; rng_seed = 123)
 
 	# Quadratic GOOP Problem setup
 	num_players = 2
-	num_preferences = 2
-	n = 5 # x primal dimension (per player)
-	mₑ = 2 # equality constraint dimension
+	num_preferences = 3
+	n = 20 # x primal dimension (per player)
+	mₑ = 5 # equality constraint dimension
 	mᵢ = 0 # inequality constraint dimension
 	parameters = BlockArray(zeros(sum(fill(1, num_players))), fill(1, num_players))
 	num_instances = 1
