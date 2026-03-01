@@ -109,21 +109,21 @@ function get_setup(n, num_players, mₑ, mᵢ; num_preferences = 2, r = 1)
 		(z, θ) -> A2 * z .- [0.2116; 0.2655],
 	]
 
-	# equality_constraints = Vector{Function}(undef, num_players)
-	# for i in 1:num_players
-	# 	Hⁱ = rand(mₑ, n * num_players)
-	# 	x = rand(n * num_players)
-	# 	hⁱ = Hⁱ * x
-	# 	equality_constraints[i] = let H = Hⁱ, h = hⁱ
-	# 		(z, θ) -> H * z - h
-	# 	end
-	# end
+	equality_constraints = Vector{Function}(undef, num_players)
+	for i in 1:num_players
+		Hⁱ1 = rand(mₑ, n)
+		Hⁱ2 = rand(mₑ, n)
+		hⁱ = rand(mₑ)
+		equality_constraints[i] = let H = hcat(Hⁱ1, Hⁱ2), h = hⁱ
+			(z, θ) -> H * z - h
+		end
+	end
 
 	inequality_constraints = [
 		function (z, θ)
 			vcat(
-				z .+ 1.0,  # z ≥ - 1.0
-				-z .+ 1.0, # z ≤ 1.0
+				z[Block(i)] .+ 1.0,  # z ≥ - 1.0
+				-z[Block(i)] .+ 1.0, # z ≤ 1.0
 			)
 		end for i in 1:num_players
 	]
@@ -147,9 +147,9 @@ function demo(; rng_seed = 123)
 
 	# Quadratic GOOP Problem setup
 	num_players = 2
-	num_preferences = 4
+	num_preferences = 2
 	n = 3 # x primal dimension (per player)
-	mₑ = 1 # equality constraint dimension
+	mₑ = 2 # equality constraint dimension
 	mᵢ = 0 # inequality constraint dimension
 	parameters = BlockArray(zeros(sum(fill(1, num_players))), fill(1, num_players))
 	num_instances = 1
@@ -228,7 +228,7 @@ function demo(; rng_seed = 123)
 		complete_kkt_system = QuasiGOOP.generate_slacked_complete_kkt_system(problem)
 		println("[Complete] KKT Dimension: ", complete_kkt_system.kkt_dimension)
 		println("[Complete] Variable Dimension: ", complete_kkt_system.variable_dimension)
-		# Main.@infiltrate
+		Main.@infiltrate
 		convergence_log_complete_system = Dict{String, Any}()
 		elapsed_time = @elapsed begin
 			(; status, z, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters) = QuasiGOOP.solve(

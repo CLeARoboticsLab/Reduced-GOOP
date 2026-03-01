@@ -499,7 +499,6 @@ function generate_slacked_complete_kkt_system(
 		g = isnothing(goop.inequality_constraints[player]) ? nothing :
 			goop.inequality_constraints[player](x, θ)
 
-
 		# Base case is the inner-most layer.
 		if length(preferences) == 1
 
@@ -753,7 +752,7 @@ function generate_slacked_complete_kkt_system(
 			∇L = Symbolics.gradient(L, vcat(z, preference_slack))
 
 			F̃ = [
-				∇L .+ η * vcat(z, preference_slack)
+				∇L #.+ η * vcat(z, preference_slack)
 				h .+ preference_slack .- σₚ
 				σₚ .* γₚ .- ϵ
 				preference_slack .- σₚₛ
