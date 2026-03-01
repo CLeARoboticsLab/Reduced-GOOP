@@ -213,7 +213,7 @@ function generate_slacked_reduced_kkt_system(
 					filter!(
 						!isnothing,
 						[
-							∇L .+ η * vcat(x[Block(player)], preference_slack)
+							∇L #.+ η * vcat(x[Block(player)], preference_slack)
 							f
 							h .+ preference_slack .- σₚ
 							σₚ .* γₚ .- ϵ
@@ -236,7 +236,7 @@ function generate_slacked_reduced_kkt_system(
 					filter!(
 						!isnothing,
 						[
-							∇L .+ η * x[Block(player)]
+							∇L #.+ η * x[Block(player)]
 							f
 							(isnothing(g) ? nothing : g .- σ)
 							(isnothing(g) ? nothing : σ .* γ .- ϵ)
@@ -342,7 +342,7 @@ function generate_slacked_reduced_kkt_system(
 			∇L = Symbolics.gradient(L, vcat(x[Block(player)], preference_slack))
 
 			F̃ = [
-				∇L .+ η * vcat(x[Block(player)], preference_slack)
+				∇L #.+ η * vcat(x[Block(player)], preference_slack)
 				h .+ preference_slack .- σₚ
 				σₚ .* γₚ .- ϵ
 				preference_slack .- σₚₛ
@@ -370,7 +370,7 @@ function generate_slacked_reduced_kkt_system(
 				filter!(
 					!isnothing,
 					[
-						∇L .+ η * x[Block(player)]
+						∇L #.+ η * x[Block(player)]
 						(isnothing(g) ? nothing : σ .* γ .- ϵ)
 						(isnothing(gₛ) ? nothing : σₛ .* γ̃ₛ .- ϵ)
 						F
@@ -595,7 +595,7 @@ function generate_slacked_complete_kkt_system(
 					filter!(
 						!isnothing,
 						[
-							∇L .+ η * vcat(x[Block(player)], preference_slack)
+							∇L #.+ η * vcat(x[Block(player)], preference_slack)
 							f
 							fₛ
 							h .+ preference_slack .- σₚ
@@ -645,7 +645,7 @@ function generate_slacked_complete_kkt_system(
 					filter!(
 						!isnothing,
 						[
-							∇L .+ η * x[Block(player)]
+							∇L #.+ η * x[Block(player)]
 							f
 							fₛ
 							isnothing(g) ? nothing : g .- σ
