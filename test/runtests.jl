@@ -57,7 +57,12 @@ using BlockArrays: BlockArrays, BlockArray, Block, blocks, blocksizes
 		GOOP_kkt_system,
 		parameter_value;
 		z₀ = nothing, #[0.0, 0.0, 0.0, 0.0],
-		ϵ₀ = 1e-5,
+		tol = 1e-3,
+		η₀ = 0.0,
+		ϵ₀ = 1e-5, #0.01
+		max_inner_iters = 50,
+		max_outer_iters = 2,
+		min_stepsize = 1e-5,
 	)
 	new_primals = x[1:n]
 	new_objective = J₁(new_primals, 0)

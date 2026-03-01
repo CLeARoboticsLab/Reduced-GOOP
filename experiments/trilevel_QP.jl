@@ -107,7 +107,7 @@ GOOP_trial1 = QuasiGOOP.ParametricGOOP(
 	shared_inequality_constraint,
 )
 
-GOOP_kkt_system = QuasiGOOP.generate_slacked_reduced_kkt_system(GOOP_trial1)
+GOOP_kkt_system = QuasiGOOP.generate_slacked_complete_kkt_system(GOOP_trial1)
 parameter_value = θ
 status, z_sol_new_goop, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters = QuasiGOOP.solve(
 	QuasiGOOP.InteriorPoint(),
