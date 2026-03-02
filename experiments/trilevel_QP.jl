@@ -149,7 +149,7 @@ z_val = zeros(length(z_symbolic) - n) #z[Not(1:n)] .+ 1e-2*rand() # z[Not(1:n)] 
 prob = isnothing(inequality_constraints[1]) ? NonlinearProblem(test_f, z_val) : NonlinearLeastSquaresProblem(test_f, z_val)
 sol = NonlinearSolve.solve(prob)
 @assert length(sol.u) == length(z_symbolic) - n
-# compute l1 difference between two solutions
+# compute difference between two solutions
 println("Duals from nonlinear solve: $(sol.u)")
 @show sol.u .- z_sol_new_goop[Not(1:n)]
 @show norm(sol.u .- z_sol_new_goop[Not(1:n)], Inf)

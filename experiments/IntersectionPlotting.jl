@@ -260,6 +260,7 @@ function plot_convergence_plot_aggregate(; kkt_error_histories)
 		xlabel = L"\text{iteration} ~\ell",
 		ylabel = L"$\log(|| \mathcal{K}_{\rho}^{(\ell)} ||_2)$",
 		yticks = -10:4,
+		xticks = 0:10:maximum(x),
 	)
 
 	CairoMakie.band!(ax, x, y_lower, y_upper; color = (:dodgerblue, 0.25))
