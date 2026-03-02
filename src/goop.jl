@@ -213,7 +213,7 @@ function generate_slacked_reduced_kkt_system(
 					filter!(
 						!isnothing,
 						[
-							∇L #.+ η * vcat(x[Block(player)], preference_slack)
+							∇L .+ η * vcat(x[Block(player)], preference_slack)
 							f
 							h .+ preference_slack .- σₚ
 							σₚ .* γₚ .- ϵ
@@ -237,7 +237,7 @@ function generate_slacked_reduced_kkt_system(
 					filter!(
 						!isnothing,
 						[
-							∇L #.+ η * x[Block(player)]
+							∇L .+ η * x[Block(player)]
 							f
 							(isnothing(g) ? nothing : g .- σ)
 							(isnothing(g) ? nothing : σ .* γ .- ϵ)
@@ -343,7 +343,7 @@ function generate_slacked_reduced_kkt_system(
 			∇L = Symbolics.gradient(L, vcat(x[Block(player)], preference_slack))
 
 			F̃ = [
-				∇L #.+ η * vcat(x[Block(player)], preference_slack)
+				∇L .+ η * vcat(x[Block(player)], preference_slack)
 				h .+ preference_slack .- σₚ
 				σₚ .* γₚ .- ϵ
 				preference_slack .- σₚₛ
@@ -371,7 +371,7 @@ function generate_slacked_reduced_kkt_system(
 				filter!(
 					!isnothing,
 					[
-						∇L #.+ η * x[Block(player)]
+						∇L .+ η * x[Block(player)]
 						(isnothing(g) ? nothing : σ .* γ .- ϵ)
 						(isnothing(gₛ) ? nothing : σₛ .* γ̃ₛ .- ϵ)
 						F
@@ -429,8 +429,6 @@ function generate_slacked_reduced_kkt_system(
 	preference_slack_dims = idx[Block(2)] # s
 	interior_point_slack_dims = vcat(idx[Block(3)], idx[Block(9)]) # Σ, σₛ
 	inequality_constraint_dual_dims = vcat(idx[Block(5)], idx[Block(8)]) # Γ, γₛ
-
-	# 
 
 	BuildGOOPKKTSystem(
 		F,

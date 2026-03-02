@@ -75,7 +75,7 @@ function get_setup(n, num_players, mₑ, mᵢ; num_preferences = 2, r = 1)
 		preferences,
 		is_prioritized_constraint,
 		equality_constraints,
-		inequality_constraints = [nothing for _ in 1:num_players],
+		inequality_constraints,
 		shared_equality_constraint = nothing,
 		shared_inequality_constraint = nothing,
 	)
@@ -86,19 +86,19 @@ function demo(; num_players = 2, num_preferences = 5, rng_seed = 123)
 	Random.seed!(rng_seed)
 
 	# Quadratic GOOP Problem setup
-	n = 10 # x primal dimension (per player)
+	n = 20 # x primal dimension (per player)
 	mₑ = 5 # equality constraint dimension
-	mᵢ = 0 # inequality constraint dimension
+	mᵢ = 2 # inequality constraint dimension
 	parameters = BlockArray(zeros(sum(fill(1, num_players))), fill(1, num_players))
 	num_instances = 10
 
 	run_id = "run_1_$(num_players)players_$(num_preferences)prefs_$(n)pdim_$(mₑ)mₑ_$(mᵢ)mᵢ"
 	linesearch = :backtracking # :backtracking, :fraction_to_boundary
 	verbose = false
-	tol = 1e-2
+	tol = 2e-2
 	ϵ₀ = 1e-2
 	η₀ = 0.0
-	max_inner_iters = 50
+	max_inner_iters = 70
 	max_outer_iters = 2
 	min_stepsize = 1e-5
 
@@ -214,22 +214,13 @@ function demo(; num_players = 2, num_preferences = 5, rng_seed = 123)
 
 		# Save solutions for this instance
 		instance_idx = solved_attempts + 1
-		JLD2.save_object(
-			joinpath(solution_data_dir, "reduced_solution_instance_$(instance_idx).jld2"),
-			Dict(
-				"solved_instance_idx" => instance_idx,
-				"primal" => reduced_primal,
-				"z" => reduced_z,
-			),
-		)
-		JLD2.save_object(
-			joinpath(solution_data_dir, "complete_solution_instance_$(instance_idx).jld2"),
-			Dict(
-				"solved_instance_idx" => instance_idx,
-				"primal" => complete_primal,
-				"z" => complete_z,
-			),
-		)
+		solved_instance_idx = instance_idx
+		primal = reduced_primal
+		z = reduced_z
+		@save joinpath(solution_data_dir, "reduced_solution_instance_$(instance_idx).jld2") solved_instance_idx primal z reduced_pref_values
+		primal = complete_primal
+		z = complete_z
+		@save joinpath(solution_data_dir, "complete_solution_instance_$(instance_idx).jld2") solved_instance_idx primal z complete_pref_values
 
 		# Solve problem with ParametricMCPs (TODO)
 
@@ -249,52 +240,26 @@ function demo(; num_players = 2, num_preferences = 5, rng_seed = 123)
 		# Compare elapsed times and save results
 		push!(reduced_elapsed_times, reduced_elapsed_time)
 		push!(complete_elapsed_times, complete_elapsed_time)
-		elapsed_time_diff = reduced_elapsed_time - complete_elapsed_time
 		println("[Compare] elapsed time reduced (s): $(round(reduced_elapsed_time, digits = 6))")
 		println("[Compare] elapsed time complete (s): $(round(complete_elapsed_time, digits = 6))")
 
 		# Save KKT error histories
 		push!(kkt_error_histories_reduced, reduced_kkt_history)
 		push!(kkt_error_histories_complete, complete_kkt_history)
-		JLD2.save_object(
-			joinpath(
-				histories_data_dir,
-				"kkt_error_history_reduced_instance_$(solved_attempts + 1).jld2",
-			),
-			reduced_kkt_history,
-		)
-		JLD2.save_object(
-			joinpath(
-				histories_data_dir,
-				"kkt_error_history_complete_instance_$(solved_attempts + 1).jld2",
-			),
-			complete_kkt_history,
-		)
+		kkt_error_history = reduced_kkt_history
+		@save joinpath(histories_data_dir, "kkt_error_history_reduced_instance_$(solved_attempts + 1).jld2") kkt_error_history
+		kkt_error_history = complete_kkt_history
+		@save joinpath(histories_data_dir, "kkt_error_history_complete_instance_$(solved_attempts + 1).jld2") kkt_error_history
 
 		solved_attempts += 1
 	end
 
 	# Report aggregate results across instances
-	JLD2.save_object(
-		joinpath(histories_data_dir, "pref_l2_diffs_per_player.jld2"),
-		pref_l2_diffs_per_player,
-	)
-	JLD2.save_object(
-		joinpath(histories_data_dir, "kkt_error_histories_reduced.jld2"),
-		kkt_error_histories_reduced,
-	)
-	JLD2.save_object(
-		joinpath(histories_data_dir, "kkt_error_histories_complete.jld2"),
-		kkt_error_histories_complete,
-	)
-	JLD2.save_object(
-		joinpath(histories_data_dir, "elapsed_times.jld2"),
-		Dict(
-			"reduced_elapsed_times" => reduced_elapsed_times,
-			"complete_elapsed_times" => complete_elapsed_times,
-			"absolute_differences" => abs.(reduced_elapsed_times .- complete_elapsed_times),
-		),
-	)
+	@save joinpath(histories_data_dir, "pref_l2_diffs_per_player.jld2") pref_l2_diffs_per_player
+	@save joinpath(histories_data_dir, "kkt_error_histories_reduced.jld2") kkt_error_histories_reduced
+	@save joinpath(histories_data_dir, "kkt_error_histories_complete.jld2") kkt_error_histories_complete
+	absolute_differences = abs.(reduced_elapsed_times .- complete_elapsed_times)
+	@save joinpath(histories_data_dir, "elapsed_times.jld2") reduced_elapsed_times complete_elapsed_times absolute_differences
 
 	if !isempty(kkt_error_histories_reduced) && any(!isempty, kkt_error_histories_reduced)
 		reduced_aggregate_convergence_fig, _ = plot_convergence_plot_aggregate(
