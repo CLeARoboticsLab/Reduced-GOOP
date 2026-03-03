@@ -15,7 +15,7 @@ using Statistics: mean, std
 using JLD2
 using Random
 
-include(joinpath(@__DIR__, "IntersectionPlotting.jl"))
+include(joinpath(@__DIR__, "Plotting.jl"))
 
 function print_preference_values(label, num_players, n, problem, z, θ)
 	println("[$(label)] Preference values at solution:")
@@ -82,23 +82,28 @@ function get_setup(n, num_players, mₑ, mᵢ; num_preferences = 2, r = 1)
 end
 
 
-function demo(; num_players = 2, num_preferences = 5, rng_seed = 123)
+function demo(;
+	num_players = 2,
+	num_preferences = 5,
+	rng_seed = 123,
+	show_convergence_legend = true,
+)
 	Random.seed!(rng_seed)
 
 	# Quadratic GOOP Problem setup
-	n = 20 # x primal dimension (per player)
-	mₑ = 5 # equality constraint dimension
+	n = 10 # x primal dimension (per player)
+	mₑ = 3 # equality constraint dimension
 	mᵢ = 2 # inequality constraint dimension
 	parameters = BlockArray(zeros(sum(fill(1, num_players))), fill(1, num_players))
-	num_instances = 10
+	num_instances = 2
 
-	run_id = "run_1_$(num_players)players_$(num_preferences)prefs_$(n)pdim_$(mₑ)mₑ_$(mᵢ)mᵢ"
+	run_id = "run_1_$(num_players)players_$(num_preferences)prefs_$(ϵ₀)ρ_$(n)pdim_$(mₑ)mₑ_$(mᵢ)mᵢ"
 	linesearch = :backtracking # :backtracking, :fraction_to_boundary
 	verbose = false
 	tol = 2e-2
-	ϵ₀ = 1e-2
+	ϵ₀ = 1e-2 #ρ
 	η₀ = 0.0
-	max_inner_iters = 70
+	max_inner_iters = 30
 	max_outer_iters = 2
 	min_stepsize = 1e-5
 
@@ -326,6 +331,19 @@ function demo(; num_players = 2, num_preferences = 5, rng_seed = 123)
 		CairoMakie.save(
 			joinpath(convergence_plots_dir, "convergence_aggregate_complete.pdf"),
 			complete_aggregate_convergence_fig,
+		)
+	end
+	if (!isempty(kkt_error_histories_reduced) && any(!isempty, kkt_error_histories_reduced)) &&
+	   (!isempty(kkt_error_histories_complete) && any(!isempty, kkt_error_histories_complete))
+		combined_aggregate_convergence_fig, _ = plot_convergence_plot_aggregate_comparison(
+			;
+			reduced_kkt_error_histories = kkt_error_histories_reduced,
+			complete_kkt_error_histories = kkt_error_histories_complete,
+			show_legend = show_convergence_legend,
+		)
+		CairoMakie.save(
+			joinpath(convergence_plots_dir, "convergence_aggregate_reduced_vs_complete.pdf"),
+			combined_aggregate_convergence_fig,
 		)
 	end
 

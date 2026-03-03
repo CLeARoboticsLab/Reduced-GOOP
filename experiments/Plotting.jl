@@ -268,3 +268,70 @@ function plot_convergence_plot_aggregate(; kkt_error_histories)
 
 	return figure, ax
 end
+
+function plot_convergence_plot_aggregate_comparison(;
+	reduced_kkt_error_histories,
+	complete_kkt_error_histories,
+	show_legend = true,
+)
+	if isempty(reduced_kkt_error_histories) || isempty(complete_kkt_error_histories)
+		error("Both reduced_kkt_error_histories and complete_kkt_error_histories must be non-empty.")
+	end
+
+	function aggregate_trace_stats(kkt_error_histories)
+		max_trace_length = maximum(length, kkt_error_histories)
+		num_instances = length(kkt_error_histories)
+		mean_kkt_error = fill(NaN, max_trace_length)
+		std_kkt_error = fill(NaN, max_trace_length)
+
+		for iteration_idx in 1:max_trace_length
+			values_at_iteration = Float64[]
+			for instance_idx in 1:num_instances
+				trace = kkt_error_histories[instance_idx]
+				if iteration_idx <= length(trace)
+					push!(values_at_iteration, trace[iteration_idx])
+				end
+			end
+			if !isempty(values_at_iteration)
+				mean_value = sum(values_at_iteration) / length(values_at_iteration)
+				variance = sum((v - mean_value)^2 for v in values_at_iteration) / length(values_at_iteration)
+				mean_kkt_error[iteration_idx] = mean_value
+				std_kkt_error[iteration_idx] = sqrt(variance)
+			end
+		end
+
+		valid_indices = findall(!isnan, mean_kkt_error)
+		x = collect(valid_indices)
+		y_mean = mean_kkt_error[valid_indices]
+		y_lower = y_mean .- std_kkt_error[valid_indices]
+		y_upper = y_mean .+ std_kkt_error[valid_indices]
+		(; x, y_mean, y_lower, y_upper)
+	end
+
+	reduced_stats = aggregate_trace_stats(reduced_kkt_error_histories)
+	complete_stats = aggregate_trace_stats(complete_kkt_error_histories)
+	max_x = max(
+		isempty(reduced_stats.x) ? 0 : maximum(reduced_stats.x),
+		isempty(complete_stats.x) ? 0 : maximum(complete_stats.x),
+	)
+
+	figure = CairoMakie.Figure()
+	ax = CairoMakie.Axis(
+		figure[1, 1];
+		xlabel = L"\text{iteration} ~\ell",
+		ylabel = L"$\log(|| \mathcal{K}_{\rho}^{(\ell)} ||_2)$",
+		yticks = -10:4,
+		xticks = 0:10:max_x,
+	)
+
+	CairoMakie.band!(ax, reduced_stats.x, reduced_stats.y_lower, reduced_stats.y_upper; color = (:dodgerblue, 0.2))
+	CairoMakie.lines!(ax, reduced_stats.x, reduced_stats.y_mean; color = :dodgerblue, linewidth = 3, label = "Reduced")
+
+	CairoMakie.band!(ax, complete_stats.x, complete_stats.y_lower, complete_stats.y_upper; color = (:crimson, 0.2))
+	CairoMakie.lines!(ax, complete_stats.x, complete_stats.y_mean; color = :crimson, linewidth = 3, label = "Complete")
+
+	if show_legend
+		CairoMakie.axislegend(ax; position = :rt)
+	end
+	return figure, ax
+end
