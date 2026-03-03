@@ -87,6 +87,7 @@ function demo(;
 	num_preferences = 5,
 	rng_seed = 123,
 	show_convergence_legend = true,
+	show_ylabel = true,
 )
 	Random.seed!(rng_seed)
 
@@ -95,9 +96,8 @@ function demo(;
 	mₑ = 3 # equality constraint dimension
 	mᵢ = 2 # inequality constraint dimension
 	parameters = BlockArray(zeros(sum(fill(1, num_players))), fill(1, num_players))
-	num_instances = 2
+	num_instances = 10
 
-	run_id = "run_1_$(num_players)players_$(num_preferences)prefs_$(ϵ₀)ρ_$(n)pdim_$(mₑ)mₑ_$(mᵢ)mᵢ"
 	linesearch = :backtracking # :backtracking, :fraction_to_boundary
 	verbose = false
 	tol = 2e-2
@@ -106,6 +106,7 @@ function demo(;
 	max_inner_iters = 30
 	max_outer_iters = 2
 	min_stepsize = 1e-5
+	run_id = "run_1_$(num_players)players_$(num_preferences)prefs_$(ϵ₀)ρ_$(n)pdim_$(mₑ)mₑ_$(mᵢ)mᵢ"
 
 	# Create file dir
 	run_dir = joinpath("data", "QP_benchmark", run_id)
@@ -218,51 +219,51 @@ function demo(;
 			continue
 		end
 
-		# If primal solutions diverge, attempt dual recovery for the complete KKT system with reduced primals fixed.
-		if norm(reduced_primal - complete_primal, Inf) > tol
-			@warn "[Check] Reduced and complete primals differ (Inf-norm > tol). Trying to recover complete-system duals with reduced primal fixed."
-			F_symbolic = complete_kkt_system.F_symbolic
-			z_symbolic = complete_kkt_system.z_symbolic
-			primal_indices = complete_kkt_system.primal_dims
-			nonprimal_indices = Not(primal_indices)
+		# # If primal solutions diverge, attempt dual recovery for the complete KKT system with reduced primals fixed.
+		# if norm(reduced_primal - complete_primal, Inf) > tol
+		# 	@warn "[Check] Reduced and complete primals differ (Inf-norm > tol). Trying to recover complete-system duals with reduced primal fixed."
+		# 	F_symbolic = complete_kkt_system.F_symbolic
+		# 	z_symbolic = complete_kkt_system.z_symbolic
+		# 	primal_indices = complete_kkt_system.primal_dims
+		# 	nonprimal_indices = Not(primal_indices)
 
-			substitution_dict = Dict{Any, Any}()
-			for (sym, val) in zip(z_symbolic[primal_indices], reduced_primal)
-				substitution_dict[sym] = val
-			end
-			let ϵ = only(SymbolicTracingUtils.make_variables(backend, :ϵ, 1))
-				η = only(SymbolicTracingUtils.make_variables(backend, :η, 1))
-				substitution_dict[ϵ] = ϵ₀
-				substitution_dict[η] = η₀
-			end
+		# 	substitution_dict = Dict{Any, Any}()
+		# 	for (sym, val) in zip(z_symbolic[primal_indices], reduced_primal)
+		# 		substitution_dict[sym] = val
+		# 	end
+		# 	let ϵ = only(SymbolicTracingUtils.make_variables(backend, :ϵ, 1))
+		# 		η = only(SymbolicTracingUtils.make_variables(backend, :η, 1))
+		# 		substitution_dict[ϵ] = ϵ₀
+		# 		substitution_dict[η] = η₀
+		# 	end
 
-			F_symbolic_after_sub = Symbolics.substitute(F_symbolic, substitution_dict)
-			F_eval = first(
-				Symbolics.build_function(
-					F_symbolic_after_sub,
-					z_symbolic[nonprimal_indices];
-					expression = Val(false),
-				),
-			)
-			test_f(u, p) = F_eval(u)
+		# 	F_symbolic_after_sub = Symbolics.substitute(F_symbolic, substitution_dict)
+		# 	F_eval = first(
+		# 		Symbolics.build_function(
+		# 			F_symbolic_after_sub,
+		# 			z_symbolic[nonprimal_indices];
+		# 			expression = Val(false),
+		# 		),
+		# 	)
+		# 	test_f(u, p) = F_eval(u)
 
-			@info "[Check] Solving for complete-system duals with reduced primal fixed..."
-			z_val = zeros(length(z_symbolic) - length(primal_indices))
-			prob =
-				(mᵢ == 0) ?
-				NonlinearProblem(test_f, z_val) :
-				NonlinearLeastSquaresProblem(test_f, z_val)
-			dual_sol = NonlinearSolve.solve(prob)
+		# 	@info "[Check] Solving for complete-system duals with reduced primal fixed..."
+		# 	z_val = zeros(length(z_symbolic) - length(primal_indices))
+		# 	prob =
+		# 		(mᵢ == 0) ?
+		# 		NonlinearProblem(test_f, z_val) :
+		# 		NonlinearLeastSquaresProblem(test_f, z_val)
+		# 	dual_sol = NonlinearSolve.solve(prob)
 
-			z_recovered = similar(complete_z)
-			z_recovered[primal_indices] = reduced_primal
-			z_recovered[nonprimal_indices] = dual_sol.u
-			F_recovered = zeros(complete_kkt_system.kkt_dimension)
-			complete_kkt_system.F!(F_recovered, z_recovered; θ = parameters, ϵ = ϵ₀, η = η₀)
-			kkt_error_recovered = norm(F_recovered, Inf)
-			@info "[Check] KKT error (reduced primal + recovered dual) = $(kkt_error_recovered)"
-			kkt_error_recovered > tol && @error "kkt_error_recovered is above tol. Recovery may have failed."
-		end
+		# 	z_recovered = similar(complete_z)
+		# 	z_recovered[primal_indices] = reduced_primal
+		# 	z_recovered[nonprimal_indices] = dual_sol.u
+		# 	F_recovered = zeros(complete_kkt_system.kkt_dimension)
+		# 	complete_kkt_system.F!(F_recovered, z_recovered; θ = parameters, ϵ = ϵ₀, η = η₀)
+		# 	kkt_error_recovered = norm(F_recovered, Inf)
+		# 	@info "[Check] KKT error (reduced primal + recovered dual) = $(kkt_error_recovered)"
+		# 	kkt_error_recovered > tol && @error "kkt_error_recovered is above tol. Recovery may have failed."
+		# end
 
 		# Save solutions for this instance
 		instance_idx = solved_attempts + 1
@@ -340,9 +341,10 @@ function demo(;
 			reduced_kkt_error_histories = kkt_error_histories_reduced,
 			complete_kkt_error_histories = kkt_error_histories_complete,
 			show_legend = show_convergence_legend,
+			show_ylabel = show_ylabel,
 		)
 		CairoMakie.save(
-			joinpath(convergence_plots_dir, "convergence_aggregate_reduced_vs_complete.pdf"),
+			joinpath(convergence_plots_dir, "convergence_aggregate_reduced_vs_complete_$(num_preferences)prefs_$(ϵ₀)rho.pdf"),
 			combined_aggregate_convergence_fig,
 		)
 	end

@@ -141,7 +141,7 @@ function plot_intersection_trajectories(;
 		aspect = 1,
 		xgridvisible = false,
 		ygridvisible = false,
-		backgroundcolor = :lightgreen,
+		backgroundcolor = :white,
 	)
 	CairoMakie.hidedecorations!(ax)
 	CairoMakie.hidespines!(ax)
@@ -183,12 +183,20 @@ function plot_convergence_plot(;
 	total_iteration_history,
 	outer_end_total_iterations = Int[],
 	outer_end_trace_indices = Int[],
+	show_ylabel = true,
 )
+	axis_label_fontsize = 30
+	tick_label_fontsize = 22
+	ylabel_text = show_ylabel ? L"$\log(|| \mathcal{K}_{\rho}^{(\ell)} ||_\infty)$" : ""
 	figure = CairoMakie.Figure()
 	ax = CairoMakie.Axis(
 		figure[1, 1];
 		xlabel = L"\text{iteration} ~\ell",
-		ylabel = L"$\log(|| \mathcal{K}_{\rho}^{(\ell)} ||_\infty)$",
+		ylabel = ylabel_text,
+		xlabelsize = axis_label_fontsize,
+		ylabelsize = axis_label_fontsize,
+		xticklabelsize = tick_label_fontsize,
+		yticklabelsize = tick_label_fontsize,
 		yscale = log10,
 	)
 
@@ -222,10 +230,13 @@ function plot_convergence_plot(;
 	return figure, ax
 end
 
-function plot_convergence_plot_aggregate(; kkt_error_histories)
+function plot_convergence_plot_aggregate(; kkt_error_histories, show_ylabel = true)
 	if isempty(kkt_error_histories)
 		error("kkt_error_histories must be non-empty.")
 	end
+	axis_label_fontsize = 30
+	tick_label_fontsize = 22
+	ylabel_text = show_ylabel ? L"$\log(|| \mathcal{K}_{\rho}^{(\ell)} ||_2)$" : ""
 	
 	max_trace_length = maximum(length, kkt_error_histories)
 	num_instances = length(kkt_error_histories)
@@ -258,7 +269,11 @@ function plot_convergence_plot_aggregate(; kkt_error_histories)
 	ax = CairoMakie.Axis(
 		figure[1, 1];
 		xlabel = L"\text{iteration} ~\ell",
-		ylabel = L"$\log(|| \mathcal{K}_{\rho}^{(\ell)} ||_2)$",
+		ylabel = ylabel_text,
+		xlabelsize = axis_label_fontsize,
+		ylabelsize = axis_label_fontsize,
+		xticklabelsize = tick_label_fontsize,
+		yticklabelsize = tick_label_fontsize,
 		yticks = -10:4,
 		xticks = 0:10:maximum(x),
 	)
@@ -273,7 +288,12 @@ function plot_convergence_plot_aggregate_comparison(;
 	reduced_kkt_error_histories,
 	complete_kkt_error_histories,
 	show_legend = true,
+	show_ylabel = true,
 )
+	axis_label_fontsize = 30
+	legend_label_fontsize = 26
+	tick_label_fontsize = 22
+	ylabel_text = show_ylabel ? L"$\log(|| \mathcal{K}_{\rho}^{(\ell)} ||_2)$" : ""
 	if isempty(reduced_kkt_error_histories) || isempty(complete_kkt_error_histories)
 		error("Both reduced_kkt_error_histories and complete_kkt_error_histories must be non-empty.")
 	end
@@ -319,7 +339,11 @@ function plot_convergence_plot_aggregate_comparison(;
 	ax = CairoMakie.Axis(
 		figure[1, 1];
 		xlabel = L"\text{iteration} ~\ell",
-		ylabel = L"$\log(|| \mathcal{K}_{\rho}^{(\ell)} ||_2)$",
+		ylabel = ylabel_text,
+		xlabelsize = axis_label_fontsize,
+		ylabelsize = axis_label_fontsize,
+		xticklabelsize = tick_label_fontsize,
+		yticklabelsize = tick_label_fontsize,
 		yticks = -10:4,
 		xticks = 0:10:max_x,
 	)
@@ -331,7 +355,7 @@ function plot_convergence_plot_aggregate_comparison(;
 	CairoMakie.lines!(ax, complete_stats.x, complete_stats.y_mean; color = :crimson, linewidth = 3, label = "Complete")
 
 	if show_legend
-		CairoMakie.axislegend(ax; position = :rt)
+		CairoMakie.axislegend(ax; position = :rt, labelsize = legend_label_fontsize)
 	end
 	return figure, ax
 end
