@@ -40,7 +40,7 @@ function get_setup(n, num_players, mₑ, mᵢ; num_preferences = 2, r = 1)
 		Qk_local = rand_psd(n * num_players, r)
 		q_local = Qk_local * randn(n * num_players) # q ∈ Col(Qk) for boundedness
 		preferences[i][j] = let Qk = Qk_local, q = q_local
-			(z, θ) -> 0.5 * z' * Qk * z + q' * z # + (j == num_preferences ? (sum(z))^4 : 0.0)
+			(z, θ) -> 0.5 * z' * Qk * z + q' * z + (j == num_preferences ? (sum(z))^4 : 0.0)
 		end
 	end
 
@@ -100,13 +100,13 @@ function demo(;
 
 	linesearch = :backtracking # :backtracking, :fraction_to_boundary
 	verbose = false
-	tol = 2e-2
-	ϵ₀ = 1e-2 #ρ
+	tol = 2e-2 # 2e-2, 2e-1, 2.0
+	ϵ₀ = 1.0 #ρ 1e-2, 1e-1, 1.0
 	η₀ = 0.0
-	max_inner_iters = 30
+	max_inner_iters = 50
 	max_outer_iters = 2
 	min_stepsize = 1e-5
-	run_id = "run_NQP_$(num_players)players_$(num_preferences)prefs_$(ϵ₀)ρ_$(n)pdim_$(mₑ)mₑ_$(mᵢ)mᵢ"
+	run_id = "jingqi_run_NQP_$(num_players)players_$(num_preferences)prefs_$(ϵ₀)ρ_$(n)pdim_$(mₑ)mₑ_$(mᵢ)mᵢ"
 
 	# Create file dir
 	run_dir = joinpath("data", "QP_benchmark", run_id)

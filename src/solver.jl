@@ -175,14 +175,14 @@ function solve(
 				@. z_trial = z + α * δz
 				mcp.F!(F, z_trial; θ, ϵ, η)
 				F_z_next = norm(F, 2)
-				while (F_z_next >= F_z) || (any(@. σ + α * δσ < 0) || any(@. γ + α * δγ < 0))
+				while (F_z_next >= 0.99 * F_z) || (any(@. σ + α * δσ < 0) || any(@. γ + α * δγ < 0))
 					if α < min_stepsize
 						verbose && @warn "Backtracking linesearch failed. Exiting prematurely."
 						status = :failed
 						break
 					end
 
-					α *= 0.5 # decay
+					α *= 0.7 # decay
 					@. z_trial = z + α * δz
 					mcp.F!(F, z_trial; θ, ϵ, η)
 					F_z_next = norm(F, 2)
