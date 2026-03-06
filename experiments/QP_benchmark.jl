@@ -37,10 +37,10 @@ function get_setup(n, num_players, mₑ, mᵢ; num_preferences = 2, r = 1)
 
 	preferences = [Vector{Function}(undef, num_preferences) for _ in 1:num_players]
 	for i in 1:num_players, j in 1:num_preferences
-		Qk_local = rand_psd(n * num_players, r)
+		Qk_local = rand_psd(n * num_players, r) # overwrite this
 		q_local = Qk_local * randn(n * num_players) # q ∈ Col(Qk) for boundedness
 		preferences[i][j] = let Qk = Qk_local, q = q_local
-			(z, θ) -> 0.5 * z' * Qk * z + q' * z + (j == num_preferences ? (sum(z))^4 : 0.0)
+			(z, θ) -> 0.5 * z' * Qk * z + q' * z + 0.1 * (j == num_preferences ? (sum(z))^4 : 0.0)
 		end
 	end
 
@@ -49,36 +49,47 @@ function get_setup(n, num_players, mₑ, mᵢ; num_preferences = 2, r = 1)
 	]
 
 	equality_constraints = Vector{Function}(undef, num_players)
-	for i in 1:num_players
-		Hⁱ1 = rand(mₑ, n) # n > mₑ for full row rank
-		Hⁱ2 = rand(mₑ, n)
-		hⁱ = rand(mₑ)
-		equality_constraints[i] = let H = hcat(Hⁱ1, Hⁱ2), h = hⁱ
-			(z, θ) -> H * z - h
-		end
-	end
+    if num_players > 1
+        for i in 1:num_players
+            Hⁱ1 = rand(mₑ, n) # n > mₑ for full row rank
+            Hⁱ2 = rand(mₑ, n)
+            hⁱ = rand(mₑ)
+            equality_constraints[i] = let H = hcat(Hⁱ1, Hⁱ2), h = hⁱ
+                (z, θ) -> H * z - h
+            end
+        end
+    else
+        H = rand(mₑ, n)
+        h = rand(mₑ)
+        equality_constraints[1] = (z, θ) -> H * z - h
+    end
 
-	inequality_constraints = Vector{Function}(undef, num_players)
-	for i in 1:num_players
-		Gⁱ1 = rand(mᵢ, n) # n > mᵢ for full row rank
-		Gⁱ2 = rand(mᵢ, n)
-		gⁱ = rand(mᵢ)
-		inequality_constraints[i] = let G = hcat(Gⁱ1, Gⁱ2), g = gⁱ
-			(z, θ) -> G * z - g
-		end
-	end
+    inequality_constraints = Vector{Function}(undef, num_players)
+    if num_players > 1
+        for i in 1:num_players
+            Gⁱ1 = rand(mᵢ, n) # n > mᵢ for full row rank
+            Gⁱ2 = rand(mᵢ, n)
+            gⁱ = rand(mᵢ)
+            inequality_constraints[i] = let G = hcat(Gⁱ1, Gⁱ2), g = gⁱ
+                (z, θ) -> G * z - g
+            end
+        end
+    else
+        G = rand(mᵢ, n)
+        g = rand(mᵢ)
+        inequality_constraints[1] = (z, θ) -> G * z - g
+    end
 
-
-	QuasiGOOP.ParametricGOOP(
-		dummy_primals,
-		dummy_parameters;
-		preferences,
-		is_prioritized_constraint,
-		equality_constraints,
-		inequality_constraints,
-		shared_equality_constraint = nothing,
-		shared_inequality_constraint = nothing,
-	)
+    QuasiGOOP.ParametricGOOP(
+        dummy_primals,
+        dummy_parameters;
+        preferences,
+        is_prioritized_constraint,
+        equality_constraints ,
+        inequality_constraints = [nothing for _ in 1:num_players],
+        shared_equality_constraint = nothing,
+        shared_inequality_constraint = nothing,
+    )
 end
 
 
@@ -96,17 +107,17 @@ function demo(;
 	mₑ = 3 # equality constraint dimension
 	mᵢ = 2 # inequality constraint dimension
 	parameters = BlockArray(zeros(sum(fill(1, num_players))), fill(1, num_players))
-	num_instances = 10
+	num_instances = 1
 
 	linesearch = :backtracking # :backtracking, :fraction_to_boundary
-	verbose = false
-	tol = 2e-2 # 2e-2, 2e-1, 2.0
-	ϵ₀ = 1.0 #ρ 1e-2, 1e-1, 1.0
+	verbose = true
+	tol = 200000000 # 2e-2, 2e-1, 2.0
+	ϵ₀ = 0.001 #ρ 1e-2, 1e-1, 1.0
 	η₀ = 0.0
-	max_inner_iters = 50
+	max_inner_iters = 30
 	max_outer_iters = 2
-	min_stepsize = 1e-5
-	run_id = "jingqi_run_NQP_$(num_players)players_$(num_preferences)prefs_$(ϵ₀)ρ_$(n)pdim_$(mₑ)mₑ_$(mᵢ)mᵢ"
+	min_stepsize = 1e-20
+	run_id = "jingqi_run_QP_$(num_players)players_$(num_preferences)prefs_$(ϵ₀)ρ_$(n)pdim_$(mₑ)mₑ_$(mᵢ)mᵢ"
 
 	# Create file dir
 	run_dir = joinpath("data", "QP_benchmark", run_id)

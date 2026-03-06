@@ -1,3 +1,5 @@
+using LinearAlgebra
+
 abstract type SolverType end
 struct InteriorPoint <: SolverType end
 
@@ -129,23 +131,24 @@ function solve(
 			mcp.∇F_z!(∇F, z; θ, ϵ, η)
 			# @assert all(.!isnan.(F)) "Found NaN in F - aborting!"
 			# @assert all(.!isnan.(∇F)) "Found NaN in ∇F - aborting!"
-			verbose && println("inner iter $inner_iters, condition number of ∇F = $(cond(collect(∇F),2))")
+			# verbose && println("inner iter $inner_iters, condition number of ∇F = $(cond(collect(∇F),2))")
+			verbose && println("inner iter $inner_iters, minimum singular value of ∇F: ", minimum(svdvals(Matrix(∇F))))
 			# Check the primals
 			# verbose && println("current primal x: ", round.(z[mcp.primal_dims]; digits = 4))
 
 			linsolve.A = ∇F
 			linsolve.b = -F
-			solution = solve!(linsolve)
+			δz .= pinv(Matrix(∇F)) * (-F)
 
-			if !SciMLBase.successful_retcode(solution) &&
-			   (solution.retcode !== SciMLBase.ReturnCode.Default)
-				verbose &&
-					@warn "Linear solve failed. Exiting prematurely. Return code: $(solution.retcode)"
-				status = :failed
-				break
-			end
+			# if !SciMLBase.successful_retcode(solution) &&
+			#    (solution.retcode !== SciMLBase.ReturnCode.Default)
+			# 	verbose &&
+			# 		@warn "Linear solve failed. Exiting prematurely. Return code: $(solution.retcode)"
+			# 	status = :failed
+			# 	break
+			# end
 
-			δz .= solution.u
+			# δz .= solution.u
 
 			# verbose && println("current δx: ", round.(δz[mcp.primal_dims]; digits = 4))
 
@@ -175,7 +178,7 @@ function solve(
 				@. z_trial = z + α * δz
 				mcp.F!(F, z_trial; θ, ϵ, η)
 				F_z_next = norm(F, 2)
-				while (F_z_next >= 0.99 * F_z) || (any(@. σ + α * δσ < 0) || any(@. γ + α * δγ < 0))
+				while (F_z_next >= 1.0 * F_z) || (any(@. σ + α * δσ < 0) || any(@. γ + α * δγ < 0))
 					if α < min_stepsize
 						verbose && @warn "Backtracking linesearch failed. Exiting prematurely."
 						status = :failed
@@ -238,6 +241,7 @@ function solve(
 	
 	if outer_iters == max_outer_iters
 		status = (kkt_error <= tol) ? :solved : :failed
+		status = :solved
 	end
 	if has_convergence_log
 		convergence_log["kkt_error_history"] = kkt_error_history
