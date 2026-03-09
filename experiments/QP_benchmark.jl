@@ -35,60 +35,34 @@ function get_setup(n, num_players, mₑ, mᵢ; num_preferences = 2, r = 1)
 		end
 	end
 
-	# 2-level debugging
-	# preferences[1][1] = (z,θ) -> (z[1]-1)^4       # J¹₁ primary  (quartic)
-	# preferences[1][2] = (z,θ) -> (z[1]-0.5)^2     # J¹₂ secondary
-	# preferences[2][1] = (z,θ) -> (z[3]+1)^4       # J²₁ primary  (quartic)
-	# preferences[2][2] = (z,θ) -> (z[3]+0.5)^2.    # J²₂ secondary
-	# preferences[1][1] = let
-	# 	Qk = [0.416968 0.944866 1.048411 0.140553; 0.944866 2.141105 2.37574 0.318499; 1.048411 2.37574 2.636089 0.353402; 0.140553 0.318499 0.353402 0.047378]
-	# 	qk = [1.433707; 3.248838; 3.604866; 0.483279]
-	# 	(z, θ) -> 0.5 * z' * Qk * z + qk' * z
-	# end
-	# preferences[1][2] = let
-	# 	Qk = [1.799915 -0.55296 -0.795839 1.030905; -0.55296 0.169877 0.244493 -0.316709; -0.795839 0.244493 0.351883 -0.455818; 1.030905 -0.316709 -0.455818 0.590452]
-	# 	qk = [-0.444909; 0.136682; 0.196718; -0.254822]
-	# 	(z, θ) -> 0.5 * z' * Qk * z + qk' * z
-	# end
-	# preferences[2][1] = let
-	# 	Qk = [0.042467 -0.209993 0.104132 -0.11093; -0.209993 1.03839 -0.514919 0.548533; 0.104132 -0.514919 0.255339 -0.272008; -0.11093 0.548533 -0.272008 0.289765] # level 1
-	# 	qk = [0.110712; -0.547456; 0.271474; -0.289196]
-	# 	(z, θ) -> 0.5 * z' * Qk * z + qk' * z
-	# end
-	# preferences[2][2] = let
-	# 	Qk = [0.011885 0.029826 0.006225 0.043515; 0.029826 0.074851 0.015621 0.109203; 0.006225 0.015621 0.00326 0.02279; 0.043515 0.109203 0.02279 0.159321] # level 2
-	# 	qk = [0.045815; 0.114977; 0.023995; 0.167745]
-	# 	(z, θ) -> 0.5 * z' * Qk * z + qk' * z
-	# end
-
 
 	is_prioritized_constraint = [
 		[false for j in 1:num_preferences] for i in 1:num_players
 	]
 
 	equality_constraints = Vector{Function}(undef, num_players)
-	# for i in 1:num_players
-	# 	equality_constraints[i] = function (z, θ)
-	# 		(; H, h) = unpack_parameters(θ, n, i, 1, mₑ, mᵢ; num_players, num_preferences)
-	# 		H * z - h
-	# 	end
-	# end
+	for i in 1:num_players
+		equality_constraints[i] = function (z, θ)
+			(; H, h) = unpack_parameters(θ, n, i, 1, mₑ, mᵢ; num_players, num_preferences)
+			H * z - h
+		end
+	end
 	# equality_constraints[1] = (z, θ) -> [z[1]^2 + z[2]^2 + 0.2*z[3]*z[4] - 1.0]
 	# equality_constraints[2] = (z, θ) -> [z[3]^2 + z[4]^2 + 0.2*z[1]*z[2] - 1.0]
-	equality_constraints[1] = (z, θ) -> [sum(z) - 1.0]
-	equality_constraints[2] = (z, θ) -> [sum(z) - 1.0]
+	# equality_constraints[1] = (z, θ) -> [sum(z) - 1.0]
+	# equality_constraints[2] = (z, θ) -> [sum(z) - 1.0]
 
 	inequality_constraints = Vector{Function}(undef, num_players)
-	# for i in 1:num_players
-	# 	inequality_constraints[i] = function (z, θ)
-	# 		(; G, g) = unpack_parameters(θ, n, i, 1, mₑ, mᵢ; num_players, num_preferences)
-	# 		G * z - g
-	# 	end
-	# end
+	for i in 1:num_players
+		inequality_constraints[i] = function (z, θ)
+			(; G, g) = unpack_parameters(θ, n, i, 1, mₑ, mᵢ; num_players, num_preferences)
+			G * z - g
+		end
+	end
 	# inequality_constraints[1] = (z, θ) -> [4.0 - z[1]^2 - 0.5*z[3]^2]
 	# inequality_constraints[2] = (z, θ) -> [4.0 - z[3]^2 - 0.5*z[1]^2]
-	inequality_constraints[1] = (z, θ) -> 1 .- z
-	inequality_constraints[2] = (z, θ) -> 1 .- z
+	# inequality_constraints[1] = (z, θ) -> 1 .- z
+	# inequality_constraints[2] = (z, θ) -> 1 .- z
 
 	QuasiGOOP.ParametricGOOP(
 		dummy_primals,
@@ -114,15 +88,15 @@ function demo(;
 
 	# Quadratic GOOP Problem setup
 	n = 10 # x primal dimension (per player)
-	mₑ = 1 # equality constraint dimension
-	mᵢ = 2 # inequality constraint dimension
+	mₑ = 2 # equality constraint dimension
+	mᵢ = 1 # inequality constraint dimension
 	num_instances = 10
 	linesearch = :backtracking # :backtracking, :fraction_to_boundary
 	verbose = false
 	tol = 1e-5 # 2e-2, 2e-1, 2.0
-	ϵ₀ = 1.0 #ρ 1e-2, 1e-1, 1.0
+	ϵ₀ = 0.001 #ρ 1e-2, 1e-1, 1.0
 	η₀ = 0.0
-	max_inner_iters = 30
+	max_inner_iters = 50
 	max_outer_iters = 2
 	min_stepsize = 1e-20
 	run_id = "Dongho_run_QP_$(num_players)players_$(num_preferences)prefs_$(ϵ₀)ρ_$(n)pdim_$(mₑ)mₑ_$(mᵢ)mᵢ"
@@ -180,9 +154,6 @@ function demo(;
 		@info "Generating random parameters..."
 		parameters = generate_random_parameter(; n, num_players, num_preferences, mₑ, mᵢ)
 		flattened_parameters = flatten_params(parameters)
-		param_ranges = player_flat_ranges(parameters)
-		# i, k = 1, 1
-		# (; Qk, qk, H, h, G, g) = unpack_parameters(flattened_parameters, n, i, k, mₑ, mᵢ; num_players, num_preferences)
 
 
 		convergence_log_reduced_system = Dict{String, Any}()
@@ -211,6 +182,7 @@ function demo(;
 		println("[Reduced] Primal solution: $(round.(reduced_primal, digits = 3))")
 		print_preference_values("Reduced", num_players, n, problem, z, flattened_parameters)
 		println("[Reduced] kkt_error = $(kkt_error)")
+		print_constraint_residuals("Reduced", num_players, n, reduced_z, flattened_parameters; mₑ, mᵢ, num_preferences)		
 		reduced_kkt_history = log10.(get(convergence_log_reduced_system, "kkt_error_history", Float64[]))
 		# reduced_kkt_history = get(convergence_log_reduced_system, "kkt_error_history", Float64[])
 
@@ -246,6 +218,7 @@ function demo(;
 		println("[Complete] Primal solution: $(round.(complete_primal, digits = 3))")
 		print_preference_values("Complete", num_players, n, problem, z, flattened_parameters)
 		println("[Complete] kkt_error = $(kkt_error)")
+		print_constraint_residuals("Complete", num_players, n, complete_z, flattened_parameters; mₑ, mᵢ, num_preferences)
 		complete_kkt_history = log10.(get(convergence_log_complete_system, "kkt_error_history", Float64[]))
 		# complete_kkt_history = get(convergence_log_complete_system, "kkt_error_history", Float64[])
 
@@ -432,6 +405,27 @@ function print_preference_values(label, num_players, n, problem, z, θ)
 	end
 end
 
+function print_constraint_residuals(label, num_players, n, z, θ; mₑ, mᵢ, num_preferences)
+	println("[$(label)] Constraint residuals at solution:")
+	primal = z[1:(num_players * n)]
+	for player_idx in 1:num_players
+		(; H, h, G, g) = unpack_parameters(
+			θ,
+			n,
+			player_idx,
+			1,
+			mₑ,
+			mᵢ;
+			num_players,
+			num_preferences,
+		)
+		eq_residual = H * primal - h
+		ineq_residual = G * primal - g
+		println("  player $(player_idx): H*z - h = $(round.(eq_residual, digits = 6))")
+		println("  player $(player_idx): G*z - g = $(round.(ineq_residual, digits = 6))")
+	end
+end
+
 function get_preference_values(num_players, n, problem, z, θ)
 	z_primal = z[1:(num_players*n)]
 	[[pref(z_primal, θ) for pref in player_preferences] for player_preferences in problem.preferences]
@@ -453,12 +447,14 @@ function generate_random_parameter(;
 
 	for i in 1:num_players
 		# Constraint data is generated once per player.
-		H_blocks = [rand(mₑ, n) for _ in 1:num_players] # n > mₑ for full row rank
+		H_blocks = [rand(mₑ, n) for _ in 1:num_players]
 		H = hcat(H_blocks...)
-		h = rand(mₑ)
 		G_blocks = [rand(mᵢ, n) for _ in 1:num_players]
 		G = hcat(G_blocks...)
-		g = rand(mᵢ)
+		z_feas = rand(num_players * n)
+		h = H * z_feas 				# feasible equality constraints # TODO: Redo this
+		slack = rand(mᵢ) .+ 1.0     # strictly positive
+		g = G * z_feas .- slack 	# feasible inequality constraints
 
 		# Cost data is generated per preference for this player.
 		preference_data = [
