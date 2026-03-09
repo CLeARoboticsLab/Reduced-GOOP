@@ -17,70 +17,75 @@ using Random
 
 include(joinpath(@__DIR__, "Plotting.jl"))
 
-function print_preference_values(label, num_players, n, problem, z, θ)
-	println("[$(label)] Preference values at solution:")
-	for (player_idx, values) in enumerate(get_preference_values(num_players, n, problem, z, θ))
-		println("  player $(player_idx): $(round.(values, digits = 6))")
-	end
-end
-
-function get_preference_values(num_players, n, problem, z, θ)
-	z_primal = z[1:(num_players*n)]
-	[[pref(z_primal, θ) for pref in player_preferences] for player_preferences in problem.preferences]
-end
-
 function get_setup(n, num_players, mₑ, mᵢ; num_preferences = 2, r = 1)
 	primal_dimensions = fill(n, num_players)
-	parameter_dimensions = fill(1, num_players)
 	dummy_primals = BlockArray(zeros(sum(primal_dimensions)), primal_dimensions)
-	dummy_parameters = BlockArray(zeros(sum(parameter_dimensions)), parameter_dimensions)
+	flattened_parameters = flatten_params(
+		generate_random_parameter(; n, num_players, num_preferences, mₑ, mᵢ)
+	)
+	@assert length(flattened_parameters) % num_players == 0
+	dummy_parameters = BlockArray(flattened_parameters, fill(length(flattened_parameters) ÷ num_players, num_players))
 
 	preferences = [Vector{Function}(undef, num_preferences) for _ in 1:num_players]
-	for i in 1:num_players, j in 1:num_preferences
-		Qk_local = rand_psd(n * num_players, r) # overwrite this
-		q_local = Qk_local * randn(n * num_players) # q ∈ Col(Qk) for boundedness
-		preferences[i][j] = let Qk = Qk_local, q = q_local
-			(z, θ) -> 0.5 * z' * Qk * z + q' * z + 0.1 * (j == num_preferences ? (sum(z))^4 : 0.0)
+	for i in 1:num_players, k in 1:num_preferences
+		preferences[i][k] = function (z, θ)
+			(; Qk, qk) = unpack_parameters(θ, n, i, k, mₑ, mᵢ; num_players, num_preferences)
+			0.5 * z' * Qk * z + qk' * z #+ 0.1 * (k == num_preferences ? (sum(z))^4 : 0.0)
 		end
 	end
+
+	# 2-level debugging
+	# preferences[1][1] = (z,θ) -> (z[1]-1)^4       # J¹₁ primary  (quartic)
+	# preferences[1][2] = (z,θ) -> (z[1]-0.5)^2     # J¹₂ secondary
+	# preferences[2][1] = (z,θ) -> (z[3]+1)^4       # J²₁ primary  (quartic)
+	# preferences[2][2] = (z,θ) -> (z[3]+0.5)^2.    # J²₂ secondary
+	# preferences[1][1] = let
+	# 	Qk = [0.416968 0.944866 1.048411 0.140553; 0.944866 2.141105 2.37574 0.318499; 1.048411 2.37574 2.636089 0.353402; 0.140553 0.318499 0.353402 0.047378]
+	# 	qk = [1.433707; 3.248838; 3.604866; 0.483279]
+	# 	(z, θ) -> 0.5 * z' * Qk * z + qk' * z
+	# end
+	# preferences[1][2] = let
+	# 	Qk = [1.799915 -0.55296 -0.795839 1.030905; -0.55296 0.169877 0.244493 -0.316709; -0.795839 0.244493 0.351883 -0.455818; 1.030905 -0.316709 -0.455818 0.590452]
+	# 	qk = [-0.444909; 0.136682; 0.196718; -0.254822]
+	# 	(z, θ) -> 0.5 * z' * Qk * z + qk' * z
+	# end
+	# preferences[2][1] = let
+	# 	Qk = [0.042467 -0.209993 0.104132 -0.11093; -0.209993 1.03839 -0.514919 0.548533; 0.104132 -0.514919 0.255339 -0.272008; -0.11093 0.548533 -0.272008 0.289765] # level 1
+	# 	qk = [0.110712; -0.547456; 0.271474; -0.289196]
+	# 	(z, θ) -> 0.5 * z' * Qk * z + qk' * z
+	# end
+	# preferences[2][2] = let
+	# 	Qk = [0.011885 0.029826 0.006225 0.043515; 0.029826 0.074851 0.015621 0.109203; 0.006225 0.015621 0.00326 0.02279; 0.043515 0.109203 0.02279 0.159321] # level 2
+	# 	qk = [0.045815; 0.114977; 0.023995; 0.167745]
+	# 	(z, θ) -> 0.5 * z' * Qk * z + qk' * z
+	# end
+
 
 	is_prioritized_constraint = [
 		[false for j in 1:num_preferences] for i in 1:num_players
 	]
 
 	equality_constraints = Vector{Function}(undef, num_players)
-	for i in 1:num_players
-		H_blocks = [rand(mₑ, n) for _ in 1:num_players] # n > mₑ for full row rank
-		H = hcat(H_blocks...)
-		hⁱ = rand(mₑ)
-		equality_constraints[i] = let H = H, hⁱ = hⁱ
-			(z, θ) -> H * z - hⁱ
-		end
-	end
+	# for i in 1:num_players
+	# 	equality_constraints[i] = function (z, θ)
+	# 		(; H, h) = unpack_parameters(θ, n, i, 1, mₑ, mᵢ; num_players, num_preferences)
+	# 		H * z - h
+	# 	end
+	# end
+	equality_constraints[1] = (z, θ) -> [z[1]^2 + z[2]^2 + 0.2*z[3]*z[4] - 1.0]
+	equality_constraints[2] = (z, θ) -> [z[3]^2 + z[4]^2 + 0.2*z[1]*z[2] - 1.0]
+	# equality_constraints[1] = (z, θ) -> [sum(z) - 1.0]
+	# equality_constraints[2] = (z, θ) -> [sum(z) - 1.0]
 
 	inequality_constraints = Vector{Function}(undef, num_players)
-	for i in 1:num_players
-		G_blocks = [rand(mᵢ, n) for _ in 1:num_players]
-		G = hcat(G_blocks...)
-		gⁱ = rand(mᵢ)
-		inequality_constraints[i] = let G = G, gⁱ = gⁱ
-			(z, θ) -> G * z - gⁱ
-		end
-	end
-	if num_players > 1
-		for i in 1:num_players
-			Gⁱ1 = rand(mᵢ, n) # n > mᵢ for full row rank
-			Gⁱ2 = rand(mᵢ, n)
-			gⁱ = rand(mᵢ)
-			inequality_constraints[i] = let G = hcat(Gⁱ1, Gⁱ2), g = gⁱ
-				(z, θ) -> G * z - g
-			end
-		end
-	else
-		G = rand(mᵢ, n)
-		g = rand(mᵢ)
-		inequality_constraints[1] = (z, θ) -> G * z - g
-	end
+	# for i in 1:num_players
+	# 	inequality_constraints[i] = function (z, θ)
+	# 		(; G, g) = unpack_parameters(θ, n, i, 1, mₑ, mᵢ; num_players, num_preferences)
+	# 		G * z - g
+	# 	end
+	# end
+	inequality_constraints[1] = (z, θ) -> [4.0 - z[1]^2 - 0.5*z[3]^2]
+	inequality_constraints[2] = (z, θ) -> [4.0 - z[3]^2 - 0.5*z[1]^2]
 
 	QuasiGOOP.ParametricGOOP(
 		dummy_primals,
@@ -88,7 +93,7 @@ function get_setup(n, num_players, mₑ, mᵢ; num_preferences = 2, r = 1)
 		preferences,
 		is_prioritized_constraint,
 		equality_constraints,
-		inequality_constraints = [nothing for _ in 1:num_players],
+		inequality_constraints,
 		shared_equality_constraint = nothing,
 		shared_inequality_constraint = nothing,
 	)
@@ -105,16 +110,14 @@ function demo(;
 	Random.seed!(rng_seed)
 
 	# Quadratic GOOP Problem setup
-	n = 10 # x primal dimension (per player)
-	mₑ = 3 # equality constraint dimension
-	mᵢ = 2 # inequality constraint dimension
-	parameters = BlockArray(zeros(sum(fill(1, num_players))), fill(1, num_players))
-	num_instances = 1
-
+	n = 2 # x primal dimension (per player)
+	mₑ = 1 # equality constraint dimension
+	mᵢ = 1 # inequality constraint dimension
+	num_instances = 2
 	linesearch = :backtracking # :backtracking, :fraction_to_boundary
 	verbose = true
-	tol = 200000000 # 2e-2, 2e-1, 2.0
-	ϵ₀ = 0.001 #ρ 1e-2, 1e-1, 1.0
+	tol = 1e-5 # 2e-2, 2e-1, 2.0
+	ϵ₀ = 1.0 #ρ 1e-2, 1e-1, 1.0
 	η₀ = 0.0
 	max_inner_iters = 30
 	max_outer_iters = 2
@@ -122,7 +125,7 @@ function demo(;
 	run_id = "Dongho_run_QP_$(num_players)players_$(num_preferences)prefs_$(ϵ₀)ρ_$(n)pdim_$(mₑ)mₑ_$(mᵢ)mᵢ"
 
 	# Create file dir
-	run_dir = joinpath("data", "QP_benchmark", run_id)
+	run_dir = joinpath("data", "debugging_benchmark", run_id)
 	data_dir = joinpath(run_dir, "data")
 	problem_data_dir = joinpath(data_dir, "problem")
 	solution_data_dir = joinpath(problem_data_dir, "solution")
@@ -170,12 +173,21 @@ function demo(;
 		total_attempts += 1
 		@info "solved $(solved_attempts)/$(num_instances), attempt $(total_attempts): "
 
+		# Create problem instance with random parameters
+		@info "Generating random parameters..."
+		parameters = generate_random_parameter(; n, num_players, num_preferences, mₑ, mᵢ)
+		flattened_parameters = flatten_params(parameters)
+		param_ranges = player_flat_ranges(parameters)
+		# i, k = 1, 1
+		# (; Qk, qk, H, h, G, g) = unpack_parameters(flattened_parameters, n, i, k, mₑ, mᵢ; num_players, num_preferences)
+
+
 		convergence_log_reduced_system = Dict{String, Any}()
 		reduced_elapsed_time = @elapsed begin
 			(; status, z, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters) = QuasiGOOP.solve(
 				QuasiGOOP.InteriorPoint(),
 				reduced_kkt_system,
-				parameters; # this will control the θ values used in the problem definition
+				flattened_parameters; # this will control the θ values used in the problem definition
 				tol,
 				η₀,
 				ϵ₀,
@@ -192,9 +204,9 @@ function demo(;
 		println("[Reduced] status = $(status)")
 		reduced_z = copy(z)
 		reduced_primal = copy(z[1:(num_players*n)])
-		reduced_pref_values = get_preference_values(num_players, n, problem, z, parameters)
+		reduced_pref_values = get_preference_values(num_players, n, problem, z, flattened_parameters)
 		println("[Reduced] Primal solution: $(round.(reduced_primal, digits = 3))")
-		print_preference_values("Reduced", num_players, n, problem, z, parameters)
+		print_preference_values("Reduced", num_players, n, problem, z, flattened_parameters)
 		println("[Reduced] kkt_error = $(kkt_error)")
 		reduced_kkt_history = log10.(get(convergence_log_reduced_system, "kkt_error_history", Float64[]))
 
@@ -209,7 +221,7 @@ function demo(;
 			(; status, z, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters) = QuasiGOOP.solve(
 				QuasiGOOP.InteriorPoint(),
 				complete_kkt_system,
-				parameters;
+				flattened_parameters;
 				tol,
 				η₀,
 				ϵ₀,
@@ -226,9 +238,9 @@ function demo(;
 		println("[Complete] status = $(status)")
 		complete_z = copy(z)
 		complete_primal = copy(z[1:(num_players*n)])
-		complete_pref_values = get_preference_values(num_players, n, problem, z, parameters)
+		complete_pref_values = get_preference_values(num_players, n, problem, z, flattened_parameters)
 		println("[Complete] Primal solution: $(round.(complete_primal, digits = 3))")
-		print_preference_values("Complete", num_players, n, problem, z, parameters)
+		print_preference_values("Complete", num_players, n, problem, z, flattened_parameters)
 		println("[Complete] kkt_error = $(kkt_error)")
 		complete_kkt_history = log10.(get(convergence_log_complete_system, "kkt_error_history", Float64[]))
 
@@ -277,7 +289,7 @@ function demo(;
 		# 	z_recovered[primal_indices] = reduced_primal
 		# 	z_recovered[nonprimal_indices] = dual_sol.u
 		# 	F_recovered = zeros(complete_kkt_system.kkt_dimension)
-		# 	complete_kkt_system.F!(F_recovered, z_recovered; θ = parameters, ϵ = ϵ₀, η = η₀)
+		# 	complete_kkt_system.F!(F_recovered, z_recovered; θ = flattened_parameters, ϵ = ϵ₀, η = η₀)
 		# 	kkt_error_recovered = norm(F_recovered, Inf)
 		# 	@info "[Check] KKT error (reduced primal + recovered dual) = $(kkt_error_recovered)"
 		# 	kkt_error_recovered > tol && @error "kkt_error_recovered is above tol. Recovery may have failed."
@@ -405,122 +417,154 @@ function rand_psd(n, r)
 	R' * R;
 end
 
-# function generate_block_quadratic_problem(n, num_players; r = 1)
-# 	# Build num_players PSD blocks and assemble a block-diagonal matrix.
-# 	@assert num_players >= 1 "num_players must be at least 1"
-# 	Qs = [rand_psd(n, r) for _ in 1:num_players]
-# 	Qblk = sparse(cat(Qs...; dims = (1, 2))) # block matrix
-# 	total_n = n * num_players
 
-# 	# Random off-diagonal blocks; keep diagonal player-blocks unchanged.
-# 	Qoff = randn(total_n, total_n)
-# 	for i in 1:num_players
-# 		idx = ((i-1)*n+1):(i*n)
-# 		@views Qoff[idx, idx] .= 0.0
-# 	end
-# 	Qₖ = Qblk + sparse(Qoff)
-# 	x = randn(total_n)
-# 	q = Qₖ * x # ∈ Col(Qₖ)
-# 	return Qs, Qblk, Qₖ, q
-# end
+function print_preference_values(label, num_players, n, problem, z, θ)
+	println("[$(label)] Preference values at solution:")
+	for (player_idx, values) in enumerate(get_preference_values(num_players, n, problem, z, θ))
+		println("  player $(player_idx): $(round.(values, digits = 6))")
+	end
+end
 
-# function rand_full_row_rank_matrix(m, n; coupling_scale = 0.5, min_sv = 0.2, max_sv = 2.0)
-# 	@assert m <= n "Need m <= n for full row rank"
-# 	@assert 0.0 < min_sv <= max_sv "Singular-value bounds must satisfy 0 < min_sv <= max_sv"
+function get_preference_values(num_players, n, problem, z, θ)
+	z_primal = z[1:(num_players*n)]
+	[[pref(z_primal, θ) for pref in player_preferences] for player_preferences in problem.preferences]
+end
 
-# 	# Build a guaranteed full-row-rank core, then mix rows/columns with random orthogonal bases.
-# 	U = Matrix(qr(randn(m, m)).Q)
-# 	V = Matrix(qr(randn(n, n)).Q)
-# 	s = min_sv .+ (max_sv - min_sv) .* rand(m)
-# 	core = hcat(Diagonal(s), coupling_scale * randn(m, n - m))
-# 	return U * core * V'
-# end
+"Generate a random parameter vector Θ corresponding to a convex QP."
+function generate_random_parameter(;
+	n = 2,
+	r = 1,
+	num_players = 2,
+	num_preferences = 2,
+	mₑ = 1,
+	mᵢ = 2,
+)
 
-# function full_row_rank_constraints(n, num_players, mₑ, mᵢ; feasible_margin = 1e-2)
-# 	@assert num_players >= 1 "num_players must be at least 1"
-# 	m = mₑ + mᵢ
-# 	@assert m <= n "Need mₑ + mᵢ <= n  for full row rank"
-# 	@assert feasible_margin > 0 "feasible_margin must be positive"
+	# params[i] stores all preference cost data for player i, and that player's
+	# equality/inequality constraint data.
+	params = Vector{Any}(undef, num_players)
 
-# 	# Build per-player diagonal blocks first (each m x n).
-# 	Ablocks = Vector{Matrix{Float64}}(undef, num_players)
-# 	for p in 1:num_players
-# 		Araw = rand_full_row_rank_matrix(
-# 			m,
-# 			n;
-# 			coupling_scale = 0.35 + 0.5 * rand(),
-# 			min_sv = 0.15,
-# 			max_sv = 2.5,
-# 		)
+	for i in 1:num_players
+		# Constraint data is generated once per player.
+		H_blocks = [rand(mₑ, n) for _ in 1:num_players] # n > mₑ for full row rank
+		H = hcat(H_blocks...)
+		h = rand(mₑ)
+		G_blocks = [rand(mᵢ, n) for _ in 1:num_players]
+		G = hcat(G_blocks...)
+		g = rand(mᵢ)
 
-# 		# Randomize which constraint rows are treated as equalities vs inequalities.
-# 		row_perm = randperm(m)
-# 		eq_idx = row_perm[1:mₑ]
-# 		ineq_idx = row_perm[(mₑ+1):m]
-# 		Aₑ = Araw[eq_idx, :]
-# 		Aᵢ = Araw[ineq_idx, :]
-# 		Ablocks[p] = vcat(Aₑ, Aᵢ)
-# 	end
+		# Cost data is generated per preference for this player.
+		preference_data = [
+			let
+				Qk_local = rand_psd(n * num_players, r)
+				qk_local = Qk_local * randn(n * num_players) # q ∈ Col(Qk) for boundedness
+				(Qk = Qk_local, qk = qk_local)
+			end for _ in 1:num_preferences
+		]
 
-# 	# Block-diagonal matrix with A blocks on the diagonal.
-# 	Hblk = sparse(cat(Ablocks...; dims = (1, 2)))
+		params[i] = (
+			player = i,
+			preferences = preference_data,
+			equality = (H = H, h = h),
+			inequality = (G = G, g = g),
+		)
+	end
+	params
+end
 
-# 	# Same diagonal blocks as Hblk, random off-diagonal blocks.
-# 	total_m = m * num_players
-# 	total_n = n * num_players
-# 	Hoff = randn(total_m, total_n)
-# 	for p in 1:num_players
-# 		row_idx = ((p-1)*m+1):(p*m)
-# 		col_idx = ((p-1)*n+1):(p*n)
-# 		@views Hoff[row_idx, col_idx] .= 0.0
-# 	end
-# 	H = Hblk + sparse(Hoff)
+"Flatten nested QP benchmark params into a single vector."
+function flatten_params(params)
+	flat = Float64[]
 
-# 	@assert rank(H) == total_m "H must have full row rank"
+	for player_data in params
+		for pref_data in player_data.preferences
+			append!(flat, vec(pref_data.Qk))
+			append!(flat, vec(pref_data.qk))
+		end
+		append!(flat, vec(player_data.equality.H))
+		append!(flat, vec(player_data.equality.h))
+		append!(flat, vec(player_data.inequality.G))
+		append!(flat, vec(player_data.inequality.g))
+	end
 
-# 	# Per-player A/Ae/Ai as row-slices of H (same column dimension as H).
-# 	As = Vector{SparseMatrixCSC{Float64, Int}}(undef, num_players)
-# 	Aₑs = Vector{SparseMatrixCSC{Float64, Int}}(undef, num_players)
-# 	Aᵢs = Vector{SparseMatrixCSC{Float64, Int}}(undef, num_players)
-# 	for p in 1:num_players
-# 		row_base = (p - 1) * m
-# 		As[p] = H[(row_base+1):(row_base+m), :]
-# 		Aₑs[p] = H[(row_base+1):(row_base+mₑ), :]
-# 		Aᵢs[p] = H[(row_base+mₑ+1):(row_base+m), :]
-# 	end
+	flat
+end
 
-# 	# Build h so the constraint set is feasible by construction.
-# 	# For witness z_feas:
-# 	#   A_e z_feas - h_e = 0
-# 	#   A_i z_feas - h_i >= feasible_margin
-# 	z_feas = randn(total_n)
-# 	h = Vector(H * z_feas)
-# 	for p in 1:num_players
-# 		if mᵢ == 0
-# 			continue
-# 		end
-# 		row_base = (p - 1) * m
-# 		ineq_rows = (row_base+mₑ+1):(row_base+m)
-# 		h[ineq_rows] .-= feasible_margin .+ abs.(randn(mᵢ))
-# 	end
+"Return 1-based per-player index ranges in `flatten_params(params)`."
+function player_flat_ranges(params)
+	ranges = Vector{UnitRange{Int}}(undef, length(params))
+	start_idx = 1
 
-# 	hₑs = Vector{Vector{Float64}}(undef, num_players)
-# 	hᵢs = Vector{Vector{Float64}}(undef, num_players)
-# 	for p in 1:num_players
-# 		row_base = (p - 1) * m
-# 		hₑs[p] = h[(row_base+1):(row_base+mₑ)]
-# 		hᵢs[p] = h[(row_base+mₑ+1):(row_base+m)]
-# 	end
+	for (player_idx, player_data) in enumerate(params)
+		block_len = 0
+		for pref_data in player_data.preferences
+			block_len += length(pref_data.Qk) + length(pref_data.qk)
+		end
+		block_len += length(player_data.equality.H) + length(player_data.equality.h)
+		block_len += length(player_data.inequality.G) + length(player_data.inequality.g)
 
-# 	# Sanity check at the witness point.
-# 	for p in 1:num_players
-# 		@assert norm(Aₑs[p] * z_feas - hₑs[p], Inf) <= 1e-8 "Equality constraints not feasible at witness point"
-# 		if mᵢ > 0
-# 			@assert minimum(Aᵢs[p] * z_feas - hᵢs[p]) >= feasible_margin "Inequality constraints not feasible at witness point"
-# 		end
-# 	end
+		end_idx = start_idx + block_len - 1
+		ranges[player_idx] = start_idx:end_idx
+		start_idx = end_idx + 1
+	end
 
-# 	return As, Aₑs, Aᵢs, Hblk, H, h, hₑs, hᵢs
-# end
+	ranges
+end
+
+"Unpack flattened θ for a specific player/preference into (Qk, qk, H, h, G, g)."
+function unpack_parameters(θ, n, player, preference, mₑ, mᵢ; num_players, num_preferences)
+	if !(1 <= player <= num_players)
+		throw(ArgumentError("player index $(player) out of bounds 1:$(num_players)"))
+	end
+	if !(1 <= preference <= num_preferences)
+		throw(ArgumentError("preference index $(preference) out of bounds 1:$(num_preferences)"))
+	end
+
+	num_primals_total = n * num_players
+	qk_len = num_primals_total
+	Qk_len = num_primals_total^2
+	pref_block_len = Qk_len + qk_len
+
+	H_len = mₑ * num_primals_total
+	h_len = mₑ
+	G_len = mᵢ * num_primals_total
+	g_len = mᵢ
+	player_block_len = num_preferences * pref_block_len + H_len + h_len + G_len + g_len
+
+	total_expected_len = num_players * player_block_len
+	if length(θ) < total_expected_len
+		throw(ArgumentError("flattened θ is too short: got $(length(θ)), need at least $(total_expected_len)"))
+	end
+
+	player_base = (player - 1) * player_block_len
+
+	# Preference-specific cost block
+	pref_start = player_base + (preference - 1) * pref_block_len + 1
+	Qk_start = pref_start
+	Qk_end = Qk_start + Qk_len - 1
+	qk_start = Qk_end + 1
+	qk_end = qk_start + qk_len - 1
+
+	Qk = reshape(θ[Qk_start:Qk_end], num_primals_total, num_primals_total)
+	qk = θ[qk_start:qk_end]
+
+	# Player-shared constraint block
+	constraint_start = player_base + num_preferences * pref_block_len + 1
+	H_start = constraint_start
+	H_end = H_start + H_len - 1
+	h_start = H_end + 1
+	h_end = h_start + h_len - 1
+	G_start = h_end + 1
+	G_end = G_start + G_len - 1
+	g_start = G_end + 1
+	g_end = g_start + g_len - 1
+
+	H = reshape(θ[H_start:H_end], mₑ, num_primals_total)
+	h = θ[h_start:h_end]
+	G = reshape(θ[G_start:G_end], mᵢ, num_primals_total)
+	g = θ[g_start:g_end]
+
+	(; Qk, qk, H, h, G, g)
+end
 
 end # end module

@@ -63,9 +63,10 @@ function solve(
 	# 	z
 	# end)
 	z = zeros(mcp.variable_dimension)
-	z[mcp.preference_slack_dims] .= 1.0
-	z[mcp.interior_point_slack_dims] .= 1.0
-	z[mcp.inequality_constraint_dual_dims] .= 1.0
+	z[mcp.preference_slack_dims] .= 0.1 #1.0
+	z[mcp.interior_point_slack_dims] .= 0.1 #1.0
+	z[mcp.inequality_constraint_dual_dims] .= 0.1 #1.0
+
 	if !isnothing(z₀)
 		z[mcp.primal_dims] .= z₀
 	end
@@ -139,6 +140,8 @@ function solve(
 			linsolve.A = ∇F
 			linsolve.b = -F
 			δz .= pinv(Matrix(∇F)) * (-F)
+
+			# Main.@infiltrate
 
 			# if !SciMLBase.successful_retcode(solution) &&
 			#    (solution.retcode !== SciMLBase.ReturnCode.Default)
