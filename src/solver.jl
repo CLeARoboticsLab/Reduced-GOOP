@@ -36,6 +36,9 @@ Keyword arguments:
 	- `verbose::Bool = false`: whether to print debug information.
 	- `linear_solve_algorithm::LinearSolve.SciMLLinearSolveAlgorithm`: the linear solve algorithm to use. Any solver from `LinearSolve.jl` that can handle nonsquare system can be used.
 	- `convergence_log::Union{Nothing,AbstractDict} = nothing`: optional output dictionary populated with convergence traces.
+	- `measure_solve_time::Bool = false`: if true, returns solve time measured with `@btime` (warmup run excludes compile) and includes `solve_time_sec`/`solve_time_ns` fields.
+	- `benchmark_samples::Int = 1`: number of @btime samples when `measure_solve_time = true`.
+	- `benchmark_evals::Int = 1`: number of evals per sample when `measure_solve_time = true`.
 """
 function solve(
 	::InteriorPoint,
@@ -54,6 +57,7 @@ function solve(
 	verbose = false,
 	linear_solve_algorithm = LinearSolve.KrylovJL_LSMR(), # LinearSolve.KrylovJL_LSMR(), # KrylovJL_CRAIGMR() for non-square KKT systems
 	convergence_log = nothing,
+	use_linsolve = false,
 )
 	# z = @something(z₀, begin
 	# 	z = zeros(mcp.variable_dimension)
@@ -85,7 +89,7 @@ function solve(
 	δσ = @view δz[mcp.interior_point_slack_dims]
 	δγ = @view δz[mcp.inequality_constraint_dual_dims]
 
-	linsolve = init(LinearProblem(∇F, δz), linear_solve_algorithm, maxiters = 100000)
+	use_linsolve && (linsolve = init(LinearProblem(∇F, δz), linear_solve_algorithm, maxiters = 100000))
 
 	# Main solver loop.
 	if ϵ₀ === :auto
@@ -122,7 +126,7 @@ function solve(
 		status = :solved
 
 		verbose && @info "Outer iteration $(outer_iters): ϵ = $ϵ, kkt_error = $kkt_error"
-		
+
 		while inner_iters < max_inner_iters && (!is_fraction_to_boundary_linesearch || kkt_error > tol)
 			total_iters += 1
 			# Compute the Newton step.
@@ -137,12 +141,10 @@ function solve(
 			# Check the primals
 			# verbose && println("current primal x: ", round.(z[mcp.primal_dims]; digits = 4))
 
-			linsolve.A = ∇F
-			linsolve.b = -F
-			δz .= pinv(Matrix(∇F)) * (-F)
-
-			# Main.@infiltrate
-
+			# # Solve δz using the specified linear solver.
+			# linsolve.A = ∇F
+			# linsolve.b = -F
+			# solution = solve!(linsolve)
 			# if !SciMLBase.successful_retcode(solution) &&
 			#    (solution.retcode !== SciMLBase.ReturnCode.Default)
 			# 	verbose &&
@@ -150,8 +152,10 @@ function solve(
 			# 	status = :failed
 			# 	break
 			# end
-
 			# δz .= solution.u
+
+			# Solve δz via direct pseudoinverse
+			δz .= pinv(Matrix(∇F)) * (-F)
 
 			# verbose && println("current δx: ", round.(δz[mcp.primal_dims]; digits = 4))
 
@@ -241,7 +245,7 @@ function solve(
 
 		outer_iters += 1
 	end
-	
+
 	if outer_iters == max_outer_iters
 		status = (kkt_error <= tol) ? :solved : :failed
 		status = :solved

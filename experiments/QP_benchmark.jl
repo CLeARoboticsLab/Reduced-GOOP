@@ -14,6 +14,7 @@ using SparseArrays: sparse, SparseMatrixCSC
 using Statistics: mean, std
 using JLD2
 using Random
+using BenchmarkTools
 
 include(joinpath(@__DIR__, "Plotting.jl"))
 
@@ -21,7 +22,7 @@ function get_setup(n, num_players, mₑ, mᵢ; num_preferences = 2, r = 1)
 	primal_dimensions = fill(n, num_players)
 	dummy_primals = BlockArray(zeros(sum(primal_dimensions)), primal_dimensions)
 	flattened_parameters = flatten_params(
-		generate_random_parameter(; n, num_players, num_preferences, mₑ, mᵢ)
+		generate_random_parameter(; n, num_players, num_preferences, mₑ, mᵢ),
 	)
 	@assert length(flattened_parameters) % num_players == 0
 	dummy_parameters = BlockArray(flattened_parameters, fill(length(flattened_parameters) ÷ num_players, num_players))
@@ -72,10 +73,10 @@ function get_setup(n, num_players, mₑ, mᵢ; num_preferences = 2, r = 1)
 	# 		H * z - h
 	# 	end
 	# end
-	equality_constraints[1] = (z, θ) -> [z[1]^2 + z[2]^2 + 0.2*z[3]*z[4] - 1.0]
-	equality_constraints[2] = (z, θ) -> [z[3]^2 + z[4]^2 + 0.2*z[1]*z[2] - 1.0]
-	# equality_constraints[1] = (z, θ) -> [sum(z) - 1.0]
-	# equality_constraints[2] = (z, θ) -> [sum(z) - 1.0]
+	# equality_constraints[1] = (z, θ) -> [z[1]^2 + z[2]^2 + 0.2*z[3]*z[4] - 1.0]
+	# equality_constraints[2] = (z, θ) -> [z[3]^2 + z[4]^2 + 0.2*z[1]*z[2] - 1.0]
+	equality_constraints[1] = (z, θ) -> [sum(z) - 1.0]
+	equality_constraints[2] = (z, θ) -> [sum(z) - 1.0]
 
 	inequality_constraints = Vector{Function}(undef, num_players)
 	# for i in 1:num_players
@@ -84,8 +85,10 @@ function get_setup(n, num_players, mₑ, mᵢ; num_preferences = 2, r = 1)
 	# 		G * z - g
 	# 	end
 	# end
-	inequality_constraints[1] = (z, θ) -> [4.0 - z[1]^2 - 0.5*z[3]^2]
-	inequality_constraints[2] = (z, θ) -> [4.0 - z[3]^2 - 0.5*z[1]^2]
+	# inequality_constraints[1] = (z, θ) -> [4.0 - z[1]^2 - 0.5*z[3]^2]
+	# inequality_constraints[2] = (z, θ) -> [4.0 - z[3]^2 - 0.5*z[1]^2]
+	inequality_constraints[1] = (z, θ) -> 1 .- z
+	inequality_constraints[2] = (z, θ) -> 1 .- z
 
 	QuasiGOOP.ParametricGOOP(
 		dummy_primals,
@@ -110,12 +113,12 @@ function demo(;
 	Random.seed!(rng_seed)
 
 	# Quadratic GOOP Problem setup
-	n = 2 # x primal dimension (per player)
+	n = 10 # x primal dimension (per player)
 	mₑ = 1 # equality constraint dimension
-	mᵢ = 1 # inequality constraint dimension
-	num_instances = 2
+	mᵢ = 2 # inequality constraint dimension
+	num_instances = 10
 	linesearch = :backtracking # :backtracking, :fraction_to_boundary
-	verbose = true
+	verbose = false
 	tol = 1e-5 # 2e-2, 2e-1, 2.0
 	ϵ₀ = 1.0 #ρ 1e-2, 1e-1, 1.0
 	η₀ = 0.0
@@ -169,9 +172,9 @@ function demo(;
 	println("[Complete] KKT Dimension: ", complete_kkt_system.kkt_dimension)
 	println("[Complete] Variable Dimension: ", complete_kkt_system.variable_dimension)
 
-	while solved_attempts < num_instances
+	while solved_attempts < num_instances + 1
 		total_attempts += 1
-		@info "solved $(solved_attempts)/$(num_instances), attempt $(total_attempts): "
+		@info "solved $(max(solved_attempts - 1, 0))/$(num_instances), attempt $(total_attempts): "
 
 		# Create problem instance with random parameters
 		@info "Generating random parameters..."
@@ -209,6 +212,7 @@ function demo(;
 		print_preference_values("Reduced", num_players, n, problem, z, flattened_parameters)
 		println("[Reduced] kkt_error = $(kkt_error)")
 		reduced_kkt_history = log10.(get(convergence_log_reduced_system, "kkt_error_history", Float64[]))
+		# reduced_kkt_history = get(convergence_log_reduced_system, "kkt_error_history", Float64[])
 
 		if status != :solved
 			@info "[Reduced] Attempt $(total_attempts) failed. Retrying with a new instance..."
@@ -243,6 +247,7 @@ function demo(;
 		print_preference_values("Complete", num_players, n, problem, z, flattened_parameters)
 		println("[Complete] kkt_error = $(kkt_error)")
 		complete_kkt_history = log10.(get(convergence_log_complete_system, "kkt_error_history", Float64[]))
+		# complete_kkt_history = get(convergence_log_complete_system, "kkt_error_history", Float64[])
 
 		if status != :solved
 			@info "[Complete] Attempt $(total_attempts) failed. Retrying with a new instance..."
@@ -295,44 +300,48 @@ function demo(;
 		# 	kkt_error_recovered > tol && @error "kkt_error_recovered is above tol. Recovery may have failed."
 		# end
 
-		# Save solutions for this instance
-		instance_idx = solved_attempts + 1
-		solved_instance_idx = instance_idx
-		primal = reduced_primal
-		z = reduced_z
-		@save joinpath(solution_data_dir, "reduced_solution_instance_$(instance_idx).jld2") solved_instance_idx primal z reduced_pref_values
-		primal = complete_primal
-		z = complete_z
-		@save joinpath(solution_data_dir, "complete_solution_instance_$(instance_idx).jld2") solved_instance_idx primal z complete_pref_values
+		# Save solutions for this instance (skip first solved attempt for warmstart)
+		if solved_attempts > 0
+			instance_idx = solved_attempts
+			solved_instance_idx = instance_idx
+			primal = reduced_primal
+			z = reduced_z
+			@save joinpath(solution_data_dir, "reduced_solution_instance_$(instance_idx).jld2") solved_instance_idx primal z reduced_pref_values
+			primal = complete_primal
+			z = complete_z
+			@save joinpath(solution_data_dir, "complete_solution_instance_$(instance_idx).jld2") solved_instance_idx primal z complete_pref_values
 
-		# Solve problem with ParametricMCPs (TODO)
+			# Solve problem with ParametricMCPs (TODO)
 
-		# Compare solutions (primal solution and preference values) and save result
-		primal_l2_diff = norm(reduced_primal - complete_primal, 2)
-		println("[Compare] L2 norm between reduced and complete primal solutions: $(round(primal_l2_diff, digits = 6))")
+			# Compare solutions (primal solution and preference values) and save result
+			primal_l2_diff = norm(reduced_primal - complete_primal, 2)
+			println("[Compare] L2 norm between reduced and complete primal solutions: $(round(primal_l2_diff, digits = 6))")
 
-		for player_idx in 1:num_players
-			reduced_vals = reduced_pref_values[player_idx]
-			complete_vals = complete_pref_values[player_idx]
-			pref_diff = reduced_vals .- complete_vals
-			pref_l2_diff = norm(pref_diff, 2)
-			push!(pref_l2_diffs_per_player[player_idx], pref_l2_diff)
-			println("[Compare] player $(player_idx) preference L2 difference: $(round(pref_l2_diff, digits = 6))")
+			for player_idx in 1:num_players
+				reduced_vals = reduced_pref_values[player_idx]
+				complete_vals = complete_pref_values[player_idx]
+				pref_diff = reduced_vals .- complete_vals
+				pref_l2_diff = norm(pref_diff, 2)
+				push!(pref_l2_diffs_per_player[player_idx], pref_l2_diff)
+				println("[Compare] player $(player_idx) preference L2 difference: $(round(pref_l2_diff, digits = 6))")
+			end
+
+			# Compare elapsed times and save results
+			push!(reduced_elapsed_times, reduced_elapsed_time)
+			push!(complete_elapsed_times, complete_elapsed_time)
+			println("[Compare] elapsed time reduced (s): $(round(reduced_elapsed_time, digits = 6))")
+			println("[Compare] elapsed time complete (s): $(round(complete_elapsed_time, digits = 6))")
+
+			# Save KKT error histories
+			push!(kkt_error_histories_reduced, reduced_kkt_history)
+			push!(kkt_error_histories_complete, complete_kkt_history)
+			kkt_error_history = reduced_kkt_history
+			@save joinpath(histories_data_dir, "kkt_error_history_reduced_instance_$(instance_idx).jld2") kkt_error_history
+			kkt_error_history = complete_kkt_history
+			@save joinpath(histories_data_dir, "kkt_error_history_complete_instance_$(instance_idx).jld2") kkt_error_history
+		else
+			@info "\e[32m[Warmstart]completed; results excluded from saved data.\e[0m"
 		end
-
-		# Compare elapsed times and save results
-		push!(reduced_elapsed_times, reduced_elapsed_time)
-		push!(complete_elapsed_times, complete_elapsed_time)
-		println("[Compare] elapsed time reduced (s): $(round(reduced_elapsed_time, digits = 6))")
-		println("[Compare] elapsed time complete (s): $(round(complete_elapsed_time, digits = 6))")
-
-		# Save KKT error histories
-		push!(kkt_error_histories_reduced, reduced_kkt_history)
-		push!(kkt_error_histories_complete, complete_kkt_history)
-		kkt_error_history = reduced_kkt_history
-		@save joinpath(histories_data_dir, "kkt_error_history_reduced_instance_$(solved_attempts + 1).jld2") kkt_error_history
-		kkt_error_history = complete_kkt_history
-		@save joinpath(histories_data_dir, "kkt_error_history_complete_instance_$(solved_attempts + 1).jld2") kkt_error_history
 
 		solved_attempts += 1
 	end
@@ -379,7 +388,8 @@ function demo(;
 		)
 	end
 
-	println("==== Aggregate preference L2-difference stats across $(solved_attempts) instance(s) ====")
+	saved_attempts = max(solved_attempts - 1, 0)
+	println("==== Aggregate preference L2-difference stats across $(saved_attempts) instance(s) ====")
 	for player_idx in 1:num_players
 		vals = pref_l2_diffs_per_player[player_idx]
 		if isempty(vals)
@@ -390,15 +400,12 @@ function demo(;
 			println("[Aggregate] player $(player_idx): mean=$(round(mean_val, digits = 6)), std=$(round(std_val, digits = 6)), n=$(length(vals))")
 		end
 	end
-	println("==== Aggregate elapsed-time stats across $(solved_attempts) instance(s) ====")
+	println("==== Aggregate elapsed-time stats across $(saved_attempts) instance(s) ====")
 	if !isempty(reduced_elapsed_times) && !isempty(complete_elapsed_times)
-		time_abs_diff = abs.(reduced_elapsed_times .- complete_elapsed_times)
 		reduced_std = length(reduced_elapsed_times) > 1 ? std(reduced_elapsed_times) : 0.0
 		complete_std = length(complete_elapsed_times) > 1 ? std(complete_elapsed_times) : 0.0
-		diff_std = length(time_abs_diff) > 1 ? std(time_abs_diff) : 0.0
 		println("[Aggregate] reduced elapsed time (s): mean=$(round(mean(reduced_elapsed_times), digits = 6)), std=$(round(reduced_std, digits = 6)), n=$(length(reduced_elapsed_times))")
 		println("[Aggregate] complete elapsed time (s): mean=$(round(mean(complete_elapsed_times), digits = 6)), std=$(round(complete_std, digits = 6)), n=$(length(complete_elapsed_times))")
-		println("[Aggregate] |reduced-complete| elapsed time (s): mean=$(round(mean(time_abs_diff), digits = 6)), std=$(round(diff_std, digits = 6)), n=$(length(time_abs_diff))")
 	else
 		println("[Aggregate] elapsed time: no solved instances")
 	end

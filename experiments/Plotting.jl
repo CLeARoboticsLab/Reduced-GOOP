@@ -237,7 +237,7 @@ function plot_convergence_plot_aggregate(; kkt_error_histories, show_ylabel = tr
 	axis_label_fontsize = 30
 	tick_label_fontsize = 22
 	ylabel_text = show_ylabel ? L"$\log(|| \mathcal{K}_{\rho}^{(\ell)} ||_2)$" : ""
-	
+
 	max_trace_length = maximum(length, kkt_error_histories)
 	num_instances = length(kkt_error_histories)
 	mean_kkt_error = fill(NaN, max_trace_length)
@@ -335,6 +335,7 @@ function plot_convergence_plot_aggregate_comparison(;
 		isempty(complete_stats.x) ? 0 : maximum(complete_stats.x),
 	)
 
+	x_lim = 10 # max iter for plot
 	figure = CairoMakie.Figure()
 	ax = CairoMakie.Axis(
 		figure[1, 1];
@@ -345,9 +346,9 @@ function plot_convergence_plot_aggregate_comparison(;
 		xticklabelsize = tick_label_fontsize,
 		yticklabelsize = tick_label_fontsize,
 		# yticks = -10:4,
-		# xticks = 0:10:max_x,
+		xticks = 0:5:x_lim, # 0:5:max_x,
 		# yscale = log10,
-		limits = ((1, 20), (-15, 3)) 
+		limits = ((1, x_lim), (-15, 3)),
 	)
 
 	CairoMakie.band!(ax, reduced_stats.x, reduced_stats.y_lower, reduced_stats.y_upper; color = (:dodgerblue, 0.2))
