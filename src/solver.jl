@@ -248,7 +248,7 @@ function solve(
 
 	if outer_iters == max_outer_iters
 		status = (kkt_error <= tol) ? :solved : :failed
-		status = :solved
+		# status = :solved
 	end
 	if has_convergence_log
 		convergence_log["kkt_error_history"] = kkt_error_history

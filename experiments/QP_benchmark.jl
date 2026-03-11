@@ -14,25 +14,69 @@ using SparseArrays: sparse, SparseMatrixCSC
 using Statistics: mean, std
 using JLD2
 using Random
-using BenchmarkTools
+using Distributions: Normal, Uniform, Laplace, TDist, LocationScale, DiscreteNonParametric
 
 include(joinpath(@__DIR__, "Plotting.jl"))
 
-function get_setup(n, num_players, mₑ, mᵢ; num_preferences = 2, r = 1)
+function get_setup(n, num_players, mₑ, mᵢ; num_preferences = 2, r = 1, param_distribution = :normal)
 	primal_dimensions = fill(n, num_players)
 	dummy_primals = BlockArray(zeros(sum(primal_dimensions)), primal_dimensions)
 	flattened_parameters = flatten_params(
-		generate_random_parameter(; n, num_players, num_preferences, mₑ, mᵢ),
+		generate_random_parameter(; n, num_players, num_preferences, mₑ, mᵢ, r, param_distribution),
 	)
 	@assert length(flattened_parameters) % num_players == 0
 	dummy_parameters = BlockArray(flattened_parameters, fill(length(flattened_parameters) ÷ num_players, num_players))
 
 	preferences = [Vector{Function}(undef, num_preferences) for _ in 1:num_players]
-	for i in 1:num_players, k in 1:num_preferences
-		preferences[i][k] = function (z, θ)
-			(; Qk, qk) = unpack_parameters(θ, n, i, k, mₑ, mᵢ; num_players, num_preferences)
-			0.5 * z' * Qk * z + qk' * z #+ 0.1 * (k == num_preferences ? (sum(z))^4 : 0.0)
-		end
+	# for i in 1:num_players, k in 1:num_preferences
+	# 	preferences[i][k] = function (z, θ)
+	# 		(; Qk, qk) = unpack_parameters(θ, n, i, k, mₑ, mᵢ; num_players, num_preferences)
+	# 		0.5 * z' * Qk * z + qk' * z #+ 0.1 * (k == num_preferences ? (sum(z))^4 : 0.0)
+	# 	end
+	# end
+	Q11 = [   0.940464  -1.18139    1.30957   -0.177896
+		-1.18139    2.36853    0.279164  -0.545926
+		 1.30957    0.279164   6.00962   -1.92151
+		-0.177896  -0.545926  -1.92151    0.702916]
+	q11 = [0.047463643076557205
+		-0.02254865282287072
+		-0.006471311734889661
+		-0.052788119523802635]
+	Q12 = [            0.466907  -1.2333   -1.57922   1.12513
+		-1.2333     4.58227   5.89433  -5.80697
+		-1.57922    5.89433   7.58245  -7.4931
+		 1.12513   -5.80697  -7.4931    8.77907]
+	q12 = [0.05902965218249853
+		-0.03898416774361001
+		0.07170113193516675
+		-0.12040644738043454]
+	Q21 = [         4.2802     0.496745   -4.30609   0.6842
+		 0.496745   0.0577451  -0.509122  0.0534357
+		-4.30609   -0.509122    5.2616    1.88734
+		 0.6842     0.0534357   1.88734   7.24707]
+	q21 = [0.06000505037276347
+		-0.008580502484819896
+		-0.04740023851907367
+		0.048817489979068186]
+	Q22 = [       5.83166   1.68225    1.23948    1.13902
+		1.68225   2.13756   -0.284968   2.46692
+		1.23948  -0.284968   0.513297  -0.589443
+		1.13902   2.46692   -0.589443   2.98988]
+	q22 = [-0.046903159811613894
+		0.08415952351404277
+		0.009532230248185582
+		-0.010266738863828425]
+	preferences[1][1] = function (z, θ)
+		0.5 * z' * Q11 * z + q11' * z
+	end
+	preferences[1][2] = function (z, θ)
+		0.5 * z' * Q12 * z + q12' * z
+	end
+	preferences[2][1] = function (z, θ)
+		0.5 * z' * Q21 * z + q21' * z
+	end
+	preferences[2][2] = function (z, θ)
+		0.5 * z' * Q22 * z + q22' * z
 	end
 
 
@@ -41,28 +85,33 @@ function get_setup(n, num_players, mₑ, mᵢ; num_preferences = 2, r = 1)
 	]
 
 	equality_constraints = Vector{Function}(undef, num_players)
-	for i in 1:num_players
-		equality_constraints[i] = function (z, θ)
-			(; H, h) = unpack_parameters(θ, n, i, 1, mₑ, mᵢ; num_players, num_preferences)
-			H * z - h
-		end
-	end
+	# for i in 1:num_players
+	# 	equality_constraints[i] = function (z, θ)
+	# 		(; H, h) = unpack_parameters(θ, n, i, 1, mₑ, mᵢ; num_players, num_preferences)
+	# 		H * z - h
+	# 	end
+	# end
 	# equality_constraints[1] = (z, θ) -> [z[1]^2 + z[2]^2 + 0.2*z[3]*z[4] - 1.0]
 	# equality_constraints[2] = (z, θ) -> [z[3]^2 + z[4]^2 + 0.2*z[1]*z[2] - 1.0]
 	# equality_constraints[1] = (z, θ) -> [sum(z) - 1.0]
 	# equality_constraints[2] = (z, θ) -> [sum(z) - 1.0]
+	equality_constraints[1] = (z, θ) -> [([-0.37412445235440805 -2.652861620811643 0.48716352019055537 -0.32550310672821275] * z)[] - 0.0]
+	equality_constraints[2] = (z, θ) -> [ ([1.5077422894944155 0.00981949450615413 -0.6541977612114657 0.35476159001049673] * z)[] - 0.0]
 
 	inequality_constraints = Vector{Function}(undef, num_players)
-	for i in 1:num_players
-		inequality_constraints[i] = function (z, θ)
-			(; G, g) = unpack_parameters(θ, n, i, 1, mₑ, mᵢ; num_players, num_preferences)
-			G * z - g
-		end
-	end
+	# for i in 1:num_players
+	# 	inequality_constraints[i] = function (z, θ)
+	# 		(; G, g) = unpack_parameters(θ, n, i, 1, mₑ, mᵢ; num_players, num_preferences)
+	# 		G * z - g
+	# 	end
+	# end
 	# inequality_constraints[1] = (z, θ) -> [4.0 - z[1]^2 - 0.5*z[3]^2]
 	# inequality_constraints[2] = (z, θ) -> [4.0 - z[3]^2 - 0.5*z[1]^2]
 	# inequality_constraints[1] = (z, θ) -> 1 .- z
 	# inequality_constraints[2] = (z, θ) -> 1 .- z
+	inequality_constraints[1] = (z,θ) -> [1.0 - ([1.6362485468308972 0.7269891124715658 -0.02213032860874247 -0.8614973793905486] * z)[]]
+	inequality_constraints[2] = (z,θ) -> [1.0 - ([-0.47621163311155107 1.6081023062154234 0.2697219764580088 2.0623256332203224] * z)[]]
+
 
 	QuasiGOOP.ParametricGOOP(
 		dummy_primals,
@@ -81,25 +130,28 @@ function demo(;
 	num_players = 2,
 	num_preferences = 5,
 	rng_seed = 123,
+	param_distribution = :normal,
 	show_convergence_legend = true,
 	show_ylabel = true,
 )
 	Random.seed!(rng_seed)
+	param_distribution = parse_parameter_distribution(param_distribution)
 
 	# Quadratic GOOP Problem setup
-	n = 10 # x primal dimension (per player)
-	mₑ = 2 # equality constraint dimension
+	n = 2 # x primal dimension (per player)
+	mₑ = 1 # equality constraint dimension
 	mᵢ = 1 # inequality constraint dimension
-	num_instances = 10
+	num_instances = 1
+	r = max(1, (n * num_players) ÷ 2) # rank of Q matrices
 	linesearch = :backtracking # :backtracking, :fraction_to_boundary
 	verbose = false
 	tol = 1e-5 # 2e-2, 2e-1, 2.0
-	ϵ₀ = 0.001 #ρ 1e-2, 1e-1, 1.0
+	ϵ₀ = 0.1 #ρ 1e-2, 1e-1, 1.0
 	η₀ = 0.0
-	max_inner_iters = 50
+	max_inner_iters = 30
 	max_outer_iters = 2
 	min_stepsize = 1e-20
-	run_id = "Dongho_run_QP_$(num_players)players_$(num_preferences)prefs_$(ϵ₀)ρ_$(n)pdim_$(mₑ)mₑ_$(mᵢ)mᵢ"
+	run_id = "QP_$(num_players)players_$(num_preferences)prefs_$(ϵ₀)ρ_$(n)pdim_$(mₑ)mₑ_$(mᵢ)mᵢ_$(param_distribution)"
 
 	# Create file dir
 	run_dir = joinpath("data", "debugging_benchmark", run_id)
@@ -132,7 +184,7 @@ function demo(;
 	kkt_error_histories_complete = Vector{Vector{Float64}}()
 
 	# Create problem
-	problem = get_setup(n, num_players, mₑ, mᵢ; num_preferences)
+	problem = get_setup(n, num_players, mₑ, mᵢ; num_preferences, param_distribution)
 
 	# Solve problem with reduced GOOP KKT system using params
 	@info "Generating reduced KKT system..."
@@ -146,15 +198,22 @@ function demo(;
 	println("[Complete] KKT Dimension: ", complete_kkt_system.kkt_dimension)
 	println("[Complete] Variable Dimension: ", complete_kkt_system.variable_dimension)
 
+	Main.@infiltrate
+
 	while solved_attempts < num_instances + 1
 		total_attempts += 1
 		@info "solved $(max(solved_attempts - 1, 0))/$(num_instances), attempt $(total_attempts): "
 
 		# Create problem instance with random parameters
 		@info "Generating random parameters..."
-		parameters = generate_random_parameter(; n, num_players, num_preferences, mₑ, mᵢ)
+		parameters = generate_random_parameter(; n, r, num_players, num_preferences, mₑ, mᵢ, param_distribution)
 		flattened_parameters = flatten_params(parameters)
+		z₀_reduced = zeros(reduced_kkt_system.primal_dims)
+		z₀_complete = zeros(complete_kkt_system.primal_dims)
 
+		# @info "Generating random initial guesses..."
+		# z₀_reduced = randn(length(reduced_kkt_system.primal_dims))
+		# z₀_complete = z₀_reduced
 
 		convergence_log_reduced_system = Dict{String, Any}()
 		reduced_elapsed_time = @elapsed begin
@@ -168,7 +227,7 @@ function demo(;
 				max_inner_iters,
 				max_outer_iters,
 				min_stepsize,
-				z₀ = zeros(reduced_kkt_system.primal_dims),
+				z₀ = z₀_reduced,
 				verbose,
 				convergence_log = convergence_log_reduced_system,
 				linesearch, # :backtracking, :fraction_to_boundary
@@ -182,7 +241,7 @@ function demo(;
 		println("[Reduced] Primal solution: $(round.(reduced_primal, digits = 3))")
 		print_preference_values("Reduced", num_players, n, problem, z, flattened_parameters)
 		println("[Reduced] kkt_error = $(kkt_error)")
-		print_constraint_residuals("Reduced", num_players, n, reduced_z, flattened_parameters; mₑ, mᵢ, num_preferences)		
+		print_constraint_residuals("Reduced", num_players, n, reduced_z, flattened_parameters; mₑ, mᵢ, num_preferences)
 		reduced_kkt_history = log10.(get(convergence_log_reduced_system, "kkt_error_history", Float64[]))
 		# reduced_kkt_history = get(convergence_log_reduced_system, "kkt_error_history", Float64[])
 
@@ -204,7 +263,7 @@ function demo(;
 				max_inner_iters,
 				max_outer_iters,
 				min_stepsize,
-				z₀ = zeros(complete_kkt_system.primal_dims),
+				z₀ = z₀_complete,
 				verbose,
 				convergence_log = convergence_log_complete_system,
 				linesearch, # :backtracking, :fraction_to_boundary
@@ -284,7 +343,8 @@ function demo(;
 			z = complete_z
 			@save joinpath(solution_data_dir, "complete_solution_instance_$(instance_idx).jld2") solved_instance_idx primal z complete_pref_values
 
-			# Solve problem with ParametricMCPs (TODO)
+			# Save problem parameters
+			@save joinpath(solution_data_dir, "problem_parameters_instance_$(instance_idx).jld2") flattened_parameters
 
 			# Compare solutions (primal solution and preference values) and save result
 			primal_l2_diff = norm(reduced_primal - complete_primal, 2)
@@ -391,9 +451,39 @@ end # end demo
 
 
 # Helper functions 
-function rand_psd(n, r)
+const SUPPORTED_PARAM_DISTRIBUTIONS = (:normal, :uniform, :laplace, :student_t5, :rademacher)
+
+function parse_parameter_distribution(param_distribution)
+	dist = Symbol(lowercase(String(param_distribution)))
+	if dist ∉ SUPPORTED_PARAM_DISTRIBUTIONS
+		throw(
+			ArgumentError(
+				"Unsupported `param_distribution=$(param_distribution)`. Choose one of $(SUPPORTED_PARAM_DISTRIBUTIONS).",
+			),
+		)
+	end
+	return dist
+end
+
+function get_sampling_distribution(param_distribution)
+	dist = parse_parameter_distribution(param_distribution)
+	if dist == :normal
+		return Normal()
+	elseif dist == :uniform
+		return Uniform(-sqrt(3.0), sqrt(3.0)) # Var = 1
+	elseif dist == :laplace
+		return Laplace(0.0, 1 / sqrt(2.0)) # Var = 1
+	elseif dist == :student_t5
+		return LocationScale(0.0, sqrt((5 - 2) / 5), TDist(5)) # Var = 1
+	elseif dist == :rademacher
+		return DiscreteNonParametric([-1.0, 1.0], [0.5, 0.5]) # Var = 1
+	end
+	error("Unhandled `param_distribution=$(dist)`.")
+end
+
+function rand_psd(n, r; distribution = Normal())
 	# n: primal dimension, r: matrix rank (<=n)
-	R = randn(r, n);
+	R = rand(distribution, r, n)
 	R' * R;
 end
 
@@ -407,7 +497,7 @@ end
 
 function print_constraint_residuals(label, num_players, n, z, θ; mₑ, mᵢ, num_preferences)
 	println("[$(label)] Constraint residuals at solution:")
-	primal = z[1:(num_players * n)]
+	primal = z[1:(num_players*n)]
 	for player_idx in 1:num_players
 		(; H, h, G, g) = unpack_parameters(
 			θ,
@@ -431,7 +521,8 @@ function get_preference_values(num_players, n, problem, z, θ)
 	[[pref(z_primal, θ) for pref in player_preferences] for player_preferences in problem.preferences]
 end
 
-"Generate a random parameter vector Θ corresponding to a convex QP."
+"Generate a random parameter vector Θ corresponding to a convex QP.
+Supported `param_distribution`: `:normal`, `:uniform`, `:laplace`, `:student_t5`, `:rademacher`."
 function generate_random_parameter(;
 	n = 2,
 	r = 1,
@@ -439,7 +530,9 @@ function generate_random_parameter(;
 	num_preferences = 2,
 	mₑ = 1,
 	mᵢ = 2,
+	param_distribution = :normal,
 )
+	distribution = get_sampling_distribution(param_distribution)
 
 	# params[i] stores all preference cost data for player i, and that player's
 	# equality/inequality constraint data.
@@ -447,20 +540,20 @@ function generate_random_parameter(;
 
 	for i in 1:num_players
 		# Constraint data is generated once per player.
-		H_blocks = [rand(mₑ, n) for _ in 1:num_players]
+		H_blocks = [rand(distribution, mₑ, n) * 0.1 for _ in 1:num_players]
 		H = hcat(H_blocks...)
-		G_blocks = [rand(mᵢ, n) for _ in 1:num_players]
+		G_blocks = [rand(distribution, mᵢ, n) * 0.1 for _ in 1:num_players]
 		G = hcat(G_blocks...)
-		z_feas = rand(num_players * n)
-		h = H * z_feas 				# feasible equality constraints # TODO: Redo this
-		slack = rand(mᵢ) .+ 1.0     # strictly positive
-		g = G * z_feas .- slack 	# feasible inequality constraints
+		z_feas = zeros(num_players * n) # keep zero vector as feasible point
+		h = H * z_feas # feasible equality constraints # TODO: Redo this
+		slack = ones(mᵢ)  # strictly positive
+		g = slack - G * z_feas # feasible inequality constraints
 
 		# Cost data is generated per preference for this player.
 		preference_data = [
 			let
-				Qk_local = rand_psd(n * num_players, r)
-				qk_local = Qk_local * randn(n * num_players) # q ∈ Col(Qk) for boundedness
+				Qk_local = rand_psd(n * num_players, r; distribution) * 0.1
+				qk_local = Qk_local * rand(distribution, n * num_players) # q ∈ Col(Qk) for boundedness
 				(Qk = Qk_local, qk = qk_local)
 			end for _ in 1:num_preferences
 		]

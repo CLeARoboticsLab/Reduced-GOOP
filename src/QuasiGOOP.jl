@@ -12,7 +12,6 @@ using SciMLBase: SciMLBase
 using SymbolicTracingUtils: SymbolicTracingUtils
 using JLD2: JLD2
 using ParametricMCPs
-using BenchmarkTools
 
 include("goop_kkt_system.jl")
 include("goop.jl")

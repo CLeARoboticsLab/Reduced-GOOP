@@ -345,10 +345,10 @@ function plot_convergence_plot_aggregate_comparison(;
 		ylabelsize = axis_label_fontsize,
 		xticklabelsize = tick_label_fontsize,
 		yticklabelsize = tick_label_fontsize,
-		# yticks = -10:4,
-		# xticks = 0:5:x_lim, # 0:5:max_x,
+		# yticks = -15:3,
+		# xticks = 0:5:x_lim, # 0:5:x_lim, 0:5:max_x,
 		# yscale = log10,
-		# limits = ((0, x_lim), nothing),
+		# limits = ((0, x_lim), (-15, 3)),
 	)
 
 	CairoMakie.band!(ax, reduced_stats.x, reduced_stats.y_lower, reduced_stats.y_upper; color = (:dodgerblue, 0.2))
