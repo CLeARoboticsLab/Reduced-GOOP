@@ -167,8 +167,6 @@ function compile_parametric_goop(N, K, ni, mEi, mIi;
     F_nc_sym    = all_F[noncomp_idx]
     yp_sym      = [all_vars; sym_params]
 
-    Main.@infiltrate
-
     verbose && println("  [compile:$name] Compiling residual and Jacobian functions…")
 
     F_nc_fn = Symbolics.build_function(F_nc_sym,   yp_sym; expression=Val{false})[1]
@@ -440,19 +438,19 @@ run_pdip_fixed_rho(pg, params, y0, rho; kw...) =
 
 const EXP_N   = 2
 const EXP_K   = 2
-const EXP_ni  = [2, 2]
-const EXP_mEi = [1, 1]
-const EXP_mIi = [1, 1]
-const N_PROBS = 10
+const EXP_ni  = [10, 10]
+const EXP_mEi = [5, 5]
+const EXP_mIi = [5, 5]
+const N_PROBS = 1
 
 println("\n" * "="^65)
 println("  One-time compilation (4 systems: NL×{Complete,Reduced}, LQ×{Complete,Reduced})")
 println("="^65)
 
-# PGOOP_NL_C, T_NL_C = compile_parametric_goop(EXP_N, EXP_K, EXP_ni, EXP_mEi, EXP_mIi;
-#     builder=build_complete_goop_kkt, make_sym_fns=make_nl_sym_fns)
-# PGOOP_NL_R, T_NL_R = compile_parametric_goop(EXP_N, EXP_K, EXP_ni, EXP_mEi, EXP_mIi;
-#     builder=build_reduced_goop_kkt,  make_sym_fns=make_nl_sym_fns)
+PGOOP_NL_C, T_NL_C = compile_parametric_goop(EXP_N, EXP_K, EXP_ni, EXP_mEi, EXP_mIi;
+    builder=build_complete_goop_kkt, make_sym_fns=make_nl_sym_fns)
+PGOOP_NL_R, T_NL_R = compile_parametric_goop(EXP_N, EXP_K, EXP_ni, EXP_mEi, EXP_mIi;
+    builder=build_reduced_goop_kkt,  make_sym_fns=make_nl_sym_fns)
 PGOOP_LQ_C, T_LQ_C = compile_parametric_goop(EXP_N, EXP_K, EXP_ni, EXP_mEi, EXP_mIi;
     builder=build_complete_goop_kkt, make_sym_fns=make_lq_sym_fns)
 PGOOP_LQ_R, T_LQ_R = compile_parametric_goop(EXP_N, EXP_K, EXP_ni, EXP_mEi, EXP_mIi;
@@ -564,10 +562,10 @@ println("\n" * "="^65)
 println("  EXPERIMENT 2: KKT residual convergence at fixed ρ  (nonlinear example)")
 println("="^65)
 
-const RHO_VALUES = [0.1] #[1.0, 0.1, 0.01, 0.001]
+const RHO_VALUES = [1.0, 0.1] #[1.0, 0.1, 0.01, 0.001]
 const MAX_INNER  = 50   # stop early; numerical noise dominates beyond ~10 iters
 const N_INITS    = 10   # random initializations (fixed-problem experiment)
-const N_PROBS_CV = 1   # random problems       (random-problem experiment)
+const N_PROBS_CV = 10   # random problems       (random-problem experiment)
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -699,6 +697,7 @@ for rho in RHO_VALUES
         params = pack_lq_params(data, pg.N, pg.K)
         y0     = make_initial_point(pg, data.z0)
         primal_sol, _, hist, _ = run_pdip_fixed_rho(pg, params, y0, rho; max_inner=MAX_INNER)
+        println("length(primal_sol):" , length(primal_sol))
         return hist
     end
     
@@ -708,8 +707,6 @@ for rho in RHO_VALUES
     prob_iter_R = let probs = shuffle(MersenneTwister(1), PROBS_CV), idx = Ref(0)
         () -> (idx[] = mod1(idx[]+1, length(probs)); run_prob(PGOOP_LQ_R, probs[idx[]]))
     end
-
-    Main.@infiltrate
 
     res_C = collect_residuals(prob_iter_C, MAX_INNER, N_PROBS_CV)
     res_R = collect_residuals(prob_iter_R, MAX_INNER, N_PROBS_CV)
@@ -721,7 +718,6 @@ for rho in RHO_VALUES
     savefig(plt, joinpath(@__DIR__,
         "conv_randprob_rho$(replace(string(rho),"."=>"p"))_K$(EXP_K).pdf"))
     
-    Main.@infiltrate
 end
 
 println("\nAll experiments complete.")

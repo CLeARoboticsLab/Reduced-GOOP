@@ -67,9 +67,9 @@ function solve(
 	# 	z
 	# end)
 	z = zeros(mcp.variable_dimension)
-	z[mcp.preference_slack_dims] .= 0.1 #1.0
-	z[mcp.interior_point_slack_dims] .= 0.1 #1.0
-	z[mcp.inequality_constraint_dual_dims] .= 0.1 #1.0
+	z[mcp.preference_slack_dims] .= 1.0
+	z[mcp.interior_point_slack_dims] .= 1.0 	  # σ
+	z[mcp.inequality_constraint_dual_dims] .= 1.0 # γ
 
 	if !isnothing(z₀)
 		z[mcp.primal_dims] .= z₀

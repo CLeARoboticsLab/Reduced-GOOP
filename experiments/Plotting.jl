@@ -346,9 +346,9 @@ function plot_convergence_plot_aggregate_comparison(;
 		xticklabelsize = tick_label_fontsize,
 		yticklabelsize = tick_label_fontsize,
 		# yticks = -15:3,
-		# xticks = 0:5:x_lim, # 0:5:x_lim, 0:5:max_x,
+		xticks = 0:5:10, # 0:5:x_lim, 0:5:max_x,
 		# yscale = log10,
-		# limits = ((0, x_lim), (-15, 3)),
+		limits = ((0, 15), nothing),
 	)
 
 	CairoMakie.band!(ax, reduced_stats.x, reduced_stats.y_lower, reduced_stats.y_upper; color = (:dodgerblue, 0.2))
@@ -361,4 +361,168 @@ function plot_convergence_plot_aggregate_comparison(;
 		CairoMakie.axislegend(ax; position = :rt, labelsize = legend_label_fontsize)
 	end
 	return figure, ax
+end
+
+"""
+Compute local convergence order values from a log-error trace:
+`p_k = (log(e_{k+1}/e_k)) / (log(e_k/e_{k-1}))`.
+
+When `log_kkt_error_history = log(e_k)` (any log base), this becomes
+`p_k = (l_{k+1} - l_k) / (l_k - l_{k-1})`.
+"""
+function local_order_sequence_from_log(log_kkt_error_history; min_abs_denominator = 1e-12)
+	iterations = Int[]
+	p_values = Float64[]
+	if length(log_kkt_error_history) < 3
+		return iterations, p_values
+	end
+
+	for k in 2:(length(log_kkt_error_history) - 1)
+		l_prev = log_kkt_error_history[k - 1]
+		l_curr = log_kkt_error_history[k]
+		l_next = log_kkt_error_history[k + 1]
+		if !isfinite(l_prev) || !isfinite(l_curr) || !isfinite(l_next)
+			continue
+		end
+
+		denominator = l_curr - l_prev
+		if abs(denominator) <= min_abs_denominator
+			continue
+		end
+
+		p_k = (l_next - l_curr) / denominator
+		isfinite(p_k) || continue
+		push!(iterations, k)
+		push!(p_values, p_k)
+	end
+	return iterations, p_values
+end
+
+"""
+Aggregate local-order traces (`p_k`) across multiple log-error histories.
+
+Returns per-iteration mean/std/count and a tail mean `p_hat` (tail_points = 3).
+"""
+function aggregate_local_order_stats(log_kkt_error_histories; min_abs_denominator = 1e-12, tail_points = 3)
+	p_by_iteration = Dict{Int, Vector{Float64}}()
+	per_instance_p = Vector{Vector{Float64}}()
+
+	for log_history in log_kkt_error_histories
+		iterations, p_values = local_order_sequence_from_log(log_history; min_abs_denominator)
+		if !isempty(p_values)
+			push!(per_instance_p, p_values)
+			for (k, p_k) in zip(iterations, p_values)
+				if haskey(p_by_iteration, k)
+					push!(p_by_iteration[k], p_k)
+				else
+					p_by_iteration[k] = Float64[p_k]
+				end
+			end
+		end
+	end
+
+	if isempty(p_by_iteration)
+		return (
+			x = Int[],
+			y_mean = Float64[],
+			y_std = Float64[],
+			y_lower = Float64[],
+			y_upper = Float64[],
+			counts = Int[],
+			p_hat = NaN,
+			per_instance_p = per_instance_p,
+		)
+	end
+
+	x = sort(collect(keys(p_by_iteration)))
+	y_mean = Float64[]
+	y_std = Float64[]
+	counts = Int[]
+	for k in x
+		values = p_by_iteration[k]
+		μ = sum(values) / length(values)
+		σ = sqrt(sum((v - μ)^2 for v in values) / length(values))
+		push!(y_mean, μ)
+		push!(y_std, σ)
+		push!(counts, length(values))
+	end
+	y_lower = y_mean .- y_std
+	y_upper = y_mean .+ y_std
+
+	tail_len = min(tail_points, length(y_mean))
+	p_hat = tail_len > 0 ? sum(y_mean[(end - tail_len + 1):end]) / tail_len : NaN
+	return (; x, y_mean, y_std, y_lower, y_upper, counts, p_hat, per_instance_p)
+end
+
+"""
+Plot aggregate local-order traces `p_k` for reduced and complete KKT histories.
+"""
+function plot_local_order_aggregate_comparison(;
+	reduced_log_kkt_error_histories,
+	complete_log_kkt_error_histories,
+	show_legend = true,
+	show_ylabel = true,
+	min_abs_denominator = 1e-12,
+	tail_points = 5,
+)
+	reduced_stats = aggregate_local_order_stats(
+		reduced_log_kkt_error_histories;
+		min_abs_denominator,
+		tail_points,
+	)
+	complete_stats = aggregate_local_order_stats(
+		complete_log_kkt_error_histories;
+		min_abs_denominator,
+		tail_points,
+	)
+	if isempty(reduced_stats.x) && isempty(complete_stats.x)
+		error("No valid local-order points were computed from the provided log-error histories.")
+	end
+
+	axis_label_fontsize = 28
+	tick_label_fontsize = 20
+	legend_label_fontsize = 18
+	ylabel_text = show_ylabel ? "local order p_k" : ""
+
+	max_x = max(
+		isempty(reduced_stats.x) ? 0 : maximum(reduced_stats.x),
+		isempty(complete_stats.x) ? 0 : maximum(complete_stats.x),
+	)
+
+	figure = CairoMakie.Figure()
+	ax = CairoMakie.Axis(
+		figure[1, 1];
+		xlabel = "iteration k",
+		ylabel = ylabel_text,
+		xlabelsize = axis_label_fontsize,
+		ylabelsize = axis_label_fontsize,
+		xticklabelsize = tick_label_fontsize,
+		yticklabelsize = tick_label_fontsize,
+		xticks = 0:5:max_x,
+		# yticks = 0:1:3,
+		limits = ((2,15), (0, 10))
+	)
+
+	# Reference for quadratic convergence.
+	CairoMakie.hlines!(ax, [2.0]; color = :black, linestyle = :dot, linewidth = 2, label = "Quadratic target (p = 2)")
+
+	if !isempty(reduced_stats.x)
+		CairoMakie.lines!(ax, reduced_stats.x, reduced_stats.y_mean; color = :crimson, linewidth = 3, label = "Reduced mean p_k")
+		if isfinite(reduced_stats.p_hat)
+			CairoMakie.hlines!(ax, [reduced_stats.p_hat]; color = :crimson, linestyle = :dash, linewidth = 2, label = "Reduced tail mean p_hat")
+		end
+	end
+
+	if !isempty(complete_stats.x)
+		CairoMakie.lines!(ax, complete_stats.x, complete_stats.y_mean; color = :dodgerblue, linewidth = 3, label = "Complete mean p_k")
+		if isfinite(complete_stats.p_hat)
+			CairoMakie.hlines!(ax, [complete_stats.p_hat]; color = :dodgerblue, linestyle = :dash, linewidth = 2, label = "Complete tail mean p_hat")
+		end
+	end
+
+	if show_legend
+		CairoMakie.axislegend(ax; position = :rt, labelsize = legend_label_fontsize)
+	end
+
+	return figure, ax, reduced_stats, complete_stats
 end

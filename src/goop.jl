@@ -26,6 +26,7 @@ Base.@kwdef struct ParametricGOOP{T1, T2, T3, T4, T5}
 end
 
 "Construct a ParametricGOOP given a test point (x, θ)."
+#TODO: (1) handle preference version (2) handle shared dual variables 
 function ParametricGOOP(
 	x,
 	θ;
@@ -229,7 +230,7 @@ function generate_slacked_reduced_kkt_system(
 			else
 				@assert length(h) == 1 "Expected a single preference function at the base level, but got $(length(h))"
 				# Highest priority is a cost. 
-				
+
 				L = h - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
 					(isnothing(fₛ) ? 0 : λₛ' * fₛ) - (isnothing(gₛ) ? 0 : γₛ' * gₛ)
 				∇L = Symbolics.gradient(L, x[Block(player)])
@@ -239,17 +240,27 @@ function generate_slacked_reduced_kkt_system(
 						[
 							∇L .+ η * x[Block(player)]
 							f
-							(isnothing(g) ? nothing : g .- σ)
-							(isnothing(g) ? nothing : σ .* γ .- ϵ)
+							# (isnothing(g) ? nothing : g .- σ)
+							# (isnothing(g) ? nothing : σ .* γ .- ϵ)
+							isnothing(g) ? nothing : g .* γ .- ϵ
+							isnothing(gₛ) ? nothing : gₛ .* γₛ .- ϵ],
+					),
+				)
+				slacked_ineq = Vector{symbolic_type}(
+					filter!(
+						!isnothing,
+						[
+							isnothing(g) ? nothing : g .- σ
+							isnothing(gₛ) ? nothing : gₛ .- σₛ
 						],
 					),
 				)
-				return (; F, π = ∇L)
+				return (; F, slacked_ineq, π = ∇L)
 			end
 		end
 
 		# Handle higher levels via tail recursion.
-		(; F, π) = construct_player_kkt_conditions(
+		(; F, slacked_ineq, π) = construct_player_kkt_conditions(
 			preferences[2:end],
 			is_prioritized_constraint[2:end];
 			player,
@@ -365,20 +376,32 @@ function generate_slacked_reduced_kkt_system(
 				(isnothing(fₛ) ? 0 : λ̃ₛ' * fₛ) - (isnothing(gₛ) ? 0 : γ̃ₛ' * gₛ) -
 				(isnothing(g) ? 0 : ϕ' * (repeat(g, num_levels - level) .* blocked_Γ_cs[Block(level+1):Block(num_levels)])) -
 				(isnothing(gₛ) ? 0 : ϕₛ' * (repeat(gₛ, num_levels - level) .* blocked_Γ_cs_shared[Block(level+1):Block(num_levels)]))
-			
+
 			∇L = Symbolics.gradient(L, x[Block(player)])
 			F̃ = Vector{symbolic_type}(
 				filter!(
 					!isnothing,
 					[
 						∇L .+ η * x[Block(player)]
-						(isnothing(g) ? nothing : σ .* γ .- ϵ)
-						(isnothing(gₛ) ? nothing : σₛ .* γ̃ₛ .- ϵ)
+						# (isnothing(g) ? nothing : σ .* γ .- ϵ)
+						# (isnothing(gₛ) ? nothing : σₛ .* γ̃ₛ .- ϵ)
+						isnothing(g) ? nothing : g .* γ .- ϵ
+						isnothing(gₛ) ? nothing : gₛ .* γ̃ₛ .- ϵ
 						F
 					],
 				),
 			)
-			return (; F = F̃, π = vcat(∇L, π))
+			s̃lacked_ineq = Vector{symbolic_type}(
+				filter!(
+					!isnothing,
+					[
+						isnothing(g) ? nothing : g .- σ
+						isnothing(gₛ) ? nothing : gₛ .- σₛ
+						slacked_ineq
+					],
+				),
+			)
+			return (; F = F̃, slacked_ineq = s̃lacked_ineq, π = vcat(∇L, π))
 		end
 	end
 
@@ -395,10 +418,10 @@ function generate_slacked_reduced_kkt_system(
 	flattened_F = begin
 		if length(goop.primal_dims) > 1
 			mapreduce(vcat, F_π_pair) do pair
-				pair.F
+				vcat(pair.F, pair.slacked_ineq)
 			end
 		else
-			F_π_pair.F
+			vcat(F_π_pair.F, F_π_pair.slacked_ineq)
 		end
 	end
 
@@ -414,7 +437,6 @@ function generate_slacked_reduced_kkt_system(
 		),
 	)
 
-	# 
 
 	# Pack all variables together.
 	z = Vector{symbolic_type}(
@@ -643,13 +665,24 @@ function generate_slacked_complete_kkt_system(
 					filter!(
 						!isnothing,
 						[
-							∇L #.+ η * x[Block(player)]
+							∇L .+ η * x[Block(player)]
 							f
 							fₛ
+							# isnothing(g) ? nothing : g .- σ
+							# isnothing(g) ? nothing : σ .* γ .- ϵ
+							# isnothing(gₛ) ? nothing : gₛ .- σₛ
+							# isnothing(gₛ) ? nothing : σₛ .* γₛ .- ϵ
+							isnothing(g) ? nothing : g .* γ .- ϵ
+							isnothing(gₛ) ? nothing : gₛ .* γₛ .- ϵ
+						],
+					),
+				)
+				slacked_ineq = Vector{symbolic_type}(
+					filter!(
+						!isnothing,
+						[
 							isnothing(g) ? nothing : g .- σ
-							isnothing(g) ? nothing : σ .* γ .- ϵ
 							isnothing(gₛ) ? nothing : gₛ .- σₛ
-							isnothing(gₛ) ? nothing : σₛ .* γₛ .- ϵ
 						],
 					),
 				)
@@ -673,12 +706,14 @@ function generate_slacked_complete_kkt_system(
 						(isnothing(gₛ) ? [] : γₛ),
 					),
 				)
-				return (; F, G, z)
+				return (; F, slacked_ineq, G, z)
+				# return (; F, G, z)
 			end
 		end
 
 		# Handle higher levels via tail recursion.
-		(; F, G, z) = construct_player_kkt_conditions(
+		(; F, slacked_ineq, G, z) = construct_player_kkt_conditions(
+		# (; F, G, z) = construct_player_kkt_conditions(
 			preferences[2:end],
 			is_prioritized_constraint[2:end];
 			player,
@@ -784,9 +819,19 @@ function generate_slacked_complete_kkt_system(
 					!isnothing,
 					[
 						∇L .+ η * z
-						isnothing(g) ? nothing : G .- σ
-						isnothing(g) ? nothing : σ .* γ .- ϵ
+						# isnothing(g) ? nothing : G .- σ
+						# isnothing(g) ? nothing : σ .* γ .- ϵ
+						isnothing(g) ? nothing : G .* γ .- ϵ # must have feasible G at the initial start
 						F
+					],
+				),
+			)
+			s̃lacked_ineq = Vector{symbolic_type}(
+				filter!(
+					!isnothing,
+					[
+						isnothing(g) ? nothing : G .- σ
+						slacked_ineq
 					],
 				),
 			)
@@ -799,7 +844,9 @@ function generate_slacked_complete_kkt_system(
 					],
 				),
 			)
-			return (; F = F̃, G = G̃, z = [z; λ; γ])
+			return (; F = F̃, slacked_ineq = s̃lacked_ineq, G = G̃, z = [z; λ; γ])
+			# return (; F = F̃, G = G̃, z = [z; λ; γ])
+
 		end
 	end
 
@@ -812,14 +859,17 @@ function generate_slacked_complete_kkt_system(
 		)
 	end
 
-	# Flatten the F vectors for all players.
+	# Flatten the F vectors (stationarity, equality, slacked_ineq) for all players.
 	flattened_F = begin
 		if length(goop.primal_dims) > 1
 			mapreduce(vcat, F_G_pair) do pair
-				pair.F
+				vcat(pair.F, pair.slacked_ineq)
+				# pair.F
+
 			end
 		else
-			F_G_pair.F
+			vcat(F_G_pair.F, F_G_pair.slacked_ineq)
+			# F_G_pair.F
 		end
 	end
 
@@ -831,8 +881,6 @@ function generate_slacked_complete_kkt_system(
 			),
 		),
 	)
-
-	# 
 
 	# Pack all variables together.
 	z = Vector{symbolic_type}(
