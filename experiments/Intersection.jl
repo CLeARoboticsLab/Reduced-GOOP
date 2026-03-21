@@ -11,7 +11,7 @@ using JLD2, ProgressMeter, Dates, Distributions
 using Random
 using QuasiGOOP
 
-include(joinpath(@__DIR__, "IntersectionPlotting.jl"))
+include(joinpath(@__DIR__, "Plotting.jl"))
 
 function get_setup(
 	num_players;
@@ -130,93 +130,93 @@ function get_setup(
 
 	prioritized_preferences = [
 		[
-			# # Drive under speed limit 
-			# function (z, θ)
-			# 	(; xs, us) = unflatten_trajectory(
-			# 		z[Block(1)],
-			# 		state_dimension,
-			# 		control_dimension,
-			# 	)
-			# 	mapreduce(vcat, 1:length(xs)) do k
-			# 		px, py, vx, vy = xs[k]
-			# 		vcat(vx + 1.5, -vx + 1.5, vy + 1.5, -vy + 1.5)
-			# 	end
-			# end,
+		# Drive under speed limit 
+		function (z, θ)
+			(; xs, us) = unflatten_trajectory(
+				z[Block(1)],
+				state_dimension,
+				control_dimension,
+			)
+			mapreduce(vcat, 1:length(xs)) do k
+				px, py, vx, vy = xs[k]
+				vcat(vx + 1.5, -vx + 1.5, vy + 1.5, -vy + 1.5)
+			end
+		end,
 
-			# # Keep center (yellow) line
-			# function (z, θ)
-			# 	(; xs, us) = unflatten_trajectory(
-			# 		z[Block(1)],
-			# 		state_dimension,
-			# 		control_dimension,
-			# 	)
-			# 	mapreduce(vcat, 1:length(xs)) do k
-			# 		px, py, vx, vy = xs[k]
-			# 		-py # py ≤ 0.0
-			# 	end
-			# end,
+		# Keep center (yellow) line
+		function (z, θ)
+			(; xs, us) = unflatten_trajectory(
+				z[Block(1)],
+				state_dimension,
+				control_dimension,
+			)
+			mapreduce(vcat, 1:length(xs)) do k
+				px, py, vx, vy = xs[k]
+				-py # py ≤ 0.0
+			end
+		end,
 
-			# # reach the goal. (highest priority)
-			# function (z, θ)
-			# 	(; xs, us) = unflatten_trajectory(
-			# 		z[Block(1)],
-			# 		state_dimension,
-			# 		control_dimension,
-			# 	)
-			# 	(; goal_position) = unflatten_parameters(θ[Block(1)]) # Player 1 θ[Block(i)] Ambuluance
-			# 	goal_deviation = xs[end][1:2] .- goal_position
-			# 	[
-			# 		goal_deviation .+ 0.01
-			# 		-goal_deviation .+ 0.01
-			# 	]
-			# end,
+		# reach the goal. (highest priority)
+		function (z, θ)
+			(; xs, us) = unflatten_trajectory(
+				z[Block(1)],
+				state_dimension,
+				control_dimension,
+			)
+			(; goal_position) = unflatten_parameters(θ[Block(1)]) # Player 1 θ[Block(i)] Ambuluance
+			goal_deviation = xs[end][1:2] .- goal_position
+			[
+				goal_deviation .+ 0.01
+				-goal_deviation .+ 0.01
+			]
+		end,
 		],
 		[
-			# # reach the goal.
-			# function (z, θ)
-			# 	(; xs, us) = unflatten_trajectory(
-			# 		z[Block(2)],
-			# 		state_dimension,
-			# 		control_dimension,
-			# 	)
-			# 	(; goal_position) = unflatten_parameters(θ[Block(2)]) # Player 2
-			# 	goal_deviation = xs[end][1:2] .- goal_position
-			# 	[
-			# 		goal_deviation .+ 0.01
-			# 		-goal_deviation .+ 0.01
-			# 	]
-			# end,
+		# reach the goal.
+		function (z, θ)
+			(; xs, us) = unflatten_trajectory(
+				z[Block(2)],
+				state_dimension,
+				control_dimension,
+			)
+			(; goal_position) = unflatten_parameters(θ[Block(2)]) # Player 2
+			goal_deviation = xs[end][1:2] .- goal_position
+			[
+				goal_deviation .+ 0.01
+				-goal_deviation .+ 0.01
+			]
+		end,
 
-			# # Drive under speed limit 
-			# function (z, θ)
-			# 	(; xs, us) = unflatten_trajectory(
-			# 		z[Block(2)],
-			# 		state_dimension,
-			# 		control_dimension,
-			# 	)
-			# 	mapreduce(vcat, 1:length(xs)) do k
-			# 		px, py, vx, vy = xs[k]
-			# 		vcat(vx + 1.5, -vx + 1.5, vy + 1.5, -vy + 1.5)
-			# 	end
-			# end,
+		# Drive under speed limit 
+		function (z, θ)
+			(; xs, us) = unflatten_trajectory(
+				z[Block(2)],
+				state_dimension,
+				control_dimension,
+			)
+			mapreduce(vcat, 1:length(xs)) do k
+				px, py, vx, vy = xs[k]
+				vcat(vx + 1.5, -vx + 1.5, vy + 1.5, -vy + 1.5)
+			end
+		end,
 
-			# # Keep center (yellow) line (highest priority)
-			# function (z, θ)
-			# 	(; xs, us) = unflatten_trajectory(
-			# 		z[Block(2)],
-			# 		state_dimension,
-			# 		control_dimension,
-			# 	)
-			# 	mapreduce(vcat, 1:length(xs)) do k
-			# 		px, py, vx, vy = xs[k]
-			# 		px + 0.0 # px ≥ 0.0
-			# 	end
-			# end,
+		# Keep center (yellow) line (highest priority)
+		function (z, θ)
+			(; xs, us) = unflatten_trajectory(
+				z[Block(2)],
+				state_dimension,
+				control_dimension,
+			)
+			mapreduce(vcat, 1:length(xs)) do k
+				px, py, vx, vy = xs[k]
+				px + 0.0 # px ≥ 0.0
+			end
+		end,
 		],
 	]
 
 	# Specify prioritized constraint [lowest priority, ..., highest priority]
-	is_prioritized_constraint = [[false], [false]]
+	is_prioritized_constraint = [[false, true, true, true], [false, true, true, true]]
 	preferences = [vcat(objectives[player], prioritized_preferences[player]) for player in 1:num_players]
 
 	# Shared constraints
@@ -255,18 +255,22 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 	num_players = 2
 	control_bounds = (; lb = [-2.0, -2.0], ub = [2.0, 2.0])
 	dynamics = planar_double_integrator(; dt = 0.5, control_bounds) # x := (px, py, vx, vy) and u := (ax, ay).
-	planning_horizon = 6
-	collision_avoidance = 1.5
-	num_instances = 10
-	epsilon_schedule = [1.0]
-	max_inner_iters_schedule = [50]
-	perturbation_scale = 0.2
-	linesearch = :backtracking # :backtracking, :fraction_to_boundary
+	planning_horizon = 7
+	collision_avoidance = 1.3
+	num_instances = 1
+	epsilon_schedule = [5.0, 0.5, 0.05, 0.005, 0.0005]
+	max_inner_iters_schedule = [100, 100, 100, 100, 100]
+	perturbation_scale = 0.000001
+	linesearch = :fraction_to_boundary # :backtracking, :fraction_to_boundary
 	goop_version = :reduced # :complete, :reduced 
 	receding_horizon_steps = 0 # 0 for single-step only
 
-	run_id = "run_4_$(goop_version)_system"
+	run_id = "run_$(goop_version)_system"
 
+	dynamics_dimension = state_dim(dynamics) + control_dim(dynamics)
+	primal_dimension = dynamics_dimension * planning_horizon
+
+	# Initialize problem
 	(; problem, flatten_parameters) = get_setup(
 		num_players;
 		dynamics,
@@ -276,36 +280,34 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 		lane_width,
 	)
 
-	dynamics_dimension = state_dim(dynamics) + control_dim(dynamics)
-	primal_dimension = dynamics_dimension * planning_horizon
+	# Make GOOP KKT system
+	if goop_version === :complete
+		GOOP_kkt_system = QuasiGOOP.generate_slacked_complete_kkt_system(problem)
+	else
+		GOOP_kkt_system = QuasiGOOP.generate_slacked_reduced_kkt_system(problem)
+	end
+
 
 	# Run-time record
 	runtime = Float64[]
 
 	function get_receding_horizon_solution(θ; z₀, ϵ₀, max_inner_iters)
-
-		if goop_version === :complete
-			GOOP_kkt_system = QuasiGOOP.generate_slacked_complete_kkt_system(problem)
-		else
-			GOOP_kkt_system = QuasiGOOP.generate_slacked_reduced_kkt_system(problem)
-		end
 		println("MCP Dimension: ", GOOP_kkt_system.kkt_dimension)
 		println("variable Dimension: ", GOOP_kkt_system.variable_dimension)
-		Main.@infiltrate
 		convergence_log = Dict{String, Any}()
 		elapsed_time = @elapsed begin
 			(; status, z, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters) = QuasiGOOP.solve(
 				QuasiGOOP.InteriorPoint(),
 				GOOP_kkt_system,
 				θ;
-				tol = 5e-3, # 5e-3
+				tol = 1e-10, # 5e-3
 				η₀ = 0.0, # 0.5
 				ϵ₀, # 5.0
 				max_inner_iters, # 20
 				max_outer_iters = 2, # 50
 				tightening_rate = 0.001, # 0.1
 				loosening_rate = 0.05, # 0.5
-				min_stepsize = 1e-5,
+				min_stepsize = 1e-4,
 				z₀,
 				verbose = true,
 				convergence_log = convergence_log,
@@ -353,7 +355,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 	base_initial_state1 = [-6.0, -1.0, 1.5, 0.0]
 	base_initial_state2 = [1.0, -5.0, 0.0, 1.0]
 	goal_position1 = [6.0, -1.0]
-	goal_position2 = [1.0, 6.5]
+	goal_position2 = [1.0, 6.0]
 
 	run_dir = joinpath("data", "Intersection_open_loop", "runs", run_id)
 	data_dir = joinpath(run_dir, "data")
@@ -379,9 +381,15 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 	total_attempts = 0
 
 	while solved_attempts < num_instances
-		total_attempts += 1
-		initial_state1 = base_initial_state1 .+ rand(Uniform(-perturbation_scale, perturbation_scale), state_dim(dynamics))
-		initial_state2 = base_initial_state2 .+ rand(Uniform(-perturbation_scale, perturbation_scale), state_dim(dynamics))
+		total_attempts += 1 
+		initial_state1 = base_initial_state1 .+ (base_initial_state1 .!= 0.0) .* rand(
+			Uniform(-perturbation_scale, perturbation_scale),
+			state_dim(dynamics),
+		)
+		initial_state2 = base_initial_state2 .+ (base_initial_state2 .!= 0.0) .* rand(
+			Uniform(-perturbation_scale, perturbation_scale),
+			state_dim(dynamics),
+		)
 		println(
 			"solved $(solved_attempts)/$(num_instances), attempt $(total_attempts), goop version $(goop_version): ",
 		)
@@ -403,7 +411,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 		θ = [θ1..., θ2...]
 
 		warmstart_x = [[initial_state1], [initial_state2]]
-		warmstart_u = [[[1.5, 0.0]], [[0.0, 3.0]]] # some constant control
+		warmstart_u = [[[1.0, 0.0]], [[0.0, 2.0]]]
 		warmstart_solution = build_warmstart_solution(
 			num_players,
 			planning_horizon,

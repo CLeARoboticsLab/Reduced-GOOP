@@ -127,7 +127,7 @@ function solve(
 
 		verbose && @info "Outer iteration $(outer_iters): ϵ = $ϵ, kkt_error = $kkt_error"
 
-		while inner_iters < max_inner_iters && (!is_fraction_to_boundary_linesearch || kkt_error > tol)
+		while inner_iters < max_inner_iters && (kkt_error > tol) # (!is_fraction_to_boundary_linesearch || kkt_error > tol)
 			total_iters += 1
 			# Compute the Newton step.
 			# TODO: Can add some adaptive regularization.

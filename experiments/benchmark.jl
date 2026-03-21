@@ -57,7 +57,7 @@ function get_setup(
 			if problem_type == :QP
 				return base
 			end
-			return base + 0.1 * (k == num_preferences ? (sum(z))^4 : 0.0) # nonquadratic objective
+			return base + 0.25 * (k == num_preferences ? sum(z.^4) : 0.0) # nonquadratic objective, exp(sum(z)^2), sum(z.^4), (z'*z)^2, etc
 		end
 	end
 	# Q11 = [   0.940464  -1.18139    1.30957   -0.177896
@@ -192,14 +192,13 @@ function demo(;
 	mₑ = 5 # equality constraint dimension
 	mᵢ = 5 # inequality constraint dimension
 	num_instances = 10
-	# r = max(1, (n * num_players) ÷ 2) # rank of Q matrices
 	r = 1
 	linesearch = :backtracking # :backtracking, :fraction_to_boundary
 	verbose = false
-	tol = 1e-10 # 2e-2, 2e-1, 2.0
-	ϵ₀ = 0.0001 #ρ 1e-2, 1e-1, 1.0
+	tol = 1e-10 
+	ϵ₀ = 0.001 #ρ 
 	η₀ = 0.0
-	max_inner_iters = 10
+	max_inner_iters = 15 # 10 for :QP, 15 for :NQP
 	max_outer_iters = 2
 	min_stepsize = 1e-20
 	run_id = "run_$(problem_type_tag)_$(num_players)players_$(num_preferences)prefs_$(ϵ₀)ρ_$(n)pdim_$(mₑ)mₑ_$(mᵢ)mᵢ_r$(r)_$(param_distribution)_seed$(rng_seed)"
