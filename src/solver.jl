@@ -67,9 +67,9 @@ function solve(
 	# 	z
 	# end)
 	z = zeros(mcp.variable_dimension)
-	z[mcp.preference_slack_dims] .= 0.1 #1.0
-	z[mcp.interior_point_slack_dims] .= 0.1 #1.0
-	z[mcp.inequality_constraint_dual_dims] .= 0.1 #1.0
+	z[mcp.preference_slack_dims] .= 1.0
+	z[mcp.interior_point_slack_dims] .= 1.0
+	z[mcp.inequality_constraint_dual_dims] .= 1.0
 
 	if !isnothing(z₀)
 		z[mcp.primal_dims] .= z₀
@@ -127,7 +127,7 @@ function solve(
 
 		verbose && @info "Outer iteration $(outer_iters): ϵ = $ϵ, kkt_error = $kkt_error"
 
-		while inner_iters < max_inner_iters && (!is_fraction_to_boundary_linesearch || kkt_error > tol)
+		while inner_iters < max_inner_iters &&(kkt_error > tol) # (!is_fraction_to_boundary_linesearch || kkt_error > tol)
 			total_iters += 1
 			# Compute the Newton step.
 			# TODO: Can add some adaptive regularization.
@@ -137,7 +137,7 @@ function solve(
 			# @assert all(.!isnan.(F)) "Found NaN in F - aborting!"
 			# @assert all(.!isnan.(∇F)) "Found NaN in ∇F - aborting!"
 			# verbose && println("inner iter $inner_iters, condition number of ∇F = $(cond(collect(∇F),2))")
-			verbose && println("inner iter $inner_iters, minimum singular value of ∇F: ", minimum(svdvals(Matrix(∇F))))
+			verbose && println("inner iter $inner_iters")
 			# Check the primals
 			# verbose && println("current primal x: ", round.(z[mcp.primal_dims]; digits = 4))
 
@@ -155,7 +155,7 @@ function solve(
 			# δz .= solution.u
 
 			# Solve δz via direct pseudoinverse
-			δz .= pinv(Matrix(∇F)) * (-F)
+			δz .= ∇F \ (-F)
 
 			# verbose && println("current δx: ", round.(δz[mcp.primal_dims]; digits = 4))
 
@@ -192,7 +192,7 @@ function solve(
 						break
 					end
 
-					α *= 0.7 # decay
+					α *= 0.5 # decay
 					@. z_trial = z + α * δz
 					mcp.F!(F, z_trial; θ, ϵ, η)
 					F_z_next = norm(F, 2)
@@ -248,7 +248,6 @@ function solve(
 
 	if outer_iters == max_outer_iters
 		status = (kkt_error <= tol) ? :solved : :failed
-		status = :solved
 	end
 	if has_convergence_log
 		convergence_log["kkt_error_history"] = kkt_error_history

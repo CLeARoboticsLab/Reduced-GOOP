@@ -181,12 +181,12 @@ function generate_slacked_reduced_kkt_system(
 				)
 				push!(Σ, σₚ...)
 
-				σₚₛ = SymbolicTracingUtils.make_variables(
-					backend,
-					Symbol("σₚₛ_$(player)_$(level)"),
-					length(h),
-				)
-				push!(Σ, σₚₛ...)
+				# σₚₛ = SymbolicTracingUtils.make_variables(
+				# 	backend,
+				# 	Symbol("σₚₛ_$(player)_$(level)"),
+				# 	length(h),
+				# )
+				# push!(Σ, σₚₛ...)
 
 				γₚ = SymbolicTracingUtils.make_variables(
 					backend,
@@ -195,15 +195,20 @@ function generate_slacked_reduced_kkt_system(
 				)
 				push!(Γ, γₚ...)
 
-				μₛ = SymbolicTracingUtils.make_variables(
-					backend,
-					Symbol("μₛ_$(player)_$(level)"),
-					length(h),
-				)
-				push!(Γ, μₛ...)
+				# μₛ = SymbolicTracingUtils.make_variables(
+				# 	backend,
+				# 	Symbol("μₛ_$(player)_$(level)"),
+				# 	length(h),
+				# )
+				# push!(Γ, μₛ...)
+
+				# L =
+				# 	sum(preference_slack) - γₚ' * (h .+ preference_slack) - μₛ' * preference_slack -
+				# 	(isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
+				# 	(isnothing(fₛ) ? 0 : λₛ' * fₛ) - (isnothing(gₛ) ? 0 : γₛ' * gₛ)
 
 				L =
-					sum(preference_slack) - γₚ' * (h .+ preference_slack) - μₛ' * preference_slack -
+					sum(preference_slack .^ 2) - γₚ' * (h .+ preference_slack) -
 					(isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
 					(isnothing(fₛ) ? 0 : λₛ' * fₛ) - (isnothing(gₛ) ? 0 : γₛ' * gₛ)
 
@@ -217,8 +222,8 @@ function generate_slacked_reduced_kkt_system(
 							f
 							h .+ preference_slack .- σₚ
 							σₚ .* γₚ .- ϵ
-							preference_slack .- σₚₛ
-							σₚₛ .* μₛ .- ϵ
+							# preference_slack .- σₚₛ
+							# σₚₛ .* μₛ .- ϵ
 							(isnothing(g) ? nothing : g .- σ)
 							(isnothing(g) ? nothing : σ .* γ .- ϵ)
 						],
@@ -229,7 +234,7 @@ function generate_slacked_reduced_kkt_system(
 			else
 				@assert length(h) == 1 "Expected a single preference function at the base level, but got $(length(h))"
 				# Highest priority is a cost. 
-				
+
 				L = h - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
 					(isnothing(fₛ) ? 0 : λₛ' * fₛ) - (isnothing(gₛ) ? 0 : γₛ' * gₛ)
 				∇L = Symbolics.gradient(L, x[Block(player)])
@@ -309,12 +314,12 @@ function generate_slacked_reduced_kkt_system(
 			)
 			push!(Σ, σₚ...)
 
-			σₚₛ = SymbolicTracingUtils.make_variables(
-				backend,
-				Symbol("σₚₛ_$(player)_$(level)"),
-				length(h),
-			)
-			push!(Σ, σₚₛ...)
+			# σₚₛ = SymbolicTracingUtils.make_variables(
+			# 	backend,
+			# 	Symbol("σₚₛ_$(player)_$(level)"),
+			# 	length(h),
+			# )
+			# push!(Σ, σₚₛ...)
 
 			γₚ = SymbolicTracingUtils.make_variables(
 				backend,
@@ -323,18 +328,25 @@ function generate_slacked_reduced_kkt_system(
 			)
 			push!(Γ, γₚ...)
 
-			μₛ = SymbolicTracingUtils.make_variables(
-				backend,
-				Symbol("μₛ_$(player)_$(level)"),
-				length(h),
-			)
-			push!(Γ, μₛ...)
-
+			# μₛ = SymbolicTracingUtils.make_variables(
+			# 	backend,
+			# 	Symbol("μₛ_$(player)_$(level)"),
+			# 	length(h),
+			# )
+			# push!(Γ, μₛ...)
+			
 			# Form partial Lagrangian at this stage.
 			blocked_Γ_cs = g === nothing ? nothing : make_blocks(Γ_cs, goop.inequality_dims[player])
 			blocked_Γ_cs_shared = gₛ === nothing ? nothing : make_blocks(Γ_cs_shared, goop.shared_inequality_dims)
+			# L =
+			# 	sum(preference_slack) - γₚ' * (h .+ preference_slack) - μₛ' * preference_slack -
+			# 	ψ' * π - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
+			# 	(isnothing(fₛ) ? 0 : λ̃ₛ' * fₛ) - (isnothing(gₛ) ? 0 : γ̃ₛ' * gₛ) -
+			# 	(isnothing(g) ? 0 : ϕ' * (repeat(g, num_levels - level) .* blocked_Γ_cs[Block(level+1):Block(num_levels)])) -
+			# 	(isnothing(gₛ) ? 0 : ϕₛ' * (repeat(gₛ, num_levels - level) .* blocked_Γ_cs_shared[Block(level+1):Block(num_levels)]))
+
 			L =
-				sum(preference_slack) - γₚ' * (h .+ preference_slack) - μₛ' * preference_slack -
+				sum(preference_slack.^2) - γₚ' * (h .+ preference_slack) -
 				ψ' * π - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
 				(isnothing(fₛ) ? 0 : λ̃ₛ' * fₛ) - (isnothing(gₛ) ? 0 : γ̃ₛ' * gₛ) -
 				(isnothing(g) ? 0 : ϕ' * (repeat(g, num_levels - level) .* blocked_Γ_cs[Block(level+1):Block(num_levels)])) -
@@ -346,8 +358,8 @@ function generate_slacked_reduced_kkt_system(
 				∇L .+ η * vcat(x[Block(player)], preference_slack)
 				h .+ preference_slack .- σₚ
 				σₚ .* γₚ .- ϵ
-				preference_slack .- σₚₛ
-				σₚₛ .* μₛ .- ϵ
+				# preference_slack .- σₚₛ
+				# σₚₛ .* μₛ .- ϵ
 				(isnothing(g) ? nothing : σ .* γ .- ϵ)
 				(isnothing(gₛ) ? nothing : σₛ .* γ̃ₛ .- ϵ) # Note: same slacks (not duals) for all levels
 				F
@@ -365,7 +377,7 @@ function generate_slacked_reduced_kkt_system(
 				(isnothing(fₛ) ? 0 : λ̃ₛ' * fₛ) - (isnothing(gₛ) ? 0 : γ̃ₛ' * gₛ) -
 				(isnothing(g) ? 0 : ϕ' * (repeat(g, num_levels - level) .* blocked_Γ_cs[Block(level+1):Block(num_levels)])) -
 				(isnothing(gₛ) ? 0 : ϕₛ' * (repeat(gₛ, num_levels - level) .* blocked_Γ_cs_shared[Block(level+1):Block(num_levels)]))
-			
+
 			∇L = Symbolics.gradient(L, x[Block(player)])
 			F̃ = Vector{symbolic_type}(
 				filter!(
