@@ -139,7 +139,7 @@ function get_setup(
 				)
 				mapreduce(vcat, 1:length(xs)) do k
 					px, py, vx, vy = xs[k]
-					vcat(vx + 1.5, -vx + 1.5, vy + 1.5, -vy + 1.5)
+					vcat(vx + 2.0, -vx + 2.0, vy + 2.0, -vy + 2.0)
 				end
 			end,
 
@@ -196,7 +196,7 @@ function get_setup(
 				)
 				mapreduce(vcat, 1:length(xs)) do k
 					px, py, vx, vy = xs[k]
-					vcat(vx + 1.5, -vx + 1.5, vy + 1.5, -vy + 1.5)
+					vcat(vx + 2.0, -vx + 2.0, vy + 2.0, -vy + 2.0)
 				end
 			end,
 
@@ -257,15 +257,15 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 	dynamics = planar_double_integrator(; dt = 0.3, control_bounds) # x := (px, py, vx, vy) and u := (ax, ay).
 	planning_horizon = 15
 	collision_avoidance = 1.5
-	num_instances = 2
-	epsilon_schedule = [1.0*0.5^(j-1) for j in 1:10]
-	max_inner_iters_schedule = [100, 100, 100, 100, 100, 100, 100, 100, 100, 100]
+	num_instances = 1
+	epsilon_schedule = [1.0*0.5^(j-1) for j in 1:15]
+	max_inner_iters_schedule = fill(200, length(epsilon_schedule))
 	perturbation_scale = 0.2
 	linesearch = :backtracking # :backtracking, :fraction_to_boundary
 	goop_version = :reduced # :complete, :reduced 
 	receding_horizon_steps = 0 # 0 for single-step only
 
-	run_id = "run_5_$(goop_version)_system_4_pref_$(num_instances)_instances"
+	run_id = "run_6_$(goop_version)_system_3_pref_$(num_instances)_instances"
 
 	(; problem, flatten_parameters) = get_setup(
 		num_players;
@@ -304,7 +304,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 				max_outer_iters = 2, # 50
 				tightening_rate = 0.001, # 0.1
 				loosening_rate = 0.05, # 0.5
-				min_stepsize = 1e-5,
+				min_stepsize = 1e-20,
 				z₀,
 				verbose = true,
 				convergence_log = convergence_log,
@@ -349,10 +349,10 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 	end
 
 	obstacle_position = [0.25, 0.15] # placeholder
-	base_initial_state1 = [-6.0, -1.0, 1.0, 0.0]
+	base_initial_state1 = [-6.0, -1.0, 1.5, 0.0]
 	base_initial_state2 = [1.0, -5.0, 0.0, 1.0]
 	goal_position1 = [6.0, -1.0]
-	goal_position2 = [1.0, 6.5]
+	goal_position2 = [1.0, 6.0]
 
 	run_dir = joinpath("data", "Intersection_open_loop", "runs", run_id)
 	data_dir = joinpath(run_dir, "data")
@@ -477,7 +477,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 			push!(kkt_error_histories_per_eps[ϵ₀], log10.(result.solution_dict["kkt_error_history"]))
 			convergence_fig, _ = plot_convergence_plot(
 				;
-				kkt_error_history = result.solution_dict["kkt_error_history"],
+				kkt_error_history = log10.(result.solution_dict["kkt_error_history"]),
 				total_iteration_history = result.solution_dict["total_iteration_history"],
 				outer_end_total_iterations = result.solution_dict["outer_end_total_iterations"],
 				outer_end_trace_indices = result.solution_dict["outer_end_trace_indices"],

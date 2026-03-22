@@ -197,12 +197,10 @@ function plot_convergence_plot(;
 		ylabelsize = axis_label_fontsize,
 		xticklabelsize = tick_label_fontsize,
 		yticklabelsize = tick_label_fontsize,
-		yscale = log10,
 	)
 
-	safe_kkt_error = max.(kkt_error_history, eps(Float64))
-	CairoMakie.lines!(ax, total_iteration_history, safe_kkt_error, color = :dodgerblue, linewidth = 2)
-	CairoMakie.scatter!(ax, total_iteration_history, safe_kkt_error, color = :dodgerblue, markersize = 6)
+	CairoMakie.lines!(ax, total_iteration_history, kkt_error_history, color = :dodgerblue, linewidth = 2)
+	CairoMakie.scatter!(ax, total_iteration_history, kkt_error_history, color = :dodgerblue, markersize = 6)
 
 	if !isempty(outer_end_total_iterations)
 		CairoMakie.vlines!(
@@ -216,7 +214,7 @@ function plot_convergence_plot(;
 
 	if !isempty(outer_end_trace_indices)
 		end_x = total_iteration_history[outer_end_trace_indices]
-		end_y = safe_kkt_error[outer_end_trace_indices]
+		end_y = kkt_error_history[outer_end_trace_indices]
 		CairoMakie.scatter!(
 			ax,
 			end_x,
