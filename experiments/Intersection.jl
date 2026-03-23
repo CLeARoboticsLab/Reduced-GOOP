@@ -139,22 +139,22 @@ function get_setup(
 				)
 				mapreduce(vcat, 1:length(xs)) do k
 					px, py, vx, vy = xs[k]
-					vcat(vx + 2.0, -vx + 2.0, vy + 2.0, -vy + 2.0)
+					vcat(vx + 1.5, -vx + 1.5, vy + 1.5, -vy + 1.5)
 				end
 			end,
 
-			# # Keep center (yellow) line
-			# function (z, θ)
-			# 	(; xs, us) = unflatten_trajectory(
-			# 		z[Block(1)],
-			# 		state_dimension,
-			# 		control_dimension,
-			# 	)
-			# 	mapreduce(vcat, 1:length(xs)) do k
-			# 		px, py, vx, vy = xs[k]
-			# 		-py # py ≤ 0.0
-			# 	end
-			# end,
+			# Keep center (yellow) line
+			function (z, θ)
+				(; xs, us) = unflatten_trajectory(
+					z[Block(1)],
+					state_dimension,
+					control_dimension,
+				)
+				mapreduce(vcat, 1:length(xs)) do k
+					px, py, vx, vy = xs[k]
+					-py # py ≤ 0.0
+				end
+			end,
 
 			# reach the goal. (highest priority)
 			function (z, θ)
@@ -165,10 +165,11 @@ function get_setup(
 				)
 				(; goal_position) = unflatten_parameters(θ[Block(1)]) # Player 1 θ[Block(i)] Ambuluance
 				goal_deviation = xs[end][1:2] .- goal_position
-				[
-					goal_deviation .+ 0.01
-					-goal_deviation .+ 0.01
-				]
+				# [
+				# 	goal_deviation .+ 0.01
+				# 	-goal_deviation .+ 0.01
+				# ]
+				sum(goal_deviation .^ 2)
 			end,
 		],
 		[
@@ -181,10 +182,11 @@ function get_setup(
 				)
 				(; goal_position) = unflatten_parameters(θ[Block(2)]) # Player 2
 				goal_deviation = xs[end][1:2] .- goal_position
-				[
-					goal_deviation .+ 0.01
-					-goal_deviation .+ 0.01
-				]
+				# [
+				# 	goal_deviation .+ 0.01
+				# 	-goal_deviation .+ 0.01
+				# ]
+				sum(goal_deviation .^ 2)
 			end,
 
 			# Drive under speed limit 
@@ -196,27 +198,27 @@ function get_setup(
 				)
 				mapreduce(vcat, 1:length(xs)) do k
 					px, py, vx, vy = xs[k]
-					vcat(vx + 2.0, -vx + 2.0, vy + 2.0, -vy + 2.0)
+					vcat(vx + 1.5, -vx + 1.5, vy + 1.5, -vy + 1.5)
 				end
 			end,
 
-			# # Keep center (yellow) line (highest priority)
-			# function (z, θ)
-			# 	(; xs, us) = unflatten_trajectory(
-			# 		z[Block(2)],
-			# 		state_dimension,
-			# 		control_dimension,
-			# 	)
-			# 	mapreduce(vcat, 1:length(xs)) do k
-			# 		px, py, vx, vy = xs[k]
-			# 		px + 0.0 # px ≥ 0.0
-			# 	end
-			# end,
+			# Keep center (yellow) line (highest priority)
+			function (z, θ)
+				(; xs, us) = unflatten_trajectory(
+					z[Block(2)],
+					state_dimension,
+					control_dimension,
+				)
+				mapreduce(vcat, 1:length(xs)) do k
+					px, py, vx, vy = xs[k]
+					px + 0.0 # px ≥ 0.0
+				end
+			end,
 		],
 	]
 
 	# Specify prioritized constraint [lowest priority, ..., highest priority]
-	is_prioritized_constraint = [[false, true, true], [false, true, true]]
+	is_prioritized_constraint = [[false, true, true, false], [false, false, true, true]]
 	preferences = [vcat(objectives[player], prioritized_preferences[player]) for player in 1:num_players]
 
 	# Shared constraints
@@ -256,16 +258,16 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 	control_bounds = (; lb = [-2.0, -2.0], ub = [2.0, 2.0])
 	dynamics = planar_double_integrator(; dt = 0.3, control_bounds) # x := (px, py, vx, vy) and u := (ax, ay).
 	planning_horizon = 15
-	collision_avoidance = 1.5
+	collision_avoidance = 1.3
 	num_instances = 1
-	epsilon_schedule = [1.0*0.5^(j-1) for j in 1:15]
-	max_inner_iters_schedule = fill(200, length(epsilon_schedule))
+	epsilon_schedule = [1.0*0.5^(j-1) for j in 1:5]
+	max_inner_iters_schedule = fill(1000, length(epsilon_schedule))
 	perturbation_scale = 0.2
 	linesearch = :backtracking # :backtracking, :fraction_to_boundary
 	goop_version = :reduced # :complete, :reduced 
 	receding_horizon_steps = 0 # 0 for single-step only
 
-	run_id = "run_6_$(goop_version)_system_3_pref_$(num_instances)_instances"
+	run_id = "run_7_$(goop_version)_system_4_pref_$(num_instances)_instances"
 
 	(; problem, flatten_parameters) = get_setup(
 		num_players;
@@ -349,8 +351,8 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 	end
 
 	obstacle_position = [0.25, 0.15] # placeholder
-	base_initial_state1 = [-6.0, -1.0, 1.5, 0.0]
-	base_initial_state2 = [1.0, -5.0, 0.0, 1.0]
+	base_initial_state1 = [-6.0, -1.0, 3.0, 0.0]
+	base_initial_state2 = [1.0, -5.0, 0.0, 1.5]
 	goal_position1 = [6.0, -1.0]
 	goal_position2 = [1.0, 6.0]
 
@@ -379,8 +381,14 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 
 	while solved_attempts < num_instances
 		total_attempts += 1
-		initial_state1 = base_initial_state1 .+ rand(Uniform(-perturbation_scale, perturbation_scale), state_dim(dynamics))
-		initial_state2 = base_initial_state2 .+ rand(Uniform(-perturbation_scale, perturbation_scale), state_dim(dynamics))
+		initial_state1 = base_initial_state1 .+ (base_initial_state1 .!= 0.0) .* rand(
+			Uniform(-perturbation_scale, perturbation_scale),
+			state_dim(dynamics),
+		)
+		initial_state2 = base_initial_state2 .+ (base_initial_state2 .!= 0.0) .* rand(
+			Uniform(-perturbation_scale, perturbation_scale),
+			state_dim(dynamics),
+		)
 		println(
 			"solved $(solved_attempts)/$(num_instances), attempt $(total_attempts), goop version $(goop_version): ",
 		)
@@ -402,7 +410,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 		θ = [θ1..., θ2...]
 
 		warmstart_x = [[initial_state1], [initial_state2]]
-		warmstart_u = [[[2.0, 0.0]], [[0.0, 2.0]]] # some constant control
+		warmstart_u = [[[0.0, 0.0]], [[0.0, 0.0]]] # some constant control
 		warmstart_solution = build_warmstart_solution(
 			num_players,
 			planning_horizon,
@@ -412,7 +420,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 		)
 
 		epsilon_results = Pair{Float64, Any}[]
-		stage_warmstart = warmstart_solution
+		stage_warmstart = warmstart_solution #warmstart_solution #load_object("stage_warmstart.jld2") #warmstart_solution
 		solve_sequence_succeeded = true
 		for (ϵ₀, max_inner_iters) in zip(epsilon_schedule, max_inner_iters_schedule)
 			result = try
@@ -433,7 +441,6 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 			stage_warmstart = result.solution_dict["z"][1:(num_players*primal_dimension)]
 		end
 		if !solve_sequence_succeeded
-			# TODO: Speed this up using GLMakie observable, toggling only initial state
 			continue
 		end
 
