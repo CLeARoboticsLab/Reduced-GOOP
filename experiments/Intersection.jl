@@ -2,8 +2,7 @@ module Intersection
 
 using TrajectoryGamesExamples: UnicycleDynamics, planar_double_integrator
 using TrajectoryGamesBase:
-	OpenLoopStrategy, unflatten_trajectory, state_dim, control_dim, control_bounds
-using GLMakie: GLMakie, Observable
+	unflatten_trajectory, state_dim, control_dim, control_bounds
 using CairoMakie: CairoMakie
 using LaTeXStrings: @L_str
 using BlockArrays
@@ -130,18 +129,6 @@ function get_setup(
 
 	prioritized_preferences = [
 		[
-			# Drive under speed limit 
-			function (z, θ)
-				(; xs, us) = unflatten_trajectory(
-					z[Block(1)],
-					state_dimension,
-					control_dimension,
-				)
-				mapreduce(vcat, 1:length(xs)) do k
-					px, py, vx, vy = xs[k]
-					vcat(vx + 1.5, -vx + 1.5, vy + 1.5, -vy + 1.5)
-				end
-			end,
 
 			# Keep center (yellow) line
 			function (z, θ)
@@ -153,6 +140,19 @@ function get_setup(
 				mapreduce(vcat, 1:length(xs)) do k
 					px, py, vx, vy = xs[k]
 					-py # py ≤ 0.0
+				end
+			end,
+
+			# Drive under speed limit 
+			function (z, θ)
+				(; xs, us) = unflatten_trajectory(
+					z[Block(1)],
+					state_dimension,
+					control_dimension,
+				)
+				mapreduce(vcat, 1:length(xs)) do k
+					px, py, vx, vy = xs[k]
+					vcat(vx + 1.5, -vx + 1.5, vy + 1.5, -vy + 1.5)
 				end
 			end,
 
@@ -169,7 +169,7 @@ function get_setup(
 				# 	goal_deviation .+ 0.01
 				# 	-goal_deviation .+ 0.01
 				# ]
-				sum(goal_deviation .^ 2)
+				2sum(goal_deviation .^ 2)
 			end,
 		],
 		[
@@ -189,20 +189,7 @@ function get_setup(
 				sum(goal_deviation .^ 2)
 			end,
 
-			# Drive under speed limit 
-			function (z, θ)
-				(; xs, us) = unflatten_trajectory(
-					z[Block(2)],
-					state_dimension,
-					control_dimension,
-				)
-				mapreduce(vcat, 1:length(xs)) do k
-					px, py, vx, vy = xs[k]
-					vcat(vx + 1.5, -vx + 1.5, vy + 1.5, -vy + 1.5)
-				end
-			end,
-
-			# Keep center (yellow) line (highest priority)
+			# Keep center (yellow) line 
 			function (z, θ)
 				(; xs, us) = unflatten_trajectory(
 					z[Block(2)],
@@ -212,6 +199,19 @@ function get_setup(
 				mapreduce(vcat, 1:length(xs)) do k
 					px, py, vx, vy = xs[k]
 					px + 0.0 # px ≥ 0.0
+				end
+			end,
+
+			# Drive under speed limit (highest priority)
+			function (z, θ)
+				(; xs, us) = unflatten_trajectory(
+					z[Block(2)],
+					state_dimension,
+					control_dimension,
+				)
+				mapreduce(vcat, 1:length(xs)) do k
+					px, py, vx, vy = xs[k]
+					vcat(vx + 1.5, -vx + 1.5, vy + 1.5, -vy + 1.5)
 				end
 			end,
 		],
@@ -260,9 +260,9 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 	planning_horizon = 15
 	collision_avoidance = 1.3
 	num_instances = 1
-	epsilon_schedule = [1.0*0.5^(j-1) for j in 1:5]
+	epsilon_schedule = [1.0*0.5^(j-1) for j in 1:11]
 	max_inner_iters_schedule = fill(1000, length(epsilon_schedule))
-	perturbation_scale = 0.2
+	perturbation_scale = 0.3
 	linesearch = :backtracking # :backtracking, :fraction_to_boundary
 	goop_version = :reduced # :complete, :reduced 
 	receding_horizon_steps = 0 # 0 for single-step only
@@ -351,7 +351,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 	end
 
 	obstacle_position = [0.25, 0.15] # placeholder
-	base_initial_state1 = [-6.0, -1.0, 3.0, 0.0]
+	base_initial_state1 = [-6.0, -1.0, 2.0, 0.0]
 	base_initial_state2 = [1.0, -5.0, 0.0, 1.5]
 	goal_position1 = [6.0, -1.0]
 	goal_position2 = [1.0, 6.0]
@@ -364,12 +364,14 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 	plots_dir = joinpath(run_dir, "plots")
 	trajectory_plots_dir = joinpath(plots_dir, "trajectories")
 	convergence_plots_dir = joinpath(plots_dir, "convergence")
+	velocity_plots_dir = joinpath(plots_dir, "velocities")
 	for dir in (
 		problem_data_dir,
 		solution_data_dir,
 		histories_data_dir,
 		trajectory_plots_dir,
 		convergence_plots_dir,
+		velocity_plots_dir,
 	)
 		mkpath(dir)
 	end
@@ -466,21 +468,6 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 				result.solution_dict,
 			)
 
-			# Compute and save distance between trajectories for the two players
-			xs1 = result.solution_dict["strategies"][1].xs
-			xs2 = result.solution_dict["strategies"][2].xs
-			trajectory_len = min(length(xs1), length(xs2))
-			trajectory_distance = [
-				sqrt(sum((xs1[k][1:2] - xs2[k][1:2]) .^ 2)) for k in 1:trajectory_len
-			]
-			JLD2.save_object(
-				joinpath(
-					histories_data_dir,
-					"trajectory_distance_instance_$(solved_attempts)_eps$(ϵ₀).jld2",
-				),
-				trajectory_distance,
-			)
-
 			push!(kkt_error_histories_per_eps[ϵ₀], log10.(result.solution_dict["kkt_error_history"]))
 			convergence_fig, _ = plot_convergence_plot(
 				;
@@ -493,11 +480,15 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 				;
 				map_end,
 				lane_width,
-				strategy = Observable(result.strategies),
-				θ1 = Observable(θ1),
-				θ2 = Observable(θ2),
-				goal_position1 = Observable(goal_position1),
-				goal_position2 = Observable(goal_position2),
+				strategy = result.strategies,
+				θ1,
+				θ2,
+				goal_position1,
+				goal_position2,
+			)
+			velocity_fig, _ = velocity_plot(;
+				strategy = result.strategies,
+				velocity_limit = 1.5,
 			)
 			CairoMakie.save(
 				joinpath(
@@ -513,8 +504,15 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 				),
 				trajectory_fig,
 			)
+			CairoMakie.save(
+				joinpath(
+					velocity_plots_dir,
+					"velocity_instance_$(solved_attempts)_eps$(ϵ₀).pdf",
+				),
+				velocity_fig,
+			)
 		end
-	end
+		end
 
 	for ϵ₀ in epsilon_schedule
 		aggregate_convergence_fig, _ = plot_convergence_plot_aggregate(
