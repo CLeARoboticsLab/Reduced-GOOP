@@ -71,6 +71,20 @@ function get_setup(
 		end for i in 1:num_players
 	]
 
+	function shared_inequality_constraint(z, θ)
+		trajectories = map(
+			i ->
+				unflatten_trajectory(z[Block(i)], state_dimension, control_dimension),
+			1:num_players,
+		)
+		xs = map(trajectory -> trajectory.xs, trajectories)
+		@assert length(xs) == num_players
+		# Avoid collision between 2 players.
+		mapreduce(vcat, 2:length(xs[1])) do k
+			[sum((xs[1][k][1:2] - xs[2][k][1:2]) .^ 2) - collision_avoidance^2]
+		end
+	end
+
 	inequality_constraints = [
 		function (z, θ)
 			(; lb, ub) = control_bounds(dynamics)
@@ -95,6 +109,9 @@ function get_setup(
 					) # -7 ≤ pₓ ≤ 7, -2 ≤ py ≤ 2
 					vcat(position_constraints)
 				end,
+
+				# add shared collision-avoidance constraints
+				shared_inequality_constraint(z, θ),
 			)
 		end,
 		function (z, θ)
@@ -122,6 +139,9 @@ function get_setup(
 					# vcat(velocity_constraints,position_constraints)
 					vcat(position_constraints)
 				end,
+
+				# add shared collision-avoidance constraints
+				shared_inequality_constraint(z, θ),
 			)
 		end,
 		# for now, two robots
@@ -221,21 +241,6 @@ function get_setup(
 	is_prioritized_constraint = [[false, true, true, false], [false, false, true, true]]
 	preferences = [vcat(objectives[player], prioritized_preferences[player]) for player in 1:num_players]
 
-	# Shared constraints
-	function shared_inequality_constraint(z, θ)
-		trajectories = map(
-			i ->
-				unflatten_trajectory(z[Block(i)], state_dimension, control_dimension),
-			1:num_players,
-		)
-		xs = map(trajectory -> trajectory.xs, trajectories)
-		@assert length(xs) == num_players
-		# Avoid collision between 2 players
-		mapreduce(vcat, 2:length(xs[1])) do k
-			[sum((xs[1][k][1:2] - xs[2][k][1:2]) .^ 2) - collision_avoidance^2]
-		end
-	end
-
 	problem = QuasiGOOP.ParametricGOOP(
 		dummy_primals, # x
 		dummy_parameters; # θ
@@ -243,8 +248,8 @@ function get_setup(
 		is_prioritized_constraint,
 		equality_constraints,
 		inequality_constraints,
-		shared_equality_constraint = nothing,
-		shared_inequality_constraint,
+		shared_equality_constraint = nothing, # keep these under individual constraints
+		shared_inequality_constraint = nothing,
 	)
 
 	(; problem, flatten_parameters)
@@ -259,7 +264,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 	dynamics = planar_double_integrator(; dt = 0.3, control_bounds) # x := (px, py, vx, vy) and u := (ax, ay).
 	planning_horizon = 15
 	collision_avoidance = 1.3
-	num_instances = 1
+	num_instances = 3
 	epsilon_schedule = [1.0*0.5^(j-1) for j in 1:11]
 	max_inner_iters_schedule = fill(1000, length(epsilon_schedule))
 	perturbation_scale = 0.3
@@ -289,9 +294,6 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 	dynamics_dimension = state_dim(dynamics) + control_dim(dynamics)
 	primal_dimension = dynamics_dimension * planning_horizon
 
-	# Run-time record
-	runtime = Float64[]
-
 	function get_receding_horizon_solution(θ; z₀, ϵ₀, max_inner_iters)
 		convergence_log = Dict{String, Any}()
 		elapsed_time = @elapsed begin
@@ -313,7 +315,6 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 				linesearch, # :backtracking, :fraction_to_boundary
 			)
 		end
-		push!(runtime, elapsed_time)
 		if status == :failed
 			return nothing
 		end
@@ -335,6 +336,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 			"z" => z,
 			"x" => x,
 			"s" => s,
+			"solve_time_sec" => elapsed_time,
 			"kkt_error" => kkt_error,
 			"ϵ" => ϵ,
 			"outer_iters" => outer_iters,
@@ -345,14 +347,13 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 			"inner_iteration_history" => get(convergence_log, "inner_iteration_history", Int[]),
 			"outer_end_total_iterations" => get(convergence_log, "outer_end_total_iterations", Int[]),
 			"outer_end_trace_indices" => get(convergence_log, "outer_end_trace_indices", Int[]),
-			"per iteration runtime" => mean(runtime),
 		)
 		(; strategies, solution_dict)
 	end
 
 	obstacle_position = [0.25, 0.15] # placeholder
 	base_initial_state1 = [-6.0, -1.0, 2.0, 0.0]
-	base_initial_state2 = [1.0, -5.0, 0.0, 1.5]
+	base_initial_state2 = [1.0, -5.0, 0.0, 2.0]
 	goal_position1 = [6.0, -1.0]
 	goal_position2 = [1.0, 6.0]
 
@@ -424,6 +425,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 		epsilon_results = Pair{Float64, Any}[]
 		stage_warmstart = warmstart_solution #warmstart_solution #load_object("stage_warmstart.jld2") #warmstart_solution
 		solve_sequence_succeeded = true
+		instance_total_solve_time_sec = 0.0
 		for (ϵ₀, max_inner_iters) in zip(epsilon_schedule, max_inner_iters_schedule)
 			result = try
 				get_receding_horizon_solution(θ; z₀ = stage_warmstart, ϵ₀, max_inner_iters)
@@ -438,6 +440,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 				break
 			end
 			push!(epsilon_results, ϵ₀ => result)
+			instance_total_solve_time_sec += result.solution_dict["solve_time_sec"]
 
 			# warmstart next solve with the previous solution's primal variables
 			stage_warmstart = result.solution_dict["z"][1:(num_players*primal_dimension)]
@@ -452,9 +455,13 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 			"goal_position1" => goal_position1,
 			"initial_state2" => initial_state2,
 			"goal_position2" => goal_position2,
+			"total_solve_time_sec" => instance_total_solve_time_sec,
 		))
 
 		solved_attempts += 1
+		println(
+			"instance $(solved_attempts) total solve time: $(round(instance_total_solve_time_sec; digits = 4)) sec",
+		)
 		JLD2.save_object(
 			joinpath(problem_data_dir, "problem_data_instance_$(solved_attempts).jld2"),
 			instance_problem_data,
@@ -512,7 +519,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 				velocity_fig,
 			)
 		end
-		end
+	end
 
 	for ϵ₀ in epsilon_schedule
 		aggregate_convergence_fig, _ = plot_convergence_plot_aggregate(

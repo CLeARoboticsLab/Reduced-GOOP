@@ -351,31 +351,7 @@ function plot_convergence_plot(;
 	)
 
 	CairoMakie.lines!(ax, total_iteration_history, kkt_error_history, color = :dodgerblue, linewidth = 4)
-	# CairoMakie.scatter!(ax, total_iteration_history, kkt_error_history, color = :dodgerblue, markersize = 6)
-
-	if !isempty(outer_end_total_iterations)
-		CairoMakie.vlines!(
-			ax,
-			outer_end_total_iterations;
-			color = (:gray, 0.4),
-			linestyle = :dash,
-			linewidth = 2,
-		)
-	end
-
-	if !isempty(outer_end_trace_indices)
-		end_x = total_iteration_history[outer_end_trace_indices]
-		end_y = kkt_error_history[outer_end_trace_indices]
-		CairoMakie.scatter!(
-			ax,
-			end_x,
-			end_y;
-			color = :crimson,
-			markersize = 20,
-			marker = :utriangle,
-		)
-	end
-
+	
 	return figure, ax
 end
 
