@@ -66,10 +66,76 @@ function ParametricGOOP(
 	)
 end
 
+mutable struct QuasiLagrangianTerm{T <: Symbolics.Num}
+	expr::Union{AbstractVector{T}, T}
+	duals::Union{AbstractVector{T}, Nothing}
+	deriv_order::Int
+end
+
+function Symbolics.gradient(f::QuasiLagrangianTerm, x::AbstractVector{<:Symbolics.Num})
+	next_order = f.deriv_order + 1
+	if f.deriv_order > 2
+		return QuasiLagrangianTerm(zero.(x), f.duals, next_order)
+	end
+
+	expr = isnothing(f.duals) ? f.expr : -f.expr' * f.duals
+	QuasiLagrangianTerm(Symbolics.gradient(expr, x), f.duals, next_order)
+end
+
+function _push_quasi_lagrangian_term!(
+	terms::Vector{QuasiLagrangianTerm},
+	expr,
+	duals = nothing;
+	deriv_order = 0,
+)
+	isnothing(expr) && return nothing
+	push!(terms, QuasiLagrangianTerm(expr, duals, deriv_order))
+	return nothing
+end
+
+function _append_quasi_policy_terms!(
+	terms::Vector{QuasiLagrangianTerm},
+	π_term_groups::Vector{Vector{QuasiLagrangianTerm}},
+	ψ::AbstractVector{<:Symbolics.Num},
+)
+	offset = 0
+	for group in π_term_groups
+		isempty(group) && continue
+		group_length = length(group[1].expr)
+		ψ_block = ψ[(offset+1):(offset+group_length)]
+		for term in group
+			push!(
+				terms,
+				QuasiLagrangianTerm(term.expr, ψ_block, term.deriv_order),
+			)
+		end
+		offset += group_length
+	end
+
+	@assert offset == length(ψ)
+	return nothing
+end
+
+function _quasi_gradient_from_terms(
+	terms::Vector{QuasiLagrangianTerm},
+	x::AbstractVector{<:Symbolics.Num},
+)
+	∇L = zero.(x)
+	new_terms = QuasiLagrangianTerm[]
+	for term in terms
+		new_term = Symbolics.gradient(term, x)
+		∇L .+= new_term.expr
+		push!(new_terms, new_term)
+	end
+
+	return ∇L, new_terms
+end
+
 "Construct the Reduced KKT system corresponding to a ParametricGOOP."
 function generate_slacked_reduced_kkt_system(
 	goop::ParametricGOOP;
 	backend = SymbolicTracingUtils.SymbolicsBackend(),
+	drop_higher_order_terms = false,
 )
 	# Symbolic variables for all primals, parameters, and duals for shared constraints.
 	x =
@@ -212,13 +278,25 @@ function generate_slacked_reduced_kkt_system(
 					(isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
 					(isnothing(fₛ) ? 0 : λₛ' * fₛ) - (isnothing(gₛ) ? 0 : γₛ' * gₛ)
 
-				∇L = Symbolics.gradient(L, vcat(x[Block(player)], preference_slack))
+				vars = vcat(x[Block(player)], preference_slack)
+				∇L, π_terms = if drop_higher_order_terms
+					lagrangian_terms = QuasiLagrangianTerm[]
+					_push_quasi_lagrangian_term!(lagrangian_terms, sum(preference_slack .^ 2))
+					_push_quasi_lagrangian_term!(lagrangian_terms, h .+ preference_slack, γₚ)
+					_push_quasi_lagrangian_term!(lagrangian_terms, f, λ)
+					_push_quasi_lagrangian_term!(lagrangian_terms, g, γ)
+					_push_quasi_lagrangian_term!(lagrangian_terms, fₛ, λₛ)
+					_push_quasi_lagrangian_term!(lagrangian_terms, gₛ, γₛ)
+					_quasi_gradient_from_terms(lagrangian_terms, vars)
+				else
+					Symbolics.gradient(L, vars), QuasiLagrangianTerm[]
+				end
 
 				F = Vector{symbolic_type}(
 					filter!(
 						!isnothing,
 						[
-							∇L .+ η * vcat(x[Block(player)], preference_slack)
+							∇L .+ η * vars
 							f
 							h .+ preference_slack .- σₚ
 							σₚ .* γₚ .- ϵ
@@ -230,14 +308,24 @@ function generate_slacked_reduced_kkt_system(
 					),
 				)
 
-				return (; F, π = ∇L)
+				return (; F, π = ∇L, π_term_groups = [π_terms])
 			else
 				@assert length(h) == 1 "Expected a single preference function at the base level, but got $(length(h))"
 				# Highest priority is a cost. 
 
 				L = h - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
 					(isnothing(fₛ) ? 0 : λₛ' * fₛ) - (isnothing(gₛ) ? 0 : γₛ' * gₛ)
-				∇L = Symbolics.gradient(L, x[Block(player)])
+				∇L, π_terms = if drop_higher_order_terms
+					lagrangian_terms = QuasiLagrangianTerm[]
+					_push_quasi_lagrangian_term!(lagrangian_terms, h)
+					_push_quasi_lagrangian_term!(lagrangian_terms, f, λ)
+					_push_quasi_lagrangian_term!(lagrangian_terms, g, γ)
+					_push_quasi_lagrangian_term!(lagrangian_terms, fₛ, λₛ)
+					_push_quasi_lagrangian_term!(lagrangian_terms, gₛ, γₛ)
+					_quasi_gradient_from_terms(lagrangian_terms, x[Block(player)])
+				else
+					Symbolics.gradient(L, x[Block(player)]), QuasiLagrangianTerm[]
+				end
 				F = Vector{symbolic_type}(
 					filter!(
 						!isnothing,
@@ -249,12 +337,12 @@ function generate_slacked_reduced_kkt_system(
 						],
 					),
 				)
-				return (; F, π = ∇L)
+				return (; F, π = ∇L, π_term_groups = [π_terms])
 			end
 		end
 
 		# Handle higher levels via tail recursion.
-		(; F, π) = construct_player_kkt_conditions(
+		(; F, π, π_term_groups) = construct_player_kkt_conditions(
 			preferences[2:end],
 			is_prioritized_constraint[2:end];
 			player,
@@ -334,7 +422,7 @@ function generate_slacked_reduced_kkt_system(
 			# 	length(h),
 			# )
 			# push!(Γ, μₛ...)
-			
+
 			# Form partial Lagrangian at this stage.
 			blocked_Γ_cs = g === nothing ? nothing : make_blocks(Γ_cs, goop.inequality_dims[player])
 			blocked_Γ_cs_shared = gₛ === nothing ? nothing : make_blocks(Γ_cs_shared, goop.shared_inequality_dims)
@@ -346,16 +434,41 @@ function generate_slacked_reduced_kkt_system(
 			# 	(isnothing(gₛ) ? 0 : ϕₛ' * (repeat(gₛ, num_levels - level) .* blocked_Γ_cs_shared[Block(level+1):Block(num_levels)]))
 
 			L =
-				sum(preference_slack.^2) - γₚ' * (h .+ preference_slack) -
+				sum(preference_slack .^ 2) - γₚ' * (h .+ preference_slack) -
 				ψ' * π - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
 				(isnothing(fₛ) ? 0 : λ̃ₛ' * fₛ) - (isnothing(gₛ) ? 0 : γ̃ₛ' * gₛ) -
 				(isnothing(g) ? 0 : ϕ' * (repeat(g, num_levels - level) .* blocked_Γ_cs[Block(level+1):Block(num_levels)])) -
 				(isnothing(gₛ) ? 0 : ϕₛ' * (repeat(gₛ, num_levels - level) .* blocked_Γ_cs_shared[Block(level+1):Block(num_levels)]))
 
-			∇L = Symbolics.gradient(L, vcat(x[Block(player)], preference_slack))
+			vars = vcat(x[Block(player)], preference_slack)
+			∇L, π_terms = if drop_higher_order_terms
+				lagrangian_terms = QuasiLagrangianTerm[]
+				_push_quasi_lagrangian_term!(lagrangian_terms, sum(preference_slack .^ 2))
+				_push_quasi_lagrangian_term!(lagrangian_terms, h .+ preference_slack, γₚ)
+				_append_quasi_policy_terms!(lagrangian_terms, π_term_groups, ψ)
+				_push_quasi_lagrangian_term!(lagrangian_terms, f, λ)
+				_push_quasi_lagrangian_term!(lagrangian_terms, g, γ)
+				_push_quasi_lagrangian_term!(lagrangian_terms, fₛ, λ̃ₛ)
+				_push_quasi_lagrangian_term!(lagrangian_terms, gₛ, γ̃ₛ)
+				_push_quasi_lagrangian_term!(
+					lagrangian_terms,
+					isnothing(g) ? nothing :
+					repeat(g, num_levels - level) .* blocked_Γ_cs[Block(level+1):Block(num_levels)],
+					ϕ,
+				)
+				_push_quasi_lagrangian_term!(
+					lagrangian_terms,
+					isnothing(gₛ) ? nothing :
+					repeat(gₛ, num_levels - level) .* blocked_Γ_cs_shared[Block(level+1):Block(num_levels)],
+					ϕₛ,
+				)
+				_quasi_gradient_from_terms(lagrangian_terms, vars)
+			else
+				Symbolics.gradient(L, vars), QuasiLagrangianTerm[]
+			end
 
 			F̃ = [
-				∇L .+ η * vcat(x[Block(player)], preference_slack)
+				∇L .+ η * vars
 				h .+ preference_slack .- σₚ
 				σₚ .* γₚ .- ϵ
 				# preference_slack .- σₚₛ
@@ -365,7 +478,7 @@ function generate_slacked_reduced_kkt_system(
 				F
 			]
 
-			return (; F = F̃, π = ∇L)
+			return (; F = F̃, π = ∇L, π_term_groups = [π_terms])
 		else
 			@assert length(h) == 1 "Expected a single preference function at the level $(level), but got $(length(h))"
 			# Current priority is a cost.
@@ -378,7 +491,30 @@ function generate_slacked_reduced_kkt_system(
 				(isnothing(g) ? 0 : ϕ' * (repeat(g, num_levels - level) .* blocked_Γ_cs[Block(level+1):Block(num_levels)])) -
 				(isnothing(gₛ) ? 0 : ϕₛ' * (repeat(gₛ, num_levels - level) .* blocked_Γ_cs_shared[Block(level+1):Block(num_levels)]))
 
-			∇L = Symbolics.gradient(L, x[Block(player)])
+			∇L, π_terms = if drop_higher_order_terms
+				lagrangian_terms = QuasiLagrangianTerm[]
+				_push_quasi_lagrangian_term!(lagrangian_terms, h)
+				_append_quasi_policy_terms!(lagrangian_terms, π_term_groups, ψ)
+				_push_quasi_lagrangian_term!(lagrangian_terms, f, λ)
+				_push_quasi_lagrangian_term!(lagrangian_terms, g, γ)
+				_push_quasi_lagrangian_term!(lagrangian_terms, fₛ, λ̃ₛ)
+				_push_quasi_lagrangian_term!(lagrangian_terms, gₛ, γ̃ₛ)
+				_push_quasi_lagrangian_term!(
+					lagrangian_terms,
+					isnothing(g) ? nothing :
+					repeat(g, num_levels - level) .* blocked_Γ_cs[Block(level+1):Block(num_levels)],
+					ϕ,
+				)
+				_push_quasi_lagrangian_term!(
+					lagrangian_terms,
+					isnothing(gₛ) ? nothing :
+					repeat(gₛ, num_levels - level) .* blocked_Γ_cs_shared[Block(level+1):Block(num_levels)],
+					ϕₛ,
+				)
+				_quasi_gradient_from_terms(lagrangian_terms, x[Block(player)])
+			else
+				Symbolics.gradient(L, x[Block(player)]), QuasiLagrangianTerm[]
+			end
 			F̃ = Vector{symbolic_type}(
 				filter!(
 					!isnothing,
@@ -389,8 +525,8 @@ function generate_slacked_reduced_kkt_system(
 						F
 					],
 				),
-			)
-			return (; F = F̃, π = vcat(∇L, π))
+			)			
+			return (; F = F̃, π = vcat(∇L, π), π_term_groups = vcat([π_terms], π_term_groups))
 		end
 	end
 
@@ -454,6 +590,18 @@ function generate_slacked_reduced_kkt_system(
 		inequality_constraint_dual_dims,
 	)
 
+end
+
+"Construct the Reduced Quasi-KKT system corresponding to a ParametricGOOP."
+function generate_slacked_quasi_kkt_system(
+	goop::ParametricGOOP;
+	backend = SymbolicTracingUtils.SymbolicsBackend(),
+)
+	generate_slacked_reduced_kkt_system(
+		goop;
+		backend,
+		drop_higher_order_terms = true,
+	)
 end
 
 "Construct the Complete KKT system corresponding to a ParametricGOOP."
