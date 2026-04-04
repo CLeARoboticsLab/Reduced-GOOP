@@ -232,7 +232,11 @@ function plot_intersection_trajectories(;
 	return figure, ax
 end
 
-function velocity_plot(; strategy, velocity_limit = 1.5)
+function velocity_plot(;
+	strategy,
+	velocity_limit = 1.5,
+	dynamics_model = :planar_double_integrator,
+)
 	if length(strategy) < 2
 		error("velocity_plot expects strategies for at least two players.")
 	end
@@ -249,13 +253,66 @@ function velocity_plot(; strategy, velocity_limit = 1.5)
 	end
 
 	horizon_steps = 0:(trajectory_len-1)
+	velocity_limit_profile = fill(velocity_limit, trajectory_len)
+
+	figure = serif_figure()
+	if dynamics_model === :unicycle
+		speed1 = [xs1[k][3] for k in 1:trajectory_len]
+		speed2 = [xs2[k][3] for k in 1:trajectory_len]
+		ax = CairoMakie.Axis(
+			figure[1, 1];
+			xlabel = "time step [s]",
+			ylabel = "speed [m/s]",
+			xlabelsize = axis_label_fontsize,
+			ylabelsize = axis_label_fontsize,
+			xticklabelsize = tick_label_fontsize,
+			yticklabelsize = tick_label_fontsize,
+		)
+		player1_speed = CairoMakie.scatterlines!(
+			ax,
+			horizon_steps,
+			speed1;
+			color = :blue,
+			label = "Player 1",
+			linewidth = 3,
+		)
+		player2_speed = CairoMakie.scatterlines!(
+			ax,
+			horizon_steps,
+			speed2;
+			color = :red,
+			label = "Player 2",
+			linewidth = 3,
+		)
+		speed_limit_line = CairoMakie.lines!(
+			ax,
+			horizon_steps,
+			velocity_limit_profile;
+			color = :black,
+			linestyle = :dash,
+			label = "Speed Limit [$(velocity_limit) m/s]",
+			linewidth = 2,
+		)
+		CairoMakie.Legend(
+			figure[1, 1],
+			[player1_speed, player2_speed, speed_limit_line],
+			["Player 1", "Player 2", "Speed Limit [$(velocity_limit) m/s]"];
+			framevisible = false,
+			labelsize = legend_label_fontsize,
+			orientation = :vertical,
+			tellheight = false,
+			tellwidth = false,
+			halign = :right,
+			valign = :top,
+		)
+		return figure, (ax,)
+	end
+
 	vx1 = [xs1[k][3] for k in 1:trajectory_len]
 	vy1 = [xs1[k][4] for k in 1:trajectory_len]
 	vx2 = [xs2[k][3] for k in 1:trajectory_len]
 	vy2 = [xs2[k][4] for k in 1:trajectory_len]
-	velocity_limit_profile = fill(velocity_limit, trajectory_len)
 
-	figure = serif_figure()
 	ax_vx = CairoMakie.Axis(
 		figure[1, 1];
 		xlabel = "time step [s]",

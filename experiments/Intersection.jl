@@ -6,17 +6,70 @@ using TrajectoryGamesBase:
 using CairoMakie: CairoMakie
 using LaTeXStrings: @L_str
 using BlockArrays
-using JLD2, ProgressMeter, Dates, Distributions
+using JLD2, Distributions
 using Random
 using QuasiGOOP
 
 include(joinpath(@__DIR__, "Plotting.jl"))
 
+function build_intersection_dynamics(
+	dynamics_model::Symbol;
+	dt = 0.3,
+	control_bounds = (; lb = [-2.0, -2.0], ub = [2.0, 2.0]),
+)
+	if dynamics_model === :planar_double_integrator
+		return planar_double_integrator(; dt, control_bounds)
+	elseif dynamics_model === :unicycle
+		return UnicycleDynamics(; dt, control_bounds)
+	end
+	throw(ArgumentError("Unsupported dynamics_model $(dynamics_model)"))
+end
+
+function default_intersection_initial_states(dynamics_model::Symbol)
+	if dynamics_model === :planar_double_integrator
+		return [-6.0, -1.0, 2.0, 0.0], [1.0, -5.0, 0.0, 2.0]
+	elseif dynamics_model === :unicycle
+		# Unicycle state is (px, py, speed, heading), so pi/2 points upward.
+		return [-6.0, -1.0, 2.0, 0.0], [1.0, -5.0, 1.5, pi / 2]
+	end
+	throw(ArgumentError("Unsupported dynamics_model $(dynamics_model)"))
+end
+
+function velocity_limit_constraints(x, dynamics_model::Symbol; velocity_limit = 1.5)
+	if dynamics_model === :planar_double_integrator
+		vx, vy = x[3], x[4]
+		return vcat(vx + velocity_limit, -vx + velocity_limit, vy + velocity_limit, -vy + velocity_limit)
+	elseif dynamics_model === :unicycle
+		speed = x[3]
+		return -speed + velocity_limit # speed ≤ velocity_limit
+	end
+	throw(ArgumentError("Unsupported dynamics_model $(dynamics_model)"))
+end
+
+function sample_initial_state(
+	base_initial_state,
+	dynamics,
+	dynamics_model::Symbol,
+	perturbation_scale,
+)
+	noise = rand(Uniform(-perturbation_scale, perturbation_scale), state_dim(dynamics))
+	if dynamics_model === :planar_double_integrator
+		return base_initial_state .+ (base_initial_state .!= 0.0) .* noise
+	elseif dynamics_model === :unicycle
+		initial_state = copy(base_initial_state)
+		initial_state[1:3] .+= noise[1:3] # perturb (px, py, speed) only
+		return initial_state
+	end
+	throw(ArgumentError("Unsupported dynamics_model $(dynamics_model)"))
+end
+
 function get_setup(
 	num_players;
 	dynamics = UnicycleDynamics,
+	dynamics_model = :unicycle,
 	planning_horizon = 5,
 	collision_avoidance = 1.0,
+	velocity_limit = 1.5,
 	map_end = 7,
 	lane_width = 2,
 )
@@ -92,23 +145,24 @@ function get_setup(
 			ub_mask = findall(!isinf, ub)
 			(; xs, us) =
 				unflatten_trajectory(z[Block(1)], state_dimension, control_dimension)
-			vcat(
-				# control bounds (box)
-				mapreduce(vcat, us) do u
-					vcat(u[lb_mask] - lb[lb_mask], ub[ub_mask] - u[ub_mask])
-				end,
+				vcat(
+					# control bounds (box)
+					mapreduce(vcat, us) do u
+						vcat(u[lb_mask] - lb[lb_mask], ub[ub_mask] - u[ub_mask])
+					end,
 
-				# stay within the intersection. R1 (ambulance)
-				mapreduce(vcat, 1:length(xs)) do k
-					px, py, vx, vy = xs[k]
-					position_constraints = vcat(
-						px + map_end,
-						-px + map_end,
-						py + lane_width,
-						-py + lane_width,
-					) # -7 ≤ pₓ ≤ 7, -2 ≤ py ≤ 2
-					vcat(position_constraints)
-				end,
+					# stay within the intersection. R1 (ambulance)
+					mapreduce(vcat, 1:length(xs)) do k
+						px = xs[k][1]
+						py = xs[k][2]
+						position_constraints = vcat(
+							px + map_end,
+							-px + map_end,
+							py + lane_width,
+							-py + lane_width,
+						) # -7 ≤ pₓ ≤ 7, -2 ≤ py ≤ 2
+						vcat(position_constraints)
+					end,
 
 				# add shared collision-avoidance constraints
 				shared_inequality_constraint(z, θ),
@@ -120,22 +174,23 @@ function get_setup(
 			ub_mask = findall(!isinf, ub)
 			(; xs, us) =
 				unflatten_trajectory(z[Block(2)], state_dimension, control_dimension)
-			vcat(
-				# control bounds (box)
-				mapreduce(vcat, us) do u
-					vcat(u[lb_mask] - lb[lb_mask], ub[ub_mask] - u[ub_mask])
-				end,
+				vcat(
+					# control bounds (box)
+					mapreduce(vcat, us) do u
+						vcat(u[lb_mask] - lb[lb_mask], ub[ub_mask] - u[ub_mask])
+					end,
 
-				# stay within the intersection. R2 (car)
-				mapreduce(vcat, 1:length(xs)) do k
-					px, py, vx, vy = xs[k]
-					position_constraints = vcat(
-						px + lane_width,
-						-px + lane_width,
-						py + map_end,
-						-py + map_end,
-					) # -2 ≤ pₓ ≤ 2, -7 ≤ py ≤ 7
-					# velocity_constraints = vcat(vx + 1.5, -vx + 1.5, vy + 1.5, -vy + 1.5)
+					# stay within the intersection. R2 (car)
+					mapreduce(vcat, 1:length(xs)) do k
+						px = xs[k][1]
+						py = xs[k][2]
+						position_constraints = vcat(
+							px + lane_width,
+							-px + lane_width,
+							py + map_end,
+							-py + map_end,
+						) # -2 ≤ pₓ ≤ 2, -7 ≤ py ≤ 7
+						# velocity_constraints = vcat(vx + 1.5, -vx + 1.5, vy + 1.5, -vy + 1.5)
 					# vcat(velocity_constraints,position_constraints)
 					vcat(position_constraints)
 				end,
@@ -151,17 +206,17 @@ function get_setup(
 		[
 
 			# Keep center (yellow) line
-			function (z, θ)
-				(; xs, us) = unflatten_trajectory(
-					z[Block(1)],
-					state_dimension,
-					control_dimension,
-				)
-				mapreduce(vcat, 1:length(xs)) do k
-					px, py, vx, vy = xs[k]
-					-py # py ≤ 0.0
-				end
-			end,
+				function (z, θ)
+					(; xs, us) = unflatten_trajectory(
+						z[Block(1)],
+						state_dimension,
+						control_dimension,
+					)
+					mapreduce(vcat, 1:length(xs)) do k
+						py = xs[k][2]
+						-py # py ≤ 0.0
+					end
+				end,
 
 			# Drive under speed limit 
 			function (z, θ)
@@ -171,8 +226,7 @@ function get_setup(
 					control_dimension,
 				)
 				mapreduce(vcat, 1:length(xs)) do k
-					px, py, vx, vy = xs[k]
-					vcat(vx + 1.5, -vx + 1.5, vy + 1.5, -vy + 1.5)
+					velocity_limit_constraints(xs[k], dynamics_model; velocity_limit)
 				end
 			end,
 
@@ -210,17 +264,17 @@ function get_setup(
 			end,
 
 			# Keep center (yellow) line 
-			function (z, θ)
-				(; xs, us) = unflatten_trajectory(
-					z[Block(2)],
-					state_dimension,
-					control_dimension,
-				)
-				mapreduce(vcat, 1:length(xs)) do k
-					px, py, vx, vy = xs[k]
-					px + 0.0 # px ≥ 0.0
-				end
-			end,
+				function (z, θ)
+					(; xs, us) = unflatten_trajectory(
+						z[Block(2)],
+						state_dimension,
+						control_dimension,
+					)
+					mapreduce(vcat, 1:length(xs)) do k
+						px = xs[k][1]
+						px + 0.0 # px ≥ 0.0
+					end
+				end,
 
 			# Drive under speed limit (highest priority)
 			function (z, θ)
@@ -230,8 +284,7 @@ function get_setup(
 					control_dimension,
 				)
 				mapreduce(vcat, 1:length(xs)) do k
-					px, py, vx, vy = xs[k]
-					vcat(vx + 1.5, -vx + 1.5, vy + 1.5, -vy + 1.5)
+					velocity_limit_constraints(xs[k], dynamics_model; velocity_limit)
 				end
 			end,
 		],
@@ -255,30 +308,39 @@ function get_setup(
 	(; problem, flatten_parameters)
 end
 
-function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
+function demo(;
+	map_end = 7,
+	lane_width = 2,
+	verbose = false,
+	rng_seed = 123,
+)
 	Random.seed!(rng_seed)
 
 	# Problem setup
 	num_players = 2
 	control_bounds = (; lb = [-2.0, -2.0], ub = [2.0, 2.0])
-	dynamics = planar_double_integrator(; dt = 0.3, control_bounds) # x := (px, py, vx, vy) and u := (ax, ay).
 	planning_horizon = 15
 	collision_avoidance = 1.3
+	speed_component_limit = 1.5
 	num_instances = 10
 	epsilon_schedule = [1.0*0.5^(j-1) for j in 1:11]
 	max_inner_iters_schedule = fill(1000, length(epsilon_schedule))
 	perturbation_scale = 0.3
+	dynamics_model = :unicycle # :unicycle, :planar_double_integrator
 	linesearch = :backtracking # :backtracking, :fraction_to_boundary
 	goop_version = :quasi # :complete, :reduced, :quasi 
-	receding_horizon_steps = 0 # 0 for single-step only
+	dynamics = build_intersection_dynamics(dynamics_model; dt = 0.3, control_bounds)
 
-	run_id = "run_7_$(goop_version)_system_4_pref_$(num_instances)_instances"
+	run_id =
+		"run_7_$(dynamics_model)_$(goop_version)_system_4_pref_$(num_instances)_instances"
 
 	(; problem, flatten_parameters) = get_setup(
 		num_players;
 		dynamics,
+		dynamics_model,
 		planning_horizon,
 		collision_avoidance,
+		velocity_limit = speed_component_limit,
 		map_end,
 		lane_width,
 	)
@@ -355,8 +417,8 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 	end
 
 	obstacle_position = [0.25, 0.15] # placeholder
-	base_initial_state1 = [-6.0, -1.0, 2.0, 0.0]
-	base_initial_state2 = [1.0, -5.0, 0.0, 2.0]
+	base_initial_state1, base_initial_state2 =
+		default_intersection_initial_states(dynamics_model)
 	goal_position1 = [6.0, -1.0]
 	goal_position2 = [1.0, 6.0]
 
@@ -387,13 +449,17 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 
 	while solved_attempts < num_instances
 		total_attempts += 1
-		initial_state1 = base_initial_state1 .+ (base_initial_state1 .!= 0.0) .* rand(
-			Uniform(-perturbation_scale, perturbation_scale),
-			state_dim(dynamics),
+		initial_state1 = sample_initial_state(
+			base_initial_state1,
+			dynamics,
+			dynamics_model,
+			perturbation_scale,
 		)
-		initial_state2 = base_initial_state2 .+ (base_initial_state2 .!= 0.0) .* rand(
-			Uniform(-perturbation_scale, perturbation_scale),
-			state_dim(dynamics),
+		initial_state2 = sample_initial_state(
+			base_initial_state2,
+			dynamics,
+			dynamics_model,
+			perturbation_scale,
 		)
 		println(
 			"solved $(solved_attempts)/$(num_instances), attempt $(total_attempts), goop version $(goop_version): ",
@@ -498,7 +564,8 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 			)
 			velocity_fig, _ = velocity_plot(;
 				strategy = result.strategies,
-				velocity_limit = 1.5,
+				velocity_limit = speed_component_limit,
+				dynamics_model,
 			)
 			CairoMakie.save(
 				joinpath(
@@ -544,9 +611,11 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 		Dict(
 			"run_id" => run_id,
 			"rng_seed" => rng_seed,
+			"dynamics_model" => dynamics_model,
 			"num_instances" => num_instances,
 			"epsilon_schedule" => epsilon_schedule,
 			"max_inner_iters_schedule" => max_inner_iters_schedule,
+			"velocity_limit" => speed_component_limit,
 			"perturbation_scale" => perturbation_scale,
 		),
 	)
@@ -557,7 +626,12 @@ function build_warmstart_solution(num_players, planning_horizon, dynamics, warms
 	warmstart_solution = []
 	for k in 1:num_players
 		for i in 1:(planning_horizon-1)
-			push!(warmstart_x[k], dynamics(warmstart_x[k][i], warmstart_u[k][1]))
+			next_state = if applicable(dynamics, warmstart_x[k][i], warmstart_u[k][1], i)
+				dynamics(warmstart_x[k][i], warmstart_u[k][1], i)
+			else
+				dynamics(warmstart_x[k][i], warmstart_u[k][1])
+			end
+			push!(warmstart_x[k], next_state)
 			push!(warmstart_u[k], warmstart_u[k][1])
 		end
 		pop!(warmstart_u[k])
