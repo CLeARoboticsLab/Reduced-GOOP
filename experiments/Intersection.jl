@@ -264,12 +264,12 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 	dynamics = planar_double_integrator(; dt = 0.3, control_bounds) # x := (px, py, vx, vy) and u := (ax, ay).
 	planning_horizon = 15
 	collision_avoidance = 1.3
-	num_instances = 3
+	num_instances = 10
 	epsilon_schedule = [1.0*0.5^(j-1) for j in 1:11]
 	max_inner_iters_schedule = fill(1000, length(epsilon_schedule))
 	perturbation_scale = 0.3
 	linesearch = :backtracking # :backtracking, :fraction_to_boundary
-	goop_version = :reduced # :complete, :reduced 
+	goop_version = :quasi # :complete, :reduced, :quasi 
 	receding_horizon_steps = 0 # 0 for single-step only
 
 	run_id = "run_7_$(goop_version)_system_4_pref_$(num_instances)_instances"
@@ -285,9 +285,12 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 
 	if goop_version === :complete
 		GOOP_kkt_system = QuasiGOOP.generate_slacked_complete_kkt_system(problem)
-	else
+	elseif goop_version === :reduced
 		GOOP_kkt_system = QuasiGOOP.generate_slacked_reduced_kkt_system(problem)
+	else
+		GOOP_kkt_system = QuasiGOOP.generate_slacked_quasi_kkt_system(problem)
 	end
+
 	println("MCP Dimension: ", GOOP_kkt_system.kkt_dimension)
 	println("variable Dimension: ", GOOP_kkt_system.variable_dimension)
 
@@ -310,7 +313,7 @@ function demo(; map_end = 7, lane_width = 2, verbose = false, rng_seed = 123)
 				loosening_rate = 0.05, # 0.5
 				min_stepsize = 1e-20,
 				z₀,
-				verbose = true,
+				verbose = verbose,
 				convergence_log = convergence_log,
 				linesearch, # :backtracking, :fraction_to_boundary
 			)
