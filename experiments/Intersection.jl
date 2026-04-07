@@ -319,20 +319,20 @@ function demo(;
 	# Problem setup
 	num_players = 2
 	control_bounds = (; lb = [-2.0, -2.0], ub = [2.0, 2.0])
-	planning_horizon = 15
+	planning_horizon = 20
 	collision_avoidance = 1.3
 	speed_component_limit = 1.5
-	num_instances = 10
+	num_instances = 2
 	epsilon_schedule = [1.0*0.5^(j-1) for j in 1:11]
-	max_inner_iters_schedule = fill(1000, length(epsilon_schedule))
+	max_inner_iters_schedule = fill(5000, length(epsilon_schedule))
 	perturbation_scale = 0.3
 	dynamics_model = :unicycle # :unicycle, :planar_double_integrator
-	linesearch = :backtracking # :backtracking, :fraction_to_boundary
+	linesearch = :fraction_to_boundary # :backtracking, :fraction_to_boundary
 	goop_version = :quasi # :complete, :reduced, :quasi 
-	dynamics = build_intersection_dynamics(dynamics_model; dt = 0.3, control_bounds)
+	dynamics = build_intersection_dynamics(dynamics_model; dt = 0.25, control_bounds)
 
 	run_id =
-		"run_7_$(dynamics_model)_$(goop_version)_system_4_pref_$(num_instances)_instances"
+		"run_8_$(dynamics_model)_$(goop_version)_system_4_pref_$(num_instances)_instances_horizon_$(planning_horizon)_linesearch_$(linesearch)"
 
 	(; problem, flatten_parameters) = get_setup(
 		num_players;
@@ -366,11 +366,11 @@ function demo(;
 				QuasiGOOP.InteriorPoint(),
 				GOOP_kkt_system,
 				θ;
-				tol = 1e-7, # 5e-3
-				η₀ = 0.0, # 0.5
+				tol = 1e-3, # 1e-7 for backtracking, 1e-3 for fraction-to-boundary
+				η₀ = 0.001, # 0.0 for backtracking, 0.001 for fraction-to-boundary
 				ϵ₀, # 5.0
 				max_inner_iters, # 20
-				max_outer_iters = 2, # 50
+				max_outer_iters = 50, # 2 for backtracking, 50 for fraction-to-boundary
 				tightening_rate = 0.001, # 0.1
 				loosening_rate = 0.05, # 0.5
 				min_stepsize = 1e-20,
