@@ -234,8 +234,12 @@ function get_setup(
 		]]
 
 	# Specify prioritized constraint [lowest priority, ..., highest priority]
-	is_prioritized_constraint = [[false, false], [false, false]]
-	preferences = [vcat(objectives[player], prioritized_preferences[player]) for player in 1:num_players]
+	# is_prioritized_constraint = [[false, false], [false, false]]
+	# preferences = [vcat(objectives[player], prioritized_preferences[player]) for player in 1:num_players]
+	
+	is_prioritized_constraint = [[false], [false]]
+	preferences = [[objectives[player]] for player in 1:num_players]
+
 
 	problem = QuasiGOOP.ParametricGOOP(
 		dummy_primals, # x
@@ -273,7 +277,7 @@ function demo(;
 	perturbation_scale = 0.3
 	dynamics_model = :planar_double_integrator # :unicycle, :planar_double_integrator
 	linesearch = :backtracking # :backtracking, :fraction_to_boundary
-	goop_version = :complete # :complete, :reduced, :quasi 
+	goop_version = :reduced # :complete, :reduced, :quasi 
 	dynamics = build_intersection_dynamics(dynamics_model; dt = 0.5, control_bounds)
 
 	run_id = "run_$(dynamics_model)_$(goop_version)_1_pref_$(num_instances)_instances_horizon_$(planning_horizon)_linesearch_$(linesearch)"

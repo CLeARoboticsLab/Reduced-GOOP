@@ -1,6 +1,6 @@
 Base.@kwdef struct ParametricGOOP{T1, T2, T3, T4, T5}
-	"Vector of callable preference functions for each player, called via h(x, θ)."
-	preferences::Vector{Vector{T1}}
+	"Preference functions, either Vector{Vector{Function}} or Vector{Function}."
+	preferences::T1
 
 	"Booleans to indicate if each preference is a constraint, i.e. h(x, θ) ≥ 0."
 	is_prioritized_constraint::Vector{Vector{Bool}}
