@@ -27,10 +27,10 @@ end
 
 function default_intersection_initial_states(dynamics_model::Symbol)
 	if dynamics_model === :planar_double_integrator
-		return [-6.0, -1.0, 2.0, 0.0], [1.0, -5.0, 0.0, 2.0]
+		return [-6.0, -1.0, 0.0, 0.0], [1.0, -5.0, 0.0, 0.0]
 	elseif dynamics_model === :unicycle
 		# Unicycle state is (px, py, speed, heading), so pi/2 points upward.
-		return [-6.0, -1.0, 2.0, 0.0], [1.0, -5.0, 1.5, pi / 2]
+		return [-6.0, -1.0, 0.0, 0.0], [1.0, -6.0, 1.3, pi / 2]
 	end
 	throw(ArgumentError("Unsupported dynamics_model $(dynamics_model)"))
 end
@@ -41,7 +41,7 @@ function velocity_limit_constraints(x, dynamics_model::Symbol; velocity_limit = 
 		return vcat(vx + velocity_limit, -vx + velocity_limit, vy + velocity_limit, -vy + velocity_limit)
 	elseif dynamics_model === :unicycle
 		speed = x[3]
-		return -speed + velocity_limit # speed ≤ velocity_limit
+		return vcat(speed, -speed + velocity_limit) # 0 ≤ speed ≤ velocity_limit
 	end
 	throw(ArgumentError("Unsupported dynamics_model $(dynamics_model)"))
 end
@@ -98,16 +98,12 @@ function get_setup(
 		function (z, θ)
 			(; xs, us) =
 				unflatten_trajectory(z[Block(1)], state_dimension, control_dimension)
-			# (; goal_position) = unflatten_parameters(θ[Block(1)]) # Player 1 θ[Block(i)] Ambuluance
-			# goal_deviation = xs[end][1:2] .- goal_position
-			0.5*sum(sum(u .^ 2) for u in us) #+ sum(goal_deviation .^ 2) # ||x - x\_goal||^ 2
-		end, #for i in 1:num_players
+			sum(sum(u .^ 2) for u in us)
+		end,
 		function (z, θ)
 			(; xs, us) =
 				unflatten_trajectory(z[Block(2)], state_dimension, control_dimension)
-			# (; goal_position) = unflatten_parameters(θ[Block(2)]) # Player 2 θ[Block(i)] Car
-			# goal_deviation = xs[end][1:2] .- goal_position
-			0.5*sum(sum(u .^ 2) for u in us) #+ sum(goal_deviation .^ 2) # ||x - x\_goal||^ 2
+			sum(sum(u .^ 2) for u in us)
 		end,
 	]
 
@@ -145,27 +141,27 @@ function get_setup(
 			ub_mask = findall(!isinf, ub)
 			(; xs, us) =
 				unflatten_trajectory(z[Block(1)], state_dimension, control_dimension)
-				vcat(
-					# control bounds (box)
-					mapreduce(vcat, us) do u
-						vcat(u[lb_mask] - lb[lb_mask], ub[ub_mask] - u[ub_mask])
-					end,
+			vcat(
+				# control bounds (box)
+				mapreduce(vcat, us) do u
+					vcat(u[lb_mask] - lb[lb_mask], ub[ub_mask] - u[ub_mask])
+				end,
 
-					# stay within the intersection. R1 (ambulance)
-					mapreduce(vcat, 1:length(xs)) do k
-						px = xs[k][1]
-						py = xs[k][2]
-						position_constraints = vcat(
-							px + map_end,
-							-px + map_end,
-							py + lane_width,
-							-py + lane_width,
-						) # -7 ≤ pₓ ≤ 7, -2 ≤ py ≤ 2
-						vcat(position_constraints)
-					end,
+				# stay within the intersection. R1 (ambulance)
+				mapreduce(vcat, 1:length(xs)) do k
+					px = xs[k][1]
+					py = xs[k][2]
+					position_constraints = vcat(
+						px + map_end,
+						-px + map_end,
+						py + lane_width,
+						-py + lane_width,
+					) # -7 ≤ pₓ ≤ 7, -2 ≤ py ≤ 2
+					vcat(position_constraints)
+				end,
 
 				# add shared collision-avoidance constraints
-				shared_inequality_constraint(z, θ),
+				# shared_inequality_constraint(z, θ),
 			)
 		end,
 		function (z, θ)
@@ -174,29 +170,27 @@ function get_setup(
 			ub_mask = findall(!isinf, ub)
 			(; xs, us) =
 				unflatten_trajectory(z[Block(2)], state_dimension, control_dimension)
-				vcat(
-					# control bounds (box)
-					mapreduce(vcat, us) do u
-						vcat(u[lb_mask] - lb[lb_mask], ub[ub_mask] - u[ub_mask])
-					end,
+			vcat(
+				# control bounds (box)
+				mapreduce(vcat, us) do u
+					vcat(u[lb_mask] - lb[lb_mask], ub[ub_mask] - u[ub_mask])
+				end,
 
-					# stay within the intersection. R2 (car)
-					mapreduce(vcat, 1:length(xs)) do k
-						px = xs[k][1]
-						py = xs[k][2]
-						position_constraints = vcat(
-							px + lane_width,
-							-px + lane_width,
-							py + map_end,
-							-py + map_end,
-						) # -2 ≤ pₓ ≤ 2, -7 ≤ py ≤ 7
-						# velocity_constraints = vcat(vx + 1.5, -vx + 1.5, vy + 1.5, -vy + 1.5)
-					# vcat(velocity_constraints,position_constraints)
+				# stay within the intersection. R2 (car)
+				mapreduce(vcat, 1:length(xs)) do k
+					px = xs[k][1]
+					py = xs[k][2]
+					position_constraints = vcat(
+						px + lane_width,
+						-px + lane_width,
+						py + map_end,
+						-py + map_end,
+					) # -2 ≤ pₓ ≤ 2, -7 ≤ py ≤ 7
 					vcat(position_constraints)
 				end,
 
 				# add shared collision-avoidance constraints
-				shared_inequality_constraint(z, θ),
+				# shared_inequality_constraint(z, θ),
 			)
 		end,
 		# for now, two robots
@@ -204,32 +198,6 @@ function get_setup(
 
 	prioritized_preferences = [
 		[
-
-			# Keep center (yellow) line
-				function (z, θ)
-					(; xs, us) = unflatten_trajectory(
-						z[Block(1)],
-						state_dimension,
-						control_dimension,
-					)
-					mapreduce(vcat, 1:length(xs)) do k
-						py = xs[k][2]
-						-py # py ≤ 0.0
-					end
-				end,
-
-			# Drive under speed limit 
-			function (z, θ)
-				(; xs, us) = unflatten_trajectory(
-					z[Block(1)],
-					state_dimension,
-					control_dimension,
-				)
-				mapreduce(vcat, 1:length(xs)) do k
-					velocity_limit_constraints(xs[k], dynamics_model; velocity_limit)
-				end
-			end,
-
 			# reach the goal. (highest priority)
 			function (z, θ)
 				(; xs, us) = unflatten_trajectory(
@@ -243,10 +211,11 @@ function get_setup(
 				# 	goal_deviation .+ 0.01
 				# 	-goal_deviation .+ 0.01
 				# ]
-				2sum(goal_deviation .^ 2)
+				0*sum(goal_deviation .^ 2)
 			end,
 		],
 		[
+
 			# reach the goal.
 			function (z, θ)
 				(; xs, us) = unflatten_trajectory(
@@ -260,38 +229,12 @@ function get_setup(
 				# 	goal_deviation .+ 0.01
 				# 	-goal_deviation .+ 0.01
 				# ]
-				sum(goal_deviation .^ 2)
+				0*sum(goal_deviation .^ 2)
 			end,
-
-			# Keep center (yellow) line 
-				function (z, θ)
-					(; xs, us) = unflatten_trajectory(
-						z[Block(2)],
-						state_dimension,
-						control_dimension,
-					)
-					mapreduce(vcat, 1:length(xs)) do k
-						px = xs[k][1]
-						px + 0.0 # px ≥ 0.0
-					end
-				end,
-
-			# Drive under speed limit (highest priority)
-			function (z, θ)
-				(; xs, us) = unflatten_trajectory(
-					z[Block(2)],
-					state_dimension,
-					control_dimension,
-				)
-				mapreduce(vcat, 1:length(xs)) do k
-					velocity_limit_constraints(xs[k], dynamics_model; velocity_limit)
-				end
-			end,
-		],
-	]
+		]]
 
 	# Specify prioritized constraint [lowest priority, ..., highest priority]
-	is_prioritized_constraint = [[false, true, true, false], [false, false, true, true]]
+	is_prioritized_constraint = [[false, false], [false, false]]
 	preferences = [vcat(objectives[player], prioritized_preferences[player]) for player in 1:num_players]
 
 	problem = QuasiGOOP.ParametricGOOP(
@@ -313,26 +256,27 @@ function demo(;
 	lane_width = 2,
 	verbose = false,
 	rng_seed = 123,
+	random_initial_state = true,
+	debug = false,
 )
 	Random.seed!(rng_seed)
 
 	# Problem setup
 	num_players = 2
 	control_bounds = (; lb = [-2.0, -2.0], ub = [2.0, 2.0])
-	planning_horizon = 20
+	planning_horizon = 6
 	collision_avoidance = 1.3
 	speed_component_limit = 1.5
-	num_instances = 2
-	epsilon_schedule = [1.0*0.5^(j-1) for j in 1:11]
+	num_instances = 1
+	epsilon_schedule = [0.01*0.5^(j-1) for j in 1:10] # 1:11 
 	max_inner_iters_schedule = fill(5000, length(epsilon_schedule))
 	perturbation_scale = 0.3
-	dynamics_model = :unicycle # :unicycle, :planar_double_integrator
-	linesearch = :fraction_to_boundary # :backtracking, :fraction_to_boundary
-	goop_version = :quasi # :complete, :reduced, :quasi 
-	dynamics = build_intersection_dynamics(dynamics_model; dt = 0.25, control_bounds)
+	dynamics_model = :planar_double_integrator # :unicycle, :planar_double_integrator
+	linesearch = :backtracking # :backtracking, :fraction_to_boundary
+	goop_version = :complete # :complete, :reduced, :quasi 
+	dynamics = build_intersection_dynamics(dynamics_model; dt = 0.5, control_bounds)
 
-	run_id =
-		"run_8_$(dynamics_model)_$(goop_version)_system_4_pref_$(num_instances)_instances_horizon_$(planning_horizon)_linesearch_$(linesearch)"
+	run_id = "run_$(dynamics_model)_$(goop_version)_1_pref_$(num_instances)_instances_horizon_$(planning_horizon)_linesearch_$(linesearch)"
 
 	(; problem, flatten_parameters) = get_setup(
 		num_players;
@@ -366,18 +310,18 @@ function demo(;
 				QuasiGOOP.InteriorPoint(),
 				GOOP_kkt_system,
 				θ;
-				tol = 1e-3, # 1e-7 for backtracking, 1e-3 for fraction-to-boundary
-				η₀ = 0.001, # 0.0 for backtracking, 0.001 for fraction-to-boundary
+				tol = 1e-5, # 1e-7 for backtracking, 1e-5 for fraction-to-boundary
+				η₀ = 0.0, # 0.0 for backtracking, 0.001 for fraction-to-boundary
 				ϵ₀, # 5.0
 				max_inner_iters, # 20
-				max_outer_iters = 50, # 2 for backtracking, 50 for fraction-to-boundary
+				max_outer_iters = 2, # 2 for backtracking, 50 for fraction-to-boundary
 				tightening_rate = 0.001, # 0.1
 				loosening_rate = 0.05, # 0.5
 				min_stepsize = 1e-20,
 				z₀,
 				verbose = verbose,
 				convergence_log = convergence_log,
-				linesearch, # :backtracking, :fraction_to_boundary
+				linesearch,
 			)
 		end
 		if status == :failed
@@ -419,10 +363,14 @@ function demo(;
 	obstacle_position = [0.25, 0.15] # placeholder
 	base_initial_state1, base_initial_state2 =
 		default_intersection_initial_states(dynamics_model)
-	goal_position1 = [6.0, -1.0]
+	goal_position1 = [-1.0, -1.0]
 	goal_position2 = [1.0, 6.0]
 
-	run_dir = joinpath("data", "Intersection_open_loop", "runs", run_id)
+	run_dir = if debug
+		joinpath("data", "Intersection_open_loop", "debug", run_id)
+	else
+		joinpath("data", "Intersection_open_loop", "runs", run_id)
+	end
 	data_dir = joinpath(run_dir, "data")
 	problem_data_dir = joinpath(data_dir, "problem")
 	solution_data_dir = joinpath(problem_data_dir, "solution")
@@ -431,6 +379,7 @@ function demo(;
 	trajectory_plots_dir = joinpath(plots_dir, "trajectories")
 	convergence_plots_dir = joinpath(plots_dir, "convergence")
 	velocity_plots_dir = joinpath(plots_dir, "velocities")
+	warmstart_plots_dir = joinpath(plots_dir, "warmstart")
 	for dir in (
 		problem_data_dir,
 		solution_data_dir,
@@ -438,6 +387,7 @@ function demo(;
 		trajectory_plots_dir,
 		convergence_plots_dir,
 		velocity_plots_dir,
+		warmstart_plots_dir,
 	)
 		mkpath(dir)
 	end
@@ -449,18 +399,24 @@ function demo(;
 
 	while solved_attempts < num_instances
 		total_attempts += 1
-		initial_state1 = sample_initial_state(
-			base_initial_state1,
-			dynamics,
-			dynamics_model,
-			perturbation_scale,
-		)
-		initial_state2 = sample_initial_state(
-			base_initial_state2,
-			dynamics,
-			dynamics_model,
-			perturbation_scale,
-		)
+		initial_state1, initial_state2 = if random_initial_state
+			(
+				sample_initial_state(
+					base_initial_state1,
+					dynamics,
+					dynamics_model,
+					perturbation_scale,
+				),
+				sample_initial_state(
+					base_initial_state2,
+					dynamics,
+					dynamics_model,
+					perturbation_scale,
+				),
+			)
+		else
+			(copy(base_initial_state1), copy(base_initial_state2))
+		end
 		println(
 			"solved $(solved_attempts)/$(num_instances), attempt $(total_attempts), goop version $(goop_version): ",
 		)
@@ -490,6 +446,46 @@ function demo(;
 			warmstart_x,
 			warmstart_u,
 		)
+		warmstart_strategies = map(1:num_players) do i
+			start_idx = primal_dimension * (i - 1) + 1
+			end_idx = start_idx + primal_dimension - 1
+			unflatten_trajectory(
+				warmstart_solution[start_idx:end_idx],
+				state_dim(dynamics),
+				control_dim(dynamics),
+			)
+		end
+
+		warmstart_fig, _ = plot_intersection_trajectories(
+			;
+			map_end,
+			lane_width,
+			strategy = warmstart_strategies,
+			θ1,
+			θ2,
+			goal_position1,
+			goal_position2,
+		)
+		warmstart_velocity_fig, _ = velocity_plot(
+			;
+			strategy = warmstart_strategies,
+			velocity_limit = speed_component_limit,
+			dynamics_model,
+		)
+		CairoMakie.save(
+			joinpath(
+				warmstart_plots_dir,
+				"warmstart_attempt_$(total_attempts)_instance_$(solved_attempts + 1).pdf",
+			),
+			warmstart_fig,
+		)
+		CairoMakie.save(
+			joinpath(
+				warmstart_plots_dir,
+				"warmstart_velocity_attempt_$(total_attempts)_instance_$(solved_attempts + 1).pdf",
+			),
+			warmstart_velocity_fig,
+		)
 
 		epsilon_results = Pair{Float64, Any}[]
 		stage_warmstart = warmstart_solution #warmstart_solution #load_object("stage_warmstart.jld2") #warmstart_solution
@@ -515,17 +511,24 @@ function demo(;
 			stage_warmstart = result.solution_dict["z"][1:(num_players*primal_dimension)]
 		end
 		if !solve_sequence_succeeded
+			if !random_initial_state
+				println("deterministic mode enabled: solver failed for default initial states.")
+				break
+			end
 			continue
 		end
 
-		push!(instance_problem_data, Dict(
-			"attempt_idx" => total_attempts,
-			"initial_state1" => initial_state1,
-			"goal_position1" => goal_position1,
-			"initial_state2" => initial_state2,
-			"goal_position2" => goal_position2,
-			"total_solve_time_sec" => instance_total_solve_time_sec,
-		))
+		push!(
+			instance_problem_data,
+			Dict(
+				"attempt_idx" => total_attempts,
+				"initial_state1" => initial_state1,
+				"goal_position1" => goal_position1,
+				"initial_state2" => initial_state2,
+				"goal_position2" => goal_position2,
+				"total_solve_time_sec" => instance_total_solve_time_sec,
+			),
+		)
 
 		solved_attempts += 1
 		println(
@@ -610,9 +613,12 @@ function demo(;
 		joinpath(problem_data_dir, "run_metadata.jld2"),
 		Dict(
 			"run_id" => run_id,
+			"debug" => debug,
+			"run_dir" => run_dir,
 			"rng_seed" => rng_seed,
 			"dynamics_model" => dynamics_model,
 			"num_instances" => num_instances,
+			"random_initial_state" => random_initial_state,
 			"epsilon_schedule" => epsilon_schedule,
 			"max_inner_iters_schedule" => max_inner_iters_schedule,
 			"velocity_limit" => speed_component_limit,

@@ -244,7 +244,6 @@ function velocity_plot(;
 	axis_label_fontsize = 24
 	tick_label_fontsize = 22
 	legend_label_fontsize = 18
-
 	xs1 = strategy[1].xs
 	xs2 = strategy[2].xs
 	trajectory_len = min(length(xs1), length(xs2))
@@ -408,7 +407,7 @@ function plot_convergence_plot(;
 	)
 
 	CairoMakie.lines!(ax, total_iteration_history, kkt_error_history, color = :dodgerblue, linewidth = 4)
-	
+
 	return figure, ax
 end
 

@@ -172,8 +172,8 @@ function generate_slacked_reduced_kkt_system(
 
 	# Keep track of all inequality constraint duals (γ) that we create.
 	Γ = symbolic_type[]
-	Γ_cs = symbolic_type[] # 10/25: store duals for complementarity slackness
-	Γ_cs_shared = symbolic_type[] # store duals for complementarity slackness for shared constraints
+	Γ_cs_by_player = [symbolic_type[] for _ in 1:goop.num_players] # 10/25: store duals for complementarity slackness
+	Γ_cs_shared_by_player = [symbolic_type[] for _ in 1:goop.num_players] # store duals for complementarity slackness for shared constraints
 
 	# Keep track of all lower level policy constraint duals (ψ) that we create.
 	Ψ = symbolic_type[]
@@ -206,7 +206,7 @@ function generate_slacked_reduced_kkt_system(
 			goop.inequality_dims[player],
 		)
 		push!(Γ, γ...)
-		push!(Γ_cs, γ...) # 10/25
+		push!(Γ_cs_by_player[player], γ...) # 10/25
 
 		γ̃ₛ = SymbolicTracingUtils.make_variables(
 			backend,
@@ -214,7 +214,7 @@ function generate_slacked_reduced_kkt_system(
 			goop.shared_inequality_dims,
 		)
 		push!(Γ, γ̃ₛ...)
-		push!(Γ_cs_shared, γ̃ₛ...) # 10/25
+		push!(Γ_cs_shared_by_player[player], γ̃ₛ...) # 10/25
 
 		# # Shared constraints exist at every level. https://github.com/CLeARoboticsLab/Quasi-GOOP/issues/6
 		# Option (1): Share the multipliers only at all players' innermost levels, but let successive outer levels have their own separate multipliers for all players.
@@ -307,7 +307,7 @@ function generate_slacked_reduced_kkt_system(
 						],
 					),
 				)
-
+				
 				return (; F, π = ∇L, π_term_groups = [π_terms])
 			else
 				@assert length(h) == 1 "Expected a single preference function at the base level, but got $(length(h))"
@@ -337,6 +337,7 @@ function generate_slacked_reduced_kkt_system(
 						],
 					),
 				)
+				
 				return (; F, π = ∇L, π_term_groups = [π_terms])
 			end
 		end
@@ -378,13 +379,13 @@ function generate_slacked_reduced_kkt_system(
 		)
 		push!(Λ, λ̃ₛ...)
 
-		# γ̃ₛ = SymbolicTracingUtils.make_variables(
-		# 	backend,
-		# 	Symbol("γ̃ₛ_$(player)_$(level)"),
-		# 	goop.shared_inequality_dims,
-		# )
-		# push!(Γ, γ̃ₛ...)
-		# push!(Γ_cs_shared, γ̃ₛ...) # 10/25
+			# γ̃ₛ = SymbolicTracingUtils.make_variables(
+			# 	backend,
+			# 	Symbol("γ̃ₛ_$(player)_$(level)"),
+			# 	goop.shared_inequality_dims,
+			# )
+			# push!(Γ, γ̃ₛ...)
+			# push!(Γ_cs_shared_by_player[player], γ̃ₛ...) # 10/25
 
 		if first(is_prioritized_constraint)
 			# Highest priority is a constraint.
@@ -424,8 +425,8 @@ function generate_slacked_reduced_kkt_system(
 			# push!(Γ, μₛ...)
 
 			# Form partial Lagrangian at this stage.
-			blocked_Γ_cs = g === nothing ? nothing : make_blocks(Γ_cs, goop.inequality_dims[player])
-			blocked_Γ_cs_shared = gₛ === nothing ? nothing : make_blocks(Γ_cs_shared, goop.shared_inequality_dims)
+			blocked_Γ_cs = g === nothing ? nothing : make_blocks(Γ_cs_by_player[player], goop.inequality_dims[player])
+			blocked_Γ_cs_shared = gₛ === nothing ? nothing : make_blocks(Γ_cs_shared_by_player[player], goop.shared_inequality_dims)
 			# L =
 			# 	sum(preference_slack) - γₚ' * (h .+ preference_slack) - μₛ' * preference_slack -
 			# 	ψ' * π - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
@@ -434,7 +435,7 @@ function generate_slacked_reduced_kkt_system(
 			# 	(isnothing(gₛ) ? 0 : ϕₛ' * (repeat(gₛ, num_levels - level) .* blocked_Γ_cs_shared[Block(level+1):Block(num_levels)]))
 
 			L =
-				sum(preference_slack .^ 2) - γₚ' * (h .+ preference_slack) -
+				sum(preference_slack .^ 2) - γₚ' * (h .+ (preference_slack)) -
 				ψ' * π - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
 				(isnothing(fₛ) ? 0 : λ̃ₛ' * fₛ) - (isnothing(gₛ) ? 0 : γ̃ₛ' * gₛ) -
 				(isnothing(g) ? 0 : ϕ' * (repeat(g, num_levels - level) .* blocked_Γ_cs[Block(level+1):Block(num_levels)])) -
@@ -477,14 +478,14 @@ function generate_slacked_reduced_kkt_system(
 				(isnothing(gₛ) ? nothing : σₛ .* γ̃ₛ .- ϵ) # Note: same slacks (not duals) for all levels
 				F
 			]
-
+			
 			return (; F = F̃, π = ∇L, π_term_groups = [π_terms])
 		else
 			@assert length(h) == 1 "Expected a single preference function at the level $(level), but got $(length(h))"
 			# Current priority is a cost.
 			# TODO: dual variables for preference inequalities
-			blocked_Γ_cs = g === nothing ? nothing : make_blocks(Γ_cs, goop.inequality_dims[player])
-			blocked_Γ_cs_shared = gₛ === nothing ? nothing : make_blocks(Γ_cs_shared, goop.shared_inequality_dims)
+			blocked_Γ_cs = g === nothing ? nothing : make_blocks(Γ_cs_by_player[player], goop.inequality_dims[player])
+			blocked_Γ_cs_shared = gₛ === nothing ? nothing : make_blocks(Γ_cs_shared_by_player[player], goop.shared_inequality_dims)
 			L =
 				h - ψ' * π - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
 				(isnothing(fₛ) ? 0 : λ̃ₛ' * fₛ) - (isnothing(gₛ) ? 0 : γ̃ₛ' * gₛ) -
@@ -520,12 +521,14 @@ function generate_slacked_reduced_kkt_system(
 					!isnothing,
 					[
 						∇L .+ η * x[Block(player)]
+						(isnothing(g) ? nothing : g .- σ)
 						(isnothing(g) ? nothing : σ .* γ .- ϵ)
 						(isnothing(gₛ) ? nothing : σₛ .* γ̃ₛ .- ϵ)
 						F
 					],
 				),
-			)			
+			)
+			
 			return (; F = F̃, π = vcat(∇L, π), π_term_groups = vcat([π_terms], π_term_groups))
 		end
 	end
@@ -539,6 +542,7 @@ function generate_slacked_reduced_kkt_system(
 		)
 	end
 
+	
 	# Flatten the F and π vectors for all players.
 	flattened_F = begin
 		if length(goop.primal_dims) > 1
@@ -550,6 +554,7 @@ function generate_slacked_reduced_kkt_system(
 		end
 	end
 
+	
 	# Filter out zeros and add shared constraints.
 	F = Vector{symbolic_type}(
 		filter!(!isnothing,
@@ -577,6 +582,8 @@ function generate_slacked_reduced_kkt_system(
 	preference_slack_dims = idx[Block(2)] # s
 	interior_point_slack_dims = vcat(idx[Block(3)], idx[Block(9)]) # Σ, σₛ
 	inequality_constraint_dual_dims = vcat(idx[Block(5)], idx[Block(8)]) # Γ, γₛ
+
+	
 
 	BuildGOOPKKTSystem(
 		F,

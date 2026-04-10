@@ -155,8 +155,8 @@ function solve(
 			# δz .= solution.u
 
 			# Solve δz 
-			δz .= ∇F \ (-F)
-			# δz .= pinv(Matrix(∇F)) * (-F) # minimum-norm sol
+			# δz .= ∇F \ (-F)
+			δz .= pinv(Matrix(∇F)) * (-F) # minimum-norm sol
 
 			# verbose && println("current δx: ", round.(δz[mcp.primal_dims]; digits = 4))
 
@@ -249,6 +249,7 @@ function solve(
 
 	if outer_iters == max_outer_iters
 		status = (kkt_error <= tol) ? :solved : :failed
+		# (kkt_error <= tol) && Main.@infiltrate
 	end
 	if has_convergence_log
 		convergence_log["kkt_error_history"] = kkt_error_history
