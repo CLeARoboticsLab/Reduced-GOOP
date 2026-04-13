@@ -98,12 +98,24 @@ function get_setup(
 		function (z, θ)
 			(; xs, us) =
 				unflatten_trajectory(z[Block(1)], state_dimension, control_dimension)
-			sum(sum(u .^ 2) for u in us)
+			(; goal_position) = unflatten_parameters(θ[Block(2)]) # Player 2
+			goal_deviation = xs[end][1:2] .- goal_position
+			# [
+			# 	goal_deviation .+ 0.01
+			# 	-goal_deviation .+ 0.01
+			# ]
+			sum(sum(u .^ 2) for u in us) #+ sum(goal_deviation .^ 2)
 		end,
 		function (z, θ)
 			(; xs, us) =
 				unflatten_trajectory(z[Block(2)], state_dimension, control_dimension)
-			sum(sum(u .^ 2) for u in us)
+			(; goal_position) = unflatten_parameters(θ[Block(2)]) # Player 2
+			goal_deviation = xs[end][1:2] .- goal_position
+			# [
+			# 	goal_deviation .+ 0.01
+			# 	-goal_deviation .+ 0.01
+			# ]
+			sum(sum(u .^ 2) for u in us) #+ sum(goal_deviation .^ 2)
 		end,
 	]
 
@@ -113,9 +125,11 @@ function get_setup(
 				unflatten_trajectory(z[Block(i)], state_dimension, control_dimension)
 			(; initial_state) = unflatten_parameters(θ[Block(i)]) # Player i θ[Block(i)]
 			initial_state_constraint = xs[1] - initial_state
+			# zero_initial_control = us[1]
 			dynamics_constraints = mapreduce(vcat, 2:length(xs)) do k
 				xs[k] - dynamics(xs[k-1], us[k-1], k)
 			end
+			# vcat(initial_state_constraint, zero_initial_control, dynamics_constraints)
 			vcat(initial_state_constraint, dynamics_constraints)
 		end for i in 1:num_players
 	]
@@ -211,7 +225,7 @@ function get_setup(
 				# 	goal_deviation .+ 0.01
 				# 	-goal_deviation .+ 0.01
 				# ]
-				0*sum(goal_deviation .^ 2)
+				sum(goal_deviation .^ 2) #+ sum(sum(u .^ 2) for u in us)
 			end,
 		],
 		[
@@ -229,16 +243,22 @@ function get_setup(
 				# 	goal_deviation .+ 0.01
 				# 	-goal_deviation .+ 0.01
 				# ]
-				0*sum(goal_deviation .^ 2)
+				sum(goal_deviation .^ 2) #+ sum(sum(u .^ 2) for u in us)
 			end,
 		]]
 
 	# Specify prioritized constraint [lowest priority, ..., highest priority]
+	is_prioritized_constraint = [[false, false], [false, false]]
+	preferences = [vcat(objectives[player], prioritized_preferences[player]) for player in 1:num_players]
+
 	# is_prioritized_constraint = [[false, false], [false, false]]
 	# preferences = [vcat(objectives[player], prioritized_preferences[player]) for player in 1:num_players]
-	
-	is_prioritized_constraint = [[false], [false]]
-	preferences = [[objectives[player]] for player in 1:num_players]
+	# preferences = [vcat(prioritized_preferences[player], objectives[player]) for player in 1:num_players]
+
+
+	# is_prioritized_constraint = [[false], [false]]
+	# preferences = [[objectives[player]] for player in 1:num_players]
+	# preferences = [prioritized_preferences[player] for player in 1:num_players]
 
 
 	problem = QuasiGOOP.ParametricGOOP(
@@ -255,9 +275,9 @@ function get_setup(
 	(; problem, flatten_parameters)
 end
 
-function demo(;
-	map_end = 7,
-	lane_width = 2,
+	function demo(;
+		map_end = 7,
+		lane_width = 2,
 	verbose = false,
 	rng_seed = 123,
 	random_initial_state = true,
@@ -272,15 +292,17 @@ function demo(;
 	collision_avoidance = 1.3
 	speed_component_limit = 1.5
 	num_instances = 1
-	epsilon_schedule = [0.01*0.5^(j-1) for j in 1:10] # 1:11 
+	epsilon_schedule = [0.1*0.5^(j-1) for j in 1:10] # 1:11 
 	max_inner_iters_schedule = fill(5000, length(epsilon_schedule))
 	perturbation_scale = 0.3
 	dynamics_model = :planar_double_integrator # :unicycle, :planar_double_integrator
 	linesearch = :backtracking # :backtracking, :fraction_to_boundary
-	goop_version = :reduced # :complete, :reduced, :quasi 
+	goop_version = :complete # :complete, :reduced, :quasi 
 	dynamics = build_intersection_dynamics(dynamics_model; dt = 0.5, control_bounds)
 
-	run_id = "run_$(dynamics_model)_$(goop_version)_1_pref_$(num_instances)_instances_horizon_$(planning_horizon)_linesearch_$(linesearch)"
+	# run_id = "run_$(dynamics_model)_$(goop_version)_1_pref_$(num_instances)_instances_horizon_$(planning_horizon)_linesearch_$(linesearch)_goal_reaching_3"
+
+	run_id = "4_with_warmstart"
 
 	(; problem, flatten_parameters) = get_setup(
 		num_players;
@@ -307,7 +329,7 @@ function demo(;
 	dynamics_dimension = state_dim(dynamics) + control_dim(dynamics)
 	primal_dimension = dynamics_dimension * planning_horizon
 
-	function get_receding_horizon_solution(θ; z₀, ϵ₀, max_inner_iters)
+		function get_receding_horizon_solution(θ; z₀, ϵ₀, max_inner_iters)
 		convergence_log = Dict{String, Any}()
 		elapsed_time = @elapsed begin
 			(; status, z, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters) = QuasiGOOP.solve(
@@ -361,8 +383,18 @@ function demo(;
 			"outer_end_total_iterations" => get(convergence_log, "outer_end_total_iterations", Int[]),
 			"outer_end_trace_indices" => get(convergence_log, "outer_end_trace_indices", Int[]),
 		)
-		(; strategies, solution_dict)
-	end
+			(; strategies, solution_dict)
+		end
+
+		function evaluate_preferences_at_solution(x, θ)
+			x_block = BlockArray(collect(x), problem.primal_dims)
+			θ_block = BlockArray(collect(θ), problem.parameter_dims)
+			map(1:problem.num_players) do player
+				map(problem.preferences[player]) do preference
+					preference(x_block, θ_block)
+				end
+			end
+		end
 
 	obstacle_position = [0.25, 0.15] # placeholder
 	base_initial_state1, base_initial_state2 =
@@ -383,6 +415,7 @@ function demo(;
 	trajectory_plots_dir = joinpath(plots_dir, "trajectories")
 	convergence_plots_dir = joinpath(plots_dir, "convergence")
 	velocity_plots_dir = joinpath(plots_dir, "velocities")
+	control_plots_dir = joinpath(plots_dir, "controls")
 	warmstart_plots_dir = joinpath(plots_dir, "warmstart")
 	for dir in (
 		problem_data_dir,
@@ -391,6 +424,7 @@ function demo(;
 		trajectory_plots_dir,
 		convergence_plots_dir,
 		velocity_plots_dir,
+		control_plots_dir,
 		warmstart_plots_dir,
 	)
 		mkpath(dir)
@@ -450,6 +484,10 @@ function demo(;
 			warmstart_x,
 			warmstart_u,
 		)
+		# Use control-optimal trajectory as warmstart
+		data = load_object("./data/Intersection_open_loop/debug/0_10goal_control/data/problem/solution/solution_dict_instance_1_eps0.0001953125.jld2")
+		warmstart_solution = data["z"][1:(num_players*primal_dimension)]
+
 		warmstart_strategies = map(1:num_players) do i
 			start_idx = primal_dimension * (i - 1) + 1
 			end_idx = start_idx + primal_dimension - 1
@@ -476,6 +514,12 @@ function demo(;
 			velocity_limit = speed_component_limit,
 			dynamics_model,
 		)
+		warmstart_control_fig, _ = control_plot(
+			;
+			strategy = warmstart_strategies,
+			control_lb = control_bounds.lb,
+			control_ub = control_bounds.ub,
+		)
 		CairoMakie.save(
 			joinpath(
 				warmstart_plots_dir,
@@ -489,6 +533,13 @@ function demo(;
 				"warmstart_velocity_attempt_$(total_attempts)_instance_$(solved_attempts + 1).pdf",
 			),
 			warmstart_velocity_fig,
+		)
+		CairoMakie.save(
+			joinpath(
+				warmstart_plots_dir,
+				"warmstart_control_attempt_$(total_attempts)_instance_$(solved_attempts + 1).pdf",
+			),
+			warmstart_control_fig,
 		)
 
 		epsilon_results = Pair{Float64, Any}[]
@@ -534,14 +585,23 @@ function demo(;
 			),
 		)
 
-		solved_attempts += 1
-		println(
-			"instance $(solved_attempts) total solve time: $(round(instance_total_solve_time_sec; digits = 4)) sec",
-		)
-		JLD2.save_object(
-			joinpath(problem_data_dir, "problem_data_instance_$(solved_attempts).jld2"),
-			instance_problem_data,
-		)
+			solved_attempts += 1
+			println(
+				"instance $(solved_attempts) total solve time: $(round(instance_total_solve_time_sec; digits = 4)) sec",
+			)
+			println("instance $(solved_attempts) converged preference values by ϵ:")
+			for (ϵ₀, result) in epsilon_results
+				preference_values = evaluate_preferences_at_solution(result.solution_dict["x"][1:(num_players*primal_dimension)], θ)
+				result.solution_dict["preference_values"] = preference_values
+				println("  ϵ₀ = $(ϵ₀):")
+				for (player_idx, player_preferences) in enumerate(preference_values)
+					println("    player $(player_idx): $(player_preferences)")
+				end
+			end
+			JLD2.save_object(
+				joinpath(problem_data_dir, "problem_data_instance_$(solved_attempts).jld2"),
+				instance_problem_data,
+			)
 		for (ϵ₀, result) in epsilon_results
 			JLD2.save_object(
 				joinpath(
@@ -574,6 +634,11 @@ function demo(;
 				velocity_limit = speed_component_limit,
 				dynamics_model,
 			)
+			control_fig, _ = control_plot(;
+				strategy = result.strategies,
+				control_lb = control_bounds.lb,
+				control_ub = control_bounds.ub,
+			)
 			CairoMakie.save(
 				joinpath(
 					convergence_plots_dir,
@@ -594,6 +659,13 @@ function demo(;
 					"velocity_instance_$(solved_attempts)_eps$(ϵ₀).pdf",
 				),
 				velocity_fig,
+			)
+			CairoMakie.save(
+				joinpath(
+					control_plots_dir,
+					"control_instance_$(solved_attempts)_eps$(ϵ₀).pdf",
+				),
+				control_fig,
 			)
 		end
 	end

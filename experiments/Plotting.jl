@@ -384,6 +384,139 @@ function velocity_plot(;
 	return figure, (ax_vx, ax_vy)
 end
 
+function control_plot(;
+	strategy,
+	control_lb = nothing,
+	control_ub = nothing,
+)
+	if length(strategy) < 2
+		error("control_plot expects strategies for at least two players.")
+	end
+
+	axis_label_fontsize = 24
+	tick_label_fontsize = 22
+	legend_label_fontsize = 18
+
+	us1 = strategy[1].us
+	us2 = strategy[2].us
+	control_horizon = min(length(us1), length(us2))
+	if control_horizon == 0
+		error("control_plot expects non-empty player controls.")
+	end
+
+	control_dimension = length(us1[1])
+	if control_dimension == 0
+		error("control_plot expects control vectors with non-zero dimension.")
+	end
+
+	lb = isnothing(control_lb) ? fill(-Inf, control_dimension) : collect(control_lb)
+	ub = isnothing(control_ub) ? fill(Inf, control_dimension) : collect(control_ub)
+	if length(lb) != control_dimension || length(ub) != control_dimension
+		error("control bound lengths must match control dimension $(control_dimension).")
+	end
+
+	horizon_steps = 0:(control_horizon-1)
+	figure = serif_figure()
+	axes = CairoMakie.Axis[]
+
+	player1_handle = nothing
+	player2_handle = nothing
+	upper_bound_handle = nothing
+	lower_bound_handle = nothing
+
+	for control_idx in 1:control_dimension
+		u1 = [us1[k][control_idx] for k in 1:control_horizon]
+		u2 = [us2[k][control_idx] for k in 1:control_horizon]
+
+		ax = CairoMakie.Axis(
+			figure[1, control_idx];
+			xlabel = "time step [s]",
+			ylabel = "u$(control_idx)",
+			xlabelsize = axis_label_fontsize,
+			ylabelsize = axis_label_fontsize,
+			xticklabelsize = tick_label_fontsize,
+			yticklabelsize = tick_label_fontsize,
+		)
+		push!(axes, ax)
+
+		current_player1 = CairoMakie.scatterlines!(
+			ax,
+			horizon_steps,
+			u1;
+			color = :blue,
+			linewidth = 3,
+		)
+		current_player2 = CairoMakie.scatterlines!(
+			ax,
+			horizon_steps,
+			u2;
+			color = :red,
+			linewidth = 3,
+		)
+		if isnothing(player1_handle)
+			player1_handle = current_player1
+			player2_handle = current_player2
+		end
+
+		if isfinite(ub[control_idx])
+			current_upper = CairoMakie.lines!(
+				ax,
+				horizon_steps,
+				fill(ub[control_idx], control_horizon);
+				color = :black,
+				linestyle = :dash,
+				linewidth = 2,
+			)
+			if isnothing(upper_bound_handle)
+				upper_bound_handle = current_upper
+			end
+		end
+		if isfinite(lb[control_idx])
+			current_lower = CairoMakie.lines!(
+				ax,
+				horizon_steps,
+				fill(lb[control_idx], control_horizon);
+				color = :black,
+				linestyle = :dot,
+				linewidth = 2,
+			)
+			if isnothing(lower_bound_handle)
+				lower_bound_handle = current_lower
+			end
+		end
+	end
+
+	if length(axes) > 1
+		CairoMakie.linkyaxes!(axes...)
+	end
+
+	legend_elements = Any[player1_handle, player2_handle]
+	legend_labels = ["Player 1", "Player 2"]
+	if !isnothing(upper_bound_handle)
+		push!(legend_elements, upper_bound_handle)
+		push!(legend_labels, "Upper Control Bound")
+	end
+	if !isnothing(lower_bound_handle)
+		push!(legend_elements, lower_bound_handle)
+		push!(legend_labels, "Lower Control Bound")
+	end
+
+	CairoMakie.Legend(
+		figure[1, control_dimension],
+		legend_elements,
+		legend_labels;
+		framevisible = false,
+		labelsize = legend_label_fontsize,
+		orientation = :vertical,
+		tellheight = false,
+		tellwidth = false,
+		halign = :right,
+		valign = :top,
+	)
+
+	return figure, Tuple(axes)
+end
+
 
 function plot_convergence_plot(;
 	kkt_error_history,

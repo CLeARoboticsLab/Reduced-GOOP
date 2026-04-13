@@ -155,8 +155,8 @@ function solve(
 			# δz .= solution.u
 
 			# Solve δz 
-			# δz .= ∇F \ (-F)
-			δz .= pinv(Matrix(∇F)) * (-F) # minimum-norm sol
+			δz .= ∇F \ (-F)
+			# δz .= pinv(Matrix(∇F)) * (-F) # minimum-norm sol
 
 			# verbose && println("current δx: ", round.(δz[mcp.primal_dims]; digits = 4))
 
