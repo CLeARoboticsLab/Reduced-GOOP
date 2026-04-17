@@ -72,6 +72,8 @@ mutable struct QuasiLagrangianTerm{T <: Symbolics.Num}
 	deriv_order::Int
 end
 
+const _complete_kkt_debug_snapshot = Ref{Any}(nothing)
+
 function Symbolics.gradient(f::QuasiLagrangianTerm, x::AbstractVector{<:Symbolics.Num})
 	next_order = f.deriv_order + 1
 	if f.deriv_order > 2
@@ -307,7 +309,7 @@ function generate_slacked_reduced_kkt_system(
 						],
 					),
 				)
-				
+
 				return (; F, π = ∇L, π_term_groups = [π_terms])
 			else
 				@assert length(h) == 1 "Expected a single preference function at the base level, but got $(length(h))"
@@ -337,7 +339,7 @@ function generate_slacked_reduced_kkt_system(
 						],
 					),
 				)
-				
+
 				return (; F, π = ∇L, π_term_groups = [π_terms])
 			end
 		end
@@ -379,13 +381,13 @@ function generate_slacked_reduced_kkt_system(
 		)
 		push!(Λ, λ̃ₛ...)
 
-			# γ̃ₛ = SymbolicTracingUtils.make_variables(
-			# 	backend,
-			# 	Symbol("γ̃ₛ_$(player)_$(level)"),
-			# 	goop.shared_inequality_dims,
-			# )
-			# push!(Γ, γ̃ₛ...)
-			# push!(Γ_cs_shared_by_player[player], γ̃ₛ...) # 10/25
+		# γ̃ₛ = SymbolicTracingUtils.make_variables(
+		# 	backend,
+		# 	Symbol("γ̃ₛ_$(player)_$(level)"),
+		# 	goop.shared_inequality_dims,
+		# )
+		# push!(Γ, γ̃ₛ...)
+		# push!(Γ_cs_shared_by_player[player], γ̃ₛ...) # 10/25
 
 		if first(is_prioritized_constraint)
 			# Highest priority is a constraint.
@@ -478,7 +480,7 @@ function generate_slacked_reduced_kkt_system(
 				(isnothing(gₛ) ? nothing : σₛ .* γ̃ₛ .- ϵ) # Note: same slacks (not duals) for all levels
 				F
 			]
-			
+
 			return (; F = F̃, π = ∇L, π_term_groups = [π_terms])
 		else
 			@assert length(h) == 1 "Expected a single preference function at the level $(level), but got $(length(h))"
@@ -528,7 +530,7 @@ function generate_slacked_reduced_kkt_system(
 					],
 				),
 			)
-			
+
 			return (; F = F̃, π = vcat(∇L, π), π_term_groups = vcat([π_terms], π_term_groups))
 		end
 	end
@@ -542,7 +544,7 @@ function generate_slacked_reduced_kkt_system(
 		)
 	end
 
-	
+
 	# Flatten the F and π vectors for all players.
 	flattened_F = begin
 		if length(goop.primal_dims) > 1
@@ -554,7 +556,7 @@ function generate_slacked_reduced_kkt_system(
 		end
 	end
 
-	
+
 	# Filter out zeros and add shared constraints.
 	F = Vector{symbolic_type}(
 		filter!(!isnothing,
@@ -583,7 +585,7 @@ function generate_slacked_reduced_kkt_system(
 	interior_point_slack_dims = vcat(idx[Block(3)], idx[Block(9)]) # Σ, σₛ
 	inequality_constraint_dual_dims = vcat(idx[Block(5)], idx[Block(8)]) # Γ, γₛ
 
-	
+
 
 	BuildGOOPKKTSystem(
 		F,
@@ -742,15 +744,25 @@ function generate_slacked_complete_kkt_system(
 				)
 				push!(Γ, γₚ...)
 
-				μₛ = SymbolicTracingUtils.make_variables(
-					backend,
-					Symbol("μₛ_$(player)_$(level)"),
-					length(h),
-				)
-				push!(Γ, μₛ...)
+				# μₛ = SymbolicTracingUtils.make_variables(
+				# 	backend,
+				# 	Symbol("μₛ_$(player)_$(level)"),
+				# 	length(h),
+				# )
+				# push!(Γ, μₛ...)
 
+				# Form partial Lagrangian at this stage.
+				(; xs, us) = unflatten_trajectory(
+					x[Block(player)],
+					4, #state_dimension,
+					2, # control_dimnesion
+				)
+				# L =
+				# 	sum(preference_slack) - γₚ' * (h .+ preference_slack) - μₛ' * preference_slack -
+				# 	(isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
+				# 	(isnothing(fₛ) ? 0 : λₛ' * fₛ) - (isnothing(gₛ) ? 0 : γₛ' * gₛ)
 				L =
-					sum(preference_slack) - γₚ' * (h .+ preference_slack) - μₛ' * preference_slack -
+					sum(preference_slack .^ 2) + sum(sum(u .^ 2) for u in us) - γₚ' * (h .+ preference_slack) -
 					(isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
 					(isnothing(fₛ) ? 0 : λₛ' * fₛ) - (isnothing(gₛ) ? 0 : γₛ' * gₛ)
 
@@ -765,8 +777,8 @@ function generate_slacked_complete_kkt_system(
 							fₛ
 							h .+ preference_slack .- σₚ
 							σₚ .* γₚ .- ϵ
-							preference_slack .- σₚₛ
-							σₚₛ .* μₛ .- ϵ
+							# preference_slack .- σₚₛ
+							# σₚₛ .* μₛ .- ϵ
 							isnothing(g) ? nothing : g .- σ
 							isnothing(g) ? nothing : σ .* γ .- ϵ
 							isnothing(gₛ) ? nothing : gₛ .- σₛ
@@ -779,9 +791,9 @@ function generate_slacked_complete_kkt_system(
 						!isnothing,
 						[
 							h .+ preference_slack
-							preference_slack
 							γₚ
-							μₛ
+							#
+							# μₛ
 							isnothing(g) ? nothing : γ
 							isnothing(gₛ) ? nothing : γₛ
 							isnothing(g) ? nothing : g
@@ -793,6 +805,7 @@ function generate_slacked_complete_kkt_system(
 					vcat(
 						x[Block(player)],
 						preference_slack,
+						γₚ,
 						(isnothing(f) ? [] : λ),
 						(isnothing(fₛ) ? [] : λₛ),
 						(isnothing(g) ? [] : γ),
@@ -904,43 +917,52 @@ function generate_slacked_complete_kkt_system(
 			)
 			push!(Γ, γₚ...)
 
-			μₛ = SymbolicTracingUtils.make_variables(
-				backend,
-				Symbol("μₛ_$(player)_$(level)"),
-				length(h),
-			)
-			push!(Γ, μₛ...)
+			# μₛ = SymbolicTracingUtils.make_variables(
+			# 	backend,
+			# 	Symbol("μₛ_$(player)_$(level)"),
+			# 	length(h),
+			# )
+			# push!(Γ, μₛ...)
 
 			# Form partial Lagrangian at this stage.
-			L = sum(preference_slack) - γₚ' * (h .+ preference_slack) - μₛ' * preference_slack -
+			(; xs, us) = unflatten_trajectory(
+				x[Block(player)],
+				4, #state_dimension,
+				2, # control_dimnesion
+			)
+			# L = sum(preference_slack) + 0.001sum(sum(u .^ 2) for u in us) - γₚ' * (h .+ preference_slack) - μₛ' * preference_slack -λ' * F - γ' * G
+			L = sum(preference_slack .^ 2) + sum(sum(u .^ 2) for u in us) - γₚ' * (h .+ preference_slack) -
 				λ' * F - γ' * G
-
 			∇L = Symbolics.gradient(L, vcat(z, preference_slack))
 
-			F̃ = [
-				∇L #.+ η * vcat(z, preference_slack)
-				h .+ preference_slack .- σₚ
-				σₚ .* γₚ .- ϵ
-				preference_slack .- σₚₛ
-				σₚₛ .* μₛ .- ϵ
-				(isnothing(g) ? nothing : G .- σ)
-				(isnothing(gₛ) ? nothing : σ .* γ .- ϵ)
-				F
-			]
+			F̃ = Vector{symbolic_type}(
+				filter!(
+					!isnothing,
+					[
+						∇L #.+ η * vcat(z, preference_slack)
+						h .+ preference_slack .- σₚ
+						σₚ .* γₚ .- ϵ
+						# preference_slack .- σₚₛ
+						# σₚₛ .* μₛ .- ϵ
+						G .- σ
+						σ .* γ .- ϵ
+						F
+					],
+				),
+			)
 			G̃ = Vector{symbolic_type}(
 				filter!(
 					!isnothing,
 					[
 						h .+ preference_slack
-						preference_slack
 						γₚ
-						μₛ
-						isnothing(g) ? nothing : γ
+						# μₛ
+						γ
 						G
 					],
 				),
 			)
-			return (; F = F̃, G = G̃, z = [z; preference_slack; λ; γ])
+			return (; F = F̃, G = G̃, z = Vector{symbolic_type}([z; preference_slack; λ; γ; γₚ]))
 		else
 			@assert length(h) == 1 "Expected a single preference function at the level $(level), but got $(length(h))"
 			# Current priority is a cost.
@@ -950,9 +972,9 @@ function generate_slacked_complete_kkt_system(
 				filter!(
 					!isnothing,
 					[
-						∇L .+ η * z
-						isnothing(g) ? nothing : G .- σ
-						isnothing(g) ? nothing : σ .* γ .- ϵ
+						∇L #.+ η * z
+						G .- σ
+						σ .* γ .- ϵ
 						F
 					],
 				),
@@ -961,12 +983,12 @@ function generate_slacked_complete_kkt_system(
 				filter!(
 					!isnothing,
 					[
-						isnothing(g) ? nothing : γ
+						γ
 						G
 					],
 				),
 			)
-			return (; F = F̃, G = G̃, z = [z; λ; γ])
+			return (; F = F̃, G = G̃, z = Vector{symbolic_type}([z; λ; γ]))
 		end
 	end
 
@@ -999,8 +1021,6 @@ function generate_slacked_complete_kkt_system(
 		),
 	)
 
-	# 
-
 	# Pack all variables together.
 	z = Vector{symbolic_type}(
 		vcat(x, s, Σ, Λ, Γ),
@@ -1029,3 +1049,12 @@ end
 
 # Helper functions
 make_blocks(vec, b) = (@assert length(vec) % b == 0; BlockArray(vec, fill(b, length(vec) ÷ b)))
+
+function unflatten_trajectory(z, state_dimension, control_dimension)
+	Z = reshape(z, state_dimension + control_dimension, :)
+	X = @view Z[1:state_dimension, :]
+	U = @view Z[(state_dimension+1):end, :]
+	xs = eachcol(X) .|> collect
+	us = eachcol(U) .|> collect
+	(; xs, us)
+end

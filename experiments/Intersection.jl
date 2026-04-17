@@ -27,7 +27,7 @@ end
 
 function default_intersection_initial_states(dynamics_model::Symbol)
 	if dynamics_model === :planar_double_integrator
-		return [-6.0, -1.0, 0.0, 0.0], [1.0, -5.0, 0.0, 0.0]
+		return [-6.0, -1.0, 2.0, 0.0], [1.0, -5.0, 0.0, 1.0]
 	elseif dynamics_model === :unicycle
 		# Unicycle state is (px, py, speed, heading), so pi/2 points upward.
 		return [-6.0, -1.0, 0.0, 0.0], [1.0, -6.0, 1.3, pi / 2]
@@ -212,6 +212,19 @@ function get_setup(
 
 	prioritized_preferences = [
 		[
+
+			# Drive under speed limit 
+			function (z, θ)
+				(; xs, us) = unflatten_trajectory(
+					z[Block(1)],
+					state_dimension,
+					control_dimension,
+				)
+				mapreduce(vcat, 1:length(xs)) do k
+					velocity_limit_constraints(xs[k], dynamics_model; velocity_limit)
+				end
+			end,
+
 			# reach the goal. (highest priority)
 			function (z, θ)
 				(; xs, us) = unflatten_trajectory(
@@ -225,11 +238,11 @@ function get_setup(
 				# 	goal_deviation .+ 0.01
 				# 	-goal_deviation .+ 0.01
 				# ]
-				sum(goal_deviation .^ 2) #+ sum(sum(u .^ 2) for u in us)
+				sum(goal_deviation .^ 2) + 0.1sum(sum(u .^ 2) for u in us)
+				# sum(sum(u .^ 2) for u in us)
 			end,
 		],
 		[
-
 			# reach the goal.
 			function (z, θ)
 				(; xs, us) = unflatten_trajectory(
@@ -243,18 +256,35 @@ function get_setup(
 				# 	goal_deviation .+ 0.01
 				# 	-goal_deviation .+ 0.01
 				# ]
-				sum(goal_deviation .^ 2) #+ sum(sum(u .^ 2) for u in us)
+				sum(goal_deviation .^ 2) + 0.1sum(sum(u .^ 2) for u in us)
+				# sum(sum(u .^ 2) for u in us)
 			end,
-		]]
+
+
+			# Drive under speed limit (highest priority)
+			function (z, θ)
+				(; xs, us) = unflatten_trajectory(
+					z[Block(2)],
+					state_dimension,
+					control_dimension,
+				)
+				mapreduce(vcat, 1:length(xs)) do k
+					velocity_limit_constraints(xs[k], dynamics_model; velocity_limit)
+				end
+			end,
+		],
+	]
 
 	# Specify prioritized constraint [lowest priority, ..., highest priority]
-	is_prioritized_constraint = [[false, false], [false, false]]
-	preferences = [vcat(objectives[player], prioritized_preferences[player]) for player in 1:num_players]
+	# is_prioritized_constraint = [[false, false], [false, false]]
+	# preferences = [vcat(objectives[player], prioritized_preferences[player]) for player in 1:num_players]
 
 	# is_prioritized_constraint = [[false, false], [false, false]]
 	# preferences = [vcat(objectives[player], prioritized_preferences[player]) for player in 1:num_players]
 	# preferences = [vcat(prioritized_preferences[player], objectives[player]) for player in 1:num_players]
 
+	is_prioritized_constraint = [[false, true, false], [false, false, true]]
+	preferences = [vcat(objectives[player], prioritized_preferences[player]) for player in 1:num_players]
 
 	# is_prioritized_constraint = [[false], [false]]
 	# preferences = [[objectives[player]] for player in 1:num_players]
@@ -275,9 +305,9 @@ function get_setup(
 	(; problem, flatten_parameters)
 end
 
-	function demo(;
-		map_end = 7,
-		lane_width = 2,
+function demo(;
+	map_end = 7,
+	lane_width = 2,
 	verbose = false,
 	rng_seed = 123,
 	random_initial_state = true,
@@ -288,11 +318,11 @@ end
 	# Problem setup
 	num_players = 2
 	control_bounds = (; lb = [-2.0, -2.0], ub = [2.0, 2.0])
-	planning_horizon = 6
+	planning_horizon = 4
 	collision_avoidance = 1.3
 	speed_component_limit = 1.5
 	num_instances = 1
-	epsilon_schedule = [0.1*0.5^(j-1) for j in 1:10] # 1:11 
+	epsilon_schedule = [1.0*0.5^(j-1) for j in 1:11] # 1:11 
 	max_inner_iters_schedule = fill(5000, length(epsilon_schedule))
 	perturbation_scale = 0.3
 	dynamics_model = :planar_double_integrator # :unicycle, :planar_double_integrator
@@ -302,7 +332,7 @@ end
 
 	# run_id = "run_$(dynamics_model)_$(goop_version)_1_pref_$(num_instances)_instances_horizon_$(planning_horizon)_linesearch_$(linesearch)_goal_reaching_3"
 
-	run_id = "4_with_warmstart"
+	run_id = "7_add_regularization_C_init_vel2_1.0"
 
 	(; problem, flatten_parameters) = get_setup(
 		num_players;
@@ -329,7 +359,7 @@ end
 	dynamics_dimension = state_dim(dynamics) + control_dim(dynamics)
 	primal_dimension = dynamics_dimension * planning_horizon
 
-		function get_receding_horizon_solution(θ; z₀, ϵ₀, max_inner_iters)
+	function get_receding_horizon_solution(θ; z₀, ϵ₀, max_inner_iters)
 		convergence_log = Dict{String, Any}()
 		elapsed_time = @elapsed begin
 			(; status, z, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters) = QuasiGOOP.solve(
@@ -383,23 +413,23 @@ end
 			"outer_end_total_iterations" => get(convergence_log, "outer_end_total_iterations", Int[]),
 			"outer_end_trace_indices" => get(convergence_log, "outer_end_trace_indices", Int[]),
 		)
-			(; strategies, solution_dict)
-		end
+		(; strategies, solution_dict)
+	end
 
-		function evaluate_preferences_at_solution(x, θ)
-			x_block = BlockArray(collect(x), problem.primal_dims)
-			θ_block = BlockArray(collect(θ), problem.parameter_dims)
-			map(1:problem.num_players) do player
-				map(problem.preferences[player]) do preference
-					preference(x_block, θ_block)
-				end
+	function evaluate_preferences_at_solution(x, θ)
+		x_block = BlockArray(collect(x), problem.primal_dims)
+		θ_block = BlockArray(collect(θ), problem.parameter_dims)
+		map(1:problem.num_players) do player
+			map(problem.preferences[player]) do preference
+				preference(x_block, θ_block)
 			end
 		end
+	end
 
 	obstacle_position = [0.25, 0.15] # placeholder
 	base_initial_state1, base_initial_state2 =
 		default_intersection_initial_states(dynamics_model)
-	goal_position1 = [-1.0, -1.0]
+	goal_position1 = [6.0, -1.0]
 	goal_position2 = [1.0, 6.0]
 
 	run_dir = if debug
@@ -484,9 +514,9 @@ end
 			warmstart_x,
 			warmstart_u,
 		)
-		# Use control-optimal trajectory as warmstart
-		data = load_object("./data/Intersection_open_loop/debug/0_10goal_control/data/problem/solution/solution_dict_instance_1_eps0.0001953125.jld2")
-		warmstart_solution = data["z"][1:(num_players*primal_dimension)]
+		# # Use control-optimal trajectory as warmstart
+		# data = load_object("./data/Intersection_open_loop/debug/0_10goal_control/data/problem/solution/solution_dict_instance_1_eps0.0001953125.jld2")
+		# warmstart_solution = data["z"][1:(num_players*primal_dimension)]
 
 		warmstart_strategies = map(1:num_players) do i
 			start_idx = primal_dimension * (i - 1) + 1
@@ -585,23 +615,23 @@ end
 			),
 		)
 
-			solved_attempts += 1
-			println(
-				"instance $(solved_attempts) total solve time: $(round(instance_total_solve_time_sec; digits = 4)) sec",
-			)
-			println("instance $(solved_attempts) converged preference values by ϵ:")
-			for (ϵ₀, result) in epsilon_results
-				preference_values = evaluate_preferences_at_solution(result.solution_dict["x"][1:(num_players*primal_dimension)], θ)
-				result.solution_dict["preference_values"] = preference_values
-				println("  ϵ₀ = $(ϵ₀):")
-				for (player_idx, player_preferences) in enumerate(preference_values)
-					println("    player $(player_idx): $(player_preferences)")
-				end
+		solved_attempts += 1
+		println(
+			"instance $(solved_attempts) total solve time: $(round(instance_total_solve_time_sec; digits = 4)) sec",
+		)
+		println("instance $(solved_attempts) converged preference values by ϵ:")
+		for (ϵ₀, result) in epsilon_results
+			preference_values = evaluate_preferences_at_solution(result.solution_dict["x"][1:(num_players*primal_dimension)], θ)
+			result.solution_dict["preference_values"] = preference_values
+			println("  ϵ₀ = $(ϵ₀):")
+			for (player_idx, player_preferences) in enumerate(preference_values)
+				println("    player $(player_idx): $(player_preferences)")
 			end
-			JLD2.save_object(
-				joinpath(problem_data_dir, "problem_data_instance_$(solved_attempts).jld2"),
-				instance_problem_data,
-			)
+		end
+		JLD2.save_object(
+			joinpath(problem_data_dir, "problem_data_instance_$(solved_attempts).jld2"),
+			instance_problem_data,
+		)
 		for (ϵ₀, result) in epsilon_results
 			JLD2.save_object(
 				joinpath(
