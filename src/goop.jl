@@ -617,6 +617,7 @@ end
 function generate_slacked_complete_kkt_system(
 	goop::ParametricGOOP;
 	backend = SymbolicTracingUtils.SymbolicsBackend(),
+	use_proximal = true,
 )
 	# Symbolic variables for all primals, parameters, and duals for shared constraints.
 	x =
@@ -627,6 +628,13 @@ function generate_slacked_complete_kkt_system(
 	ϵ = only(SymbolicTracingUtils.make_variables(backend, :ϵ, 1))
 
 	η = only(SymbolicTracingUtils.make_variables(backend, :η, 1))
+
+	# Proximal references and weights (used only in prioritized-constraint stationarity rows).
+	x_ref = use_proximal ?
+		SymbolicTracingUtils.make_variables(backend, :x_ref, sum(goop.primal_dims)) |>
+		to_blockvector(goop.primal_dims) : nothing
+	ρx = use_proximal ? only(SymbolicTracingUtils.make_variables(backend, Symbol("ρx"), 1)) : nothing
+	ρs = use_proximal ? only(SymbolicTracingUtils.make_variables(backend, Symbol("ρs"), 1)) : nothing
 
 	# λₛ = SymbolicTracingUtils.make_variables(backend, :λₛ, goop.shared_equality_dims)
 	# γₛ = SymbolicTracingUtils.make_variables(backend, :γₛ, goop.shared_inequality_dims)
@@ -644,7 +652,24 @@ function generate_slacked_complete_kkt_system(
 
 	# Keep track of all the preference (s) and interior point (σ) slacks we create.
 	s = symbolic_type[]
+	s_ref = symbolic_type[]
+	preference_slack_reference_dims = UnitRange{Int}[]
 	Σ = symbolic_type[]
+
+	make_preference_slack_reference = function (player, level, dim)
+		if !use_proximal
+			return nothing
+		end
+		local_ref = SymbolicTracingUtils.make_variables(
+			backend,
+			Symbol("sref_$(player)_$(level)"),
+			dim,
+		)
+		start_idx = length(s_ref) + 1
+		push!(s_ref, local_ref...)
+		push!(preference_slack_reference_dims, start_idx:length(s_ref))
+		return local_ref
+	end
 
 	# Keep track of all equality constraint duals (λ) that we create.
 	Λ = symbolic_type[]
@@ -722,6 +747,8 @@ function generate_slacked_complete_kkt_system(
 					length(h),
 				)
 				push!(s, preference_slack...)
+				preference_slack_ref =
+					make_preference_slack_reference(player, level, length(h))
 
 				σₚ = SymbolicTracingUtils.make_variables(
 					backend,
@@ -752,27 +779,29 @@ function generate_slacked_complete_kkt_system(
 				# push!(Γ, μₛ...)
 
 				# Form partial Lagrangian at this stage.
-				(; xs, us) = unflatten_trajectory(
-					x[Block(player)],
-					4, #state_dimension,
-					2, # control_dimnesion
-				)
-				# L =
-				# 	sum(preference_slack) - γₚ' * (h .+ preference_slack) - μₛ' * preference_slack -
-				# 	(isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
-				# 	(isnothing(fₛ) ? 0 : λₛ' * fₛ) - (isnothing(gₛ) ? 0 : γₛ' * gₛ)
 				L =
-					sum(preference_slack .^ 2) + sum(sum(u .^ 2) for u in us) - γₚ' * (h .+ preference_slack) -
+					sum(preference_slack .^ 2)  - γₚ' * (h .+ preference_slack) -
 					(isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
 					(isnothing(fₛ) ? 0 : λₛ' * fₛ) - (isnothing(gₛ) ? 0 : γₛ' * gₛ)
 
 				∇L = Symbolics.gradient(L, vcat(x[Block(player)], preference_slack))
+				stationarity = if use_proximal
+					@assert !isnothing(preference_slack_ref)
+					proximal_stationarity =
+						vcat(
+							ρx .* (x[Block(player)] .- x_ref[Block(player)]),
+							ρs .* (preference_slack .- preference_slack_ref),
+						)
+					∇L .+ proximal_stationarity
+				else
+					∇L
+				end
 
 				F = Vector{symbolic_type}(
 					filter!(
 						!isnothing,
 						[
-							∇L #.+ η * vcat(x[Block(player)], preference_slack)
+							stationarity #.+ η * vcat(x[Block(player)], preference_slack)
 							f
 							fₛ
 							h .+ preference_slack .- σₚ
@@ -925,21 +954,30 @@ function generate_slacked_complete_kkt_system(
 			# push!(Γ, μₛ...)
 
 			# Form partial Lagrangian at this stage.
-			(; xs, us) = unflatten_trajectory(
-				x[Block(player)],
-				4, #state_dimension,
-				2, # control_dimnesion
-			)
-			# L = sum(preference_slack) + 0.001sum(sum(u .^ 2) for u in us) - γₚ' * (h .+ preference_slack) - μₛ' * preference_slack -λ' * F - γ' * G
-			L = sum(preference_slack .^ 2) + sum(sum(u .^ 2) for u in us) - γₚ' * (h .+ preference_slack) -
+			preference_slack_ref =
+				make_preference_slack_reference(player, level, length(h))
+			L = sum(preference_slack .^ 2) - γₚ' * (h .+ preference_slack) -
 				λ' * F - γ' * G
 			∇L = Symbolics.gradient(L, vcat(z, preference_slack))
+			stationarity = if use_proximal
+				@assert !isnothing(preference_slack_ref)
+				player_primal_dim = goop.primal_dims[player]
+				remaining_stationarity = zero.(z[(player_primal_dim+1):end])
+				proximal_stationarity = vcat(
+					ρx .* (z[1:player_primal_dim] .- x_ref[Block(player)]),
+					remaining_stationarity,
+					ρs .* (preference_slack .- preference_slack_ref),
+				)
+				∇L .+ proximal_stationarity
+			else
+				∇L
+			end
 
 			F̃ = Vector{symbolic_type}(
 				filter!(
 					!isnothing,
 					[
-						∇L #.+ η * vcat(z, preference_slack)
+						stationarity #.+ η * vcat(z, preference_slack)
 						h .+ preference_slack .- σₚ
 						σₚ .* γₚ .- ϵ
 						# preference_slack .- σₚₛ
@@ -1025,7 +1063,7 @@ function generate_slacked_complete_kkt_system(
 	z = Vector{symbolic_type}(
 		vcat(x, s, Σ, Λ, Γ),
 	)
-	θ = Vector{symbolic_type}(θ)
+	θ_vec = Vector{symbolic_type}(θ)
 
 	idx = blockedrange(length.([x, s, Σ, Λ, Γ]))
 	primal_dims = idx[Block(1)] # x
@@ -1033,10 +1071,82 @@ function generate_slacked_complete_kkt_system(
 	interior_point_slack_dims = vcat(idx[Block(3)]) # Σ
 	inequality_constraint_dual_dims = vcat(idx[Block(5)]) # Γ
 
-	BuildGOOPKKTSystem(
+	if use_proximal
+		x_ref_vec = Vector{symbolic_type}(x_ref)
+		s_ref_vec = Vector{symbolic_type}(s_ref)
+		# Extend symbolic parameters with proximal references and proximal weights.
+		prox_parameter_symbols =
+			Vector{symbolic_type}(vcat(θ_vec, x_ref_vec, s_ref_vec, symbolic_type[ρx, ρs]))
+
+		θ_param_dims = begin
+			offset = 0
+			range = (offset+1):(offset+length(θ_vec))
+			offset += length(θ_vec)
+			(; range, offset)
+		end
+		x_ref_param_dims = begin
+			offset = θ_param_dims.offset
+			range = (offset+1):(offset+length(x_ref_vec))
+			offset += length(x_ref_vec)
+			(; range, offset)
+		end
+		s_ref_param_dims = begin
+			offset = x_ref_param_dims.offset
+			range = (offset+1):(offset+length(s_ref_vec))
+			offset += length(s_ref_vec)
+			(; range, offset)
+		end
+		ρx_param_dim = s_ref_param_dims.offset + 1
+		ρs_param_dim = s_ref_param_dims.offset + 2
+		@assert ρs_param_dim == length(prox_parameter_symbols)
+
+		# Keep metadata for debugging/inspection of flat local slack-reference packing.
+		_complete_kkt_debug_snapshot[] = (
+			preference_slack_reference_dims = preference_slack_reference_dims,
+			preference_slack_reference_dim = length(s_ref_vec),
+		)
+
+		default_x_ref = zeros(length(x_ref_vec))
+		default_s_ref = zeros(length(s_ref_vec))
+
+		augment_proximal_parameters = function (θ_val; x_ref = default_x_ref, s_ref = default_s_ref, ρx = 0.0, ρs = 0.0, kwargs...)
+			@assert length(θ_val) == length(θ_vec)
+			@assert length(x_ref) == length(x_ref_vec)
+			@assert length(s_ref) == length(s_ref_vec)
+			Tv = promote_type(
+				eltype(θ_val),
+				eltype(x_ref),
+				eltype(s_ref),
+				typeof(ρx),
+				typeof(ρs),
+			)
+			θ_aug = Vector{Tv}(undef, length(prox_parameter_symbols))
+			θ_aug[θ_param_dims.range] .= θ_val
+			θ_aug[x_ref_param_dims.range] .= x_ref
+			θ_aug[s_ref_param_dims.range] .= s_ref
+			θ_aug[ρx_param_dim] = ρx
+			θ_aug[ρs_param_dim] = ρs
+			θ_aug
+		end
+
+		return BuildGOOPKKTSystem(
+			F,
+			z,
+			prox_parameter_symbols,
+			ϵ,
+			η,
+			primal_dims,
+			preference_slack_dims,
+			interior_point_slack_dims,
+			inequality_constraint_dual_dims,
+			augment_parameters = augment_proximal_parameters,
+		)
+	end
+
+	return BuildGOOPKKTSystem(
 		F,
 		z,
-		θ,
+		θ_vec,
 		ϵ,
 		η,
 		primal_dims,

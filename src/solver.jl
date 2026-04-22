@@ -58,6 +58,21 @@ function solve(
 	linear_solve_algorithm = LinearSolve.KrylovJL_LSMR(), # LinearSolve.KrylovJL_LSMR(), # KrylovJL_CRAIGMR() for non-square KKT systems
 	convergence_log = nothing,
 	use_linsolve = false,
+	use_proximal = false,
+	ρx₀ = 1e-2,
+	ρs₀ = 0.0,
+	ρx_min = 1e-8,
+	ρx_max = 1e4,
+	ρs_min = 0.0,
+	ρs_max = 1e4,
+	ρ_decrease = 0.5,
+	ρ_increase = 2.0,
+	stable_step_threshold = 0.8,
+	unstable_step_threshold = 1e-2,
+	stable_inner_iter_threshold = 4,
+	stable_min_inner_iters = 2,
+	print_proximal_trace = false,
+	proximal_slack_reference = :current,
 )
 	# z = @something(z₀, begin
 	# 	z = zeros(mcp.variable_dimension)
@@ -81,7 +96,9 @@ function solve(
 	γ = @view z[mcp.inequality_constraint_dual_dims]
 
 	# Set up common memory.
-	∇F = mcp.∇F_z!.result_buffer
+	∇F =
+		hasproperty(mcp.∇F_z!, :result_buffer) ? mcp.∇F_z!.result_buffer :
+		zeros(mcp.kkt_dimension, mcp.variable_dimension)
 	F = zeros(mcp.kkt_dimension)
 	δz = zeros(mcp.variable_dimension)
 	δx = @view δz[Not(vcat(mcp.preference_slack_dims, mcp.interior_point_slack_dims, mcp.inequality_constraint_dual_dims))]
@@ -105,35 +122,160 @@ function solve(
 
 	# Initialize regularization parameter.
 	η = η₀
+	ρx = clamp(ρx₀, ρx_min, ρx_max)
+	ρs = clamp(ρs₀, ρs_min, ρs_max)
+	ρx_start = ρx
+	ρs_start = ρs
 
 	status = :solved
 	linesearch ∈ (:backtracking, :fraction_to_boundary) ||
 		throw(ArgumentError("Unsupported linesearch $(linesearch). Use :backtracking or :fraction_to_boundary."))
+	proximal_slack_reference ∈ (:current, :zero) ||
+		throw(
+			ArgumentError(
+				"Unsupported proximal_slack_reference $(proximal_slack_reference). Use :current or :zero.",
+			),
+		)
 	total_iters = 0
 	inner_iters = 1
 	outer_iters = 1
 	kkt_error = Inf
 	is_fraction_to_boundary_linesearch = (linesearch == :fraction_to_boundary)
 	has_convergence_log = !isnothing(convergence_log)
+	track_proximal_trace = use_proximal && (has_convergence_log || print_proximal_trace)
+	proximal_outer_trace = Any[]
+	proximal_inner_trace = Any[]
+	proximal_rho_update_trace = Any[]
 	kkt_error_history = Float64[]
 	total_iteration_history = Int[]
 	outer_iteration_history = Int[]
 	inner_iteration_history = Int[]
 	outer_end_total_iterations = Int[]
 	outer_end_trace_indices = Int[]
+	call_F! = if use_proximal
+		(result, z; θ, ϵ, η, x_ref, s_ref, ρx, ρs) -> mcp.F!(
+			result,
+			z;
+			θ,
+			ϵ,
+			η,
+			x_ref,
+			s_ref,
+			ρx,
+			ρs,
+		)
+	else
+		(result, z; θ, ϵ, η, x_ref, s_ref, ρx, ρs) -> mcp.F!(result, z; θ, ϵ, η)
+	end
+	call_∇F_z! = if use_proximal
+		(result, z; θ, ϵ, η, x_ref, s_ref, ρx, ρs) -> mcp.∇F_z!(
+			result,
+			z;
+			θ,
+			ϵ,
+			η,
+			x_ref,
+			s_ref,
+			ρx,
+			ρs,
+		)
+	else
+		(result, z; θ, ϵ, η, x_ref, s_ref, ρx, ρs) -> mcp.∇F_z!(result, z; θ, ϵ, η)
+	end
 	while outer_iters < max_outer_iters || iszero(total_iters)
 		inner_iters = 1
 		status = :solved
+		line_search_failed = false
+		linear_solve_failed = false
+		accepted_step_sizes = Float64[]
+		# Keep proximal references fixed throughout the inner Newton loop.
+		x_ref_val = copy(z[mcp.primal_dims])
+		s_ref_val =
+			(use_proximal && proximal_slack_reference === :zero) ?
+			zeros(eltype(z), length(mcp.preference_slack_dims)) :
+			copy(z[mcp.preference_slack_dims])
+		ρx_eval = use_proximal ? ρx : 0.0
+		ρs_eval = use_proximal ? ρs : 0.0
+		if track_proximal_trace
+			outer_entry = (
+				outer_iteration = outer_iters,
+				ρx = ρx_eval,
+				ρs = ρs_eval,
+				x_ref = copy(x_ref_val),
+				s_ref = copy(s_ref_val),
+			)
+			push!(proximal_outer_trace, outer_entry)
+			if print_proximal_trace
+				println("proximal outer iteration $(outer_iters)")
+				println("  ρx = $(outer_entry.ρx), ρs = $(outer_entry.ρs)")
+				println("  x_ref = $(outer_entry.x_ref)")
+				println("  s_ref = $(outer_entry.s_ref)")
+			end
+		end
+		call_F!(
+			F,
+			z;
+			θ,
+			ϵ,
+			η = 0.0,
+			x_ref = x_ref_val,
+			s_ref = s_ref_val,
+			ρx = ρx_eval,
+			ρs = ρs_eval,
+		)
+		outer_residual_start = norm(F, 2)
+		kkt_error = outer_residual_start
 
-		verbose && @info "Outer iteration $(outer_iters): ϵ = $ϵ, kkt_error = $kkt_error"
+		verbose &&
+			@info "Outer iteration $(outer_iters): ϵ = $ϵ, kkt_error = $kkt_error, ρx = $ρx_eval, ρs = $ρs_eval"
 
-		while inner_iters < max_inner_iters &&(kkt_error > tol) # (!is_fraction_to_boundary_linesearch || kkt_error > tol)
+		while inner_iters < max_inner_iters && (kkt_error > tol) # (!is_fraction_to_boundary_linesearch || kkt_error > tol)
 			total_iters += 1
+			if track_proximal_trace
+				inner_entry = (
+					outer_iteration = outer_iters,
+					inner_iteration = inner_iters,
+					total_iteration = total_iters,
+					ρx = ρx_eval,
+					ρs = ρs_eval,
+					x_ref = copy(x_ref_val),
+					s_ref = copy(s_ref_val),
+				)
+				push!(proximal_inner_trace, inner_entry)
+				if print_proximal_trace
+					println(
+						"proximal inner iteration outer=$(outer_iters), inner=$(inner_iters), total=$(total_iters)",
+					)
+					println("  ρx = $(inner_entry.ρx), ρs = $(inner_entry.ρs)")
+					println("  x_ref = $(inner_entry.x_ref)")
+					println("  s_ref = $(inner_entry.s_ref)")
+				end
+			end
 			# Compute the Newton step.
 			# TODO: Can add some adaptive regularization.
 			# TODO: use a linear operator with a lazy gradient computation here.
-			mcp.F!(F, z; θ, ϵ, η = 0.0)
-			mcp.∇F_z!(∇F, z; θ, ϵ, η)
+			call_F!(
+				F,
+				z;
+				θ,
+				ϵ,
+				η = 0.0,
+				x_ref = x_ref_val,
+				s_ref = s_ref_val,
+				ρx = ρx_eval,
+				ρs = ρs_eval,
+			)
+			call_∇F_z!(
+				∇F,
+				z;
+				θ,
+				ϵ,
+				η,
+				x_ref = x_ref_val,
+				s_ref = s_ref_val,
+				ρx = ρx_eval,
+				ρs = ρs_eval,
+			)
 			# @assert all(.!isnan.(F)) "Found NaN in F - aborting!"
 			# @assert all(.!isnan.(∇F)) "Found NaN in ∇F - aborting!"
 			# verbose && println("inner iter $inner_iters, condition number of ∇F = $(cond(collect(∇F),2))")
@@ -155,7 +297,16 @@ function solve(
 			# δz .= solution.u
 
 			# Solve δz 
-			δz .= ∇F \ (-F)
+			try
+				δz .= ∇F \ (-F)
+			catch err
+				if verbose
+					@warn "Linear solve failed. Exiting prematurely." exception = err
+				end
+				status = :failed
+				linear_solve_failed = true
+				break
+			end
 			# δz .= pinv(Matrix(∇F)) * (-F) # minimum-norm sol
 
 			# verbose && println("current δx: ", round.(δz[mcp.primal_dims]; digits = 4))
@@ -167,6 +318,7 @@ function solve(
 				if isnan(α_σ) || isnan(α_γ)
 					verbose && @warn "Fraction-to-boundary linesearch failed. Exiting prematurely."
 					status = :failed
+					line_search_failed = true
 					break
 				end
 
@@ -184,18 +336,39 @@ function solve(
 				F_z = norm(F, 2)
 				z_trial = similar(z)
 				@. z_trial = z + α * δz
-				mcp.F!(F, z_trial; θ, ϵ, η)
+				call_F!(
+					F,
+					z_trial;
+					θ,
+					ϵ,
+					η,
+					x_ref = x_ref_val,
+					s_ref = s_ref_val,
+					ρx = ρx_eval,
+					ρs = ρs_eval,
+				)
 				F_z_next = norm(F, 2)
 				while (F_z_next >= 1.0 * F_z) || (any(@. σ + α * δσ < 0) || any(@. γ + α * δγ < 0))
 					if α < min_stepsize
 						verbose && @warn "Backtracking linesearch failed. Exiting prematurely."
 						status = :failed
+						line_search_failed = true
 						break
 					end
 
 					α *= 0.5 # decay
 					@. z_trial = z + α * δz
-					mcp.F!(F, z_trial; θ, ϵ, η)
+					call_F!(
+						F,
+						z_trial;
+						θ,
+						ϵ,
+						η,
+						x_ref = x_ref_val,
+						s_ref = s_ref_val,
+						ρx = ρx_eval,
+						ρs = ρs_eval,
+					)
 					F_z_next = norm(F, 2)
 				end
 				if status === :failed
@@ -211,6 +384,7 @@ function solve(
 			@. s += α_σ * δs
 			@. σ += α_σ * δσ
 			@. γ += α_γ * δγ
+			push!(accepted_step_sizes, min(α_σ, α_γ))
 
 			kkt_error = norm(F, 2)
 			if has_convergence_log
@@ -223,6 +397,74 @@ function solve(
 			verbose && println("KKT error = $kkt_error")
 
 			inner_iters += 1
+		end
+		inner_iters_used = inner_iters - 1
+		outer_residual_end = kkt_error
+		avg_accepted_step =
+			isempty(accepted_step_sizes) ? 0.0 : sum(accepted_step_sizes) / length(accepted_step_sizes)
+		min_accepted_step = isempty(accepted_step_sizes) ? 0.0 : minimum(accepted_step_sizes)
+		residual_ratio = outer_residual_end / max(outer_residual_start, eps(Float64))
+		residual_decreased_significantly = (inner_iters_used > 0) && (residual_ratio <= 0.5)
+		residual_stagnated_or_increased = (inner_iters_used > 0) && (residual_ratio >= 0.95)
+		no_failure = (status !== :failed) && !line_search_failed && !linear_solve_failed
+		is_stable_outer_iteration =
+			no_failure &&
+			(inner_iters_used >= stable_min_inner_iters) &&
+			(avg_accepted_step >= stable_step_threshold) &&
+			(min_accepted_step >= unstable_step_threshold) &&
+			(inner_iters_used <= stable_inner_iter_threshold) &&
+			residual_decreased_significantly
+		many_tiny_steps =
+			(inner_iters_used > 0) &&
+			((avg_accepted_step < unstable_step_threshold) || (min_accepted_step < unstable_step_threshold))
+		too_many_inner_iterations =
+			(inner_iters_used > 0) &&
+			(inner_iters_used > stable_inner_iter_threshold)
+		is_unstable_outer_iteration =
+			line_search_failed ||
+			linear_solve_failed ||
+			(status === :failed) ||
+			many_tiny_steps ||
+			too_many_inner_iterations ||
+			residual_stagnated_or_increased
+		ρx_before_update = ρx
+		ρs_before_update = ρs
+		stability_state =
+			is_stable_outer_iteration ? :stable :
+			is_unstable_outer_iteration ? :unstable : :neutral
+		if use_proximal
+			if is_stable_outer_iteration
+				ρx = max(ρx_min, ρ_decrease * ρx)
+				ρs = max(ρs_min, ρ_decrease * ρs)
+			elseif is_unstable_outer_iteration
+				ρx = min(ρx_max, ρ_increase * ρx)
+				ρs = min(ρs_max, ρ_increase * ρs)
+			end
+		end
+		if track_proximal_trace
+			ρ_update_entry = (
+				outer_iteration = outer_iters,
+				stability = stability_state,
+				ρx_before = ρx_before_update,
+				ρx_after = ρx,
+				ρs_before = ρs_before_update,
+				ρs_after = ρs,
+				outer_residual_start,
+				outer_residual_end,
+				avg_accepted_step,
+				min_accepted_step,
+				inner_iters_used,
+			)
+			push!(proximal_rho_update_trace, ρ_update_entry)
+			if print_proximal_trace
+				println("proximal outer update $(outer_iters) ($(ρ_update_entry.stability))")
+				println(
+					"  ρx: $(ρ_update_entry.ρx_before) -> $(ρ_update_entry.ρx_after), ρs: $(ρ_update_entry.ρs_before) -> $(ρ_update_entry.ρs_after)",
+				)
+				println(
+					"  residual: $(ρ_update_entry.outer_residual_start) -> $(ρ_update_entry.outer_residual_end), avg_step=$(ρ_update_entry.avg_accepted_step), min_step=$(ρ_update_entry.min_accepted_step)",
+				)
+			end
 		end
 
 		if has_convergence_log &&
@@ -258,6 +500,13 @@ function solve(
 		convergence_log["inner_iteration_history"] = inner_iteration_history
 		convergence_log["outer_end_total_iterations"] = outer_end_total_iterations
 		convergence_log["outer_end_trace_indices"] = outer_end_trace_indices
+		convergence_log["proximal_outer_trace"] = proximal_outer_trace
+		convergence_log["proximal_inner_trace"] = proximal_inner_trace
+		convergence_log["proximal_rho_update_trace"] = proximal_rho_update_trace
+		convergence_log["proximal_start_ρx"] = ρx_start
+		convergence_log["proximal_start_ρs"] = ρs_start
+		convergence_log["proximal_final_ρx"] = ρx
+		convergence_log["proximal_final_ρs"] = ρs
 	end
 
 	(; status, z, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters)

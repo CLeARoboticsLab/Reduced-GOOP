@@ -98,9 +98,9 @@ function get_setup(
 		function (z, θ)
 			(; xs, us) =
 				unflatten_trajectory(z[Block(1)], state_dimension, control_dimension)
-			(; goal_position) = unflatten_parameters(θ[Block(2)]) # Player 2
+			(; goal_position) = unflatten_parameters(θ[Block(1)]) # Player 2
 			goal_deviation = xs[end][1:2] .- goal_position
-			# [
+			# [₩
 			# 	goal_deviation .+ 0.01
 			# 	-goal_deviation .+ 0.01
 			# ]
@@ -238,7 +238,7 @@ function get_setup(
 				# 	goal_deviation .+ 0.01
 				# 	-goal_deviation .+ 0.01
 				# ]
-				sum(goal_deviation .^ 2) + 0.1sum(sum(u .^ 2) for u in us)
+				sum(goal_deviation .^ 2) #+ 0.1sum(sum(u .^ 2) for u in us)
 				# sum(sum(u .^ 2) for u in us)
 			end,
 		],
@@ -256,7 +256,7 @@ function get_setup(
 				# 	goal_deviation .+ 0.01
 				# 	-goal_deviation .+ 0.01
 				# ]
-				sum(goal_deviation .^ 2) + 0.1sum(sum(u .^ 2) for u in us)
+				sum(goal_deviation .^ 2) #+ 0.1sum(sum(u .^ 2) for u in us)
 				# sum(sum(u .^ 2) for u in us)
 			end,
 
@@ -309,9 +309,15 @@ function demo(;
 	map_end = 7,
 	lane_width = 2,
 	verbose = false,
+	print_proximal_trace = false,
 	rng_seed = 123,
 	random_initial_state = true,
 	debug = false,
+	use_proximal = true,
+	proximal_slack_reference = :current,
+	proximal_solver_settings_override = (;),
+	max_outer_iters_override = nothing,
+	run_id_suffix = "",
 )
 	Random.seed!(rng_seed)
 
@@ -329,10 +335,45 @@ function demo(;
 	linesearch = :backtracking # :backtracking, :fraction_to_boundary
 	goop_version = :complete # :complete, :reduced, :quasi 
 	dynamics = build_intersection_dynamics(dynamics_model; dt = 0.5, control_bounds)
-
+	default_proximal_solver_settings = (
+		ρx₀ = 5000.0,
+		ρs₀ = 0.0,
+		ρx_min = 5000.0,
+		ρx_max = 1e8,
+		ρs_min = 0.0,
+		ρs_max = 1e8,
+		ρ_decrease = 1.0,
+		ρ_increase = 2.0,
+		stable_step_threshold = 0.999,
+		unstable_step_threshold = 1e-12,
+		stable_inner_iter_threshold = 5000,
+		stable_min_inner_iters = 100,
+	)
+	# Proximal PDIP settings:
+	# ρx₀, ρs₀: initial proximal weights for primal/state-control block and preference-slack block.
+	# ρx_min/ρx_max, ρs_min/ρs_max: lower/upper clamps applied during adaptive updates.
+	# ρ_decrease: multiplicative factor used on stable outer iterations (typically < 1 to relax proximality).
+	# ρ_increase: multiplicative factor used on unstable outer iterations (typically > 1 to strengthen proximality).
+	# stable_step_threshold: minimum average accepted step size to classify an outer iteration as stable.
+	# unstable_step_threshold: tiny-step threshold used to classify instability.
+	# stable_inner_iter_threshold: maximum inner iterations allowed for a stable classification.
+	# stable_min_inner_iters: minimum inner iterations required before allowing a "stable" rho decrease.
+	proximal_solver_settings =
+		merge(default_proximal_solver_settings, proximal_solver_settings_override)
+	max_outer_iters = isnothing(max_outer_iters_override) ?
+		(use_proximal ? 2 : 2) : max_outer_iters_override
+	proximal_tag = use_proximal ? "with_proximal" : "no_proximal"
 	# run_id = "run_$(dynamics_model)_$(goop_version)_1_pref_$(num_instances)_instances_horizon_$(planning_horizon)_linesearch_$(linesearch)_goal_reaching_3"
-
-	run_id = "7_add_regularization_C_init_vel2_1.0"
+	# run_dir = if debug
+	# 	joinpath("data", "Intersection_open_loop", "debug", run_id)
+	# else
+	# 	joinpath("data", "Intersection_open_loop", "runs", run_id)
+	# end
+	run_id = "10_C_init_vel2_1.0_$(proximal_tag)"
+	if !isempty(run_id_suffix)
+		run_id *= "_$(run_id_suffix)"
+	end
+	run_dir = joinpath("data", "Intersection_open_loop", "proximal PDIP", run_id)
 
 	(; problem, flatten_parameters) = get_setup(
 		num_players;
@@ -346,7 +387,8 @@ function demo(;
 	)
 
 	if goop_version === :complete
-		GOOP_kkt_system = QuasiGOOP.generate_slacked_complete_kkt_system(problem)
+		GOOP_kkt_system =
+			QuasiGOOP.generate_slacked_complete_kkt_system(problem; use_proximal)
 	elseif goop_version === :reduced
 		GOOP_kkt_system = QuasiGOOP.generate_slacked_reduced_kkt_system(problem)
 	else
@@ -359,7 +401,7 @@ function demo(;
 	dynamics_dimension = state_dim(dynamics) + control_dim(dynamics)
 	primal_dimension = dynamics_dimension * planning_horizon
 
-	function get_receding_horizon_solution(θ; z₀, ϵ₀, max_inner_iters)
+	function get_receding_horizon_solution(θ; z₀, ϵ₀, max_inner_iters, ρx_init, ρs_init)
 		convergence_log = Dict{String, Any}()
 		elapsed_time = @elapsed begin
 			(; status, z, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters) = QuasiGOOP.solve(
@@ -370,7 +412,7 @@ function demo(;
 				η₀ = 0.0, # 0.0 for backtracking, 0.001 for fraction-to-boundary
 				ϵ₀, # 5.0
 				max_inner_iters, # 20
-				max_outer_iters = 2, # 2 for backtracking, 50 for fraction-to-boundary
+				max_outer_iters, # 2 for backtracking, 50 for fraction-to-boundary
 				tightening_rate = 0.001, # 0.1
 				loosening_rate = 0.05, # 0.5
 				min_stepsize = 1e-20,
@@ -378,11 +420,21 @@ function demo(;
 				verbose = verbose,
 				convergence_log = convergence_log,
 				linesearch,
-			)
+					use_proximal,
+					proximal_slack_reference,
+					proximal_solver_settings...,
+					ρx₀ = ρx_init,
+					ρs₀ = ρs_init,
+					print_proximal_trace,
+				)
 		end
 		if status == :failed
 			return nothing
 		end
+		ρx_start = get(convergence_log, "proximal_start_ρx", ρx_init)
+		ρs_start = get(convergence_log, "proximal_start_ρs", ρs_init)
+		ρx_final = get(convergence_log, "proximal_final_ρx", ρx_start)
+		ρs_final = get(convergence_log, "proximal_final_ρs", ρs_start)
 
 		strategies = mapreduce(vcat, 1:num_players) do i
 			start_idx = primal_dimension * (i-1) + 1
@@ -412,8 +464,15 @@ function demo(;
 			"inner_iteration_history" => get(convergence_log, "inner_iteration_history", Int[]),
 			"outer_end_total_iterations" => get(convergence_log, "outer_end_total_iterations", Int[]),
 			"outer_end_trace_indices" => get(convergence_log, "outer_end_trace_indices", Int[]),
+			"proximal_outer_trace" => get(convergence_log, "proximal_outer_trace", Any[]),
+			"proximal_inner_trace" => get(convergence_log, "proximal_inner_trace", Any[]),
+			"proximal_rho_update_trace" => get(convergence_log, "proximal_rho_update_trace", Any[]),
+			"proximal_ρx_start" => ρx_start,
+			"proximal_ρs_start" => ρs_start,
+			"proximal_ρx_final" => ρx_final,
+			"proximal_ρs_final" => ρs_final,
 		)
-		(; strategies, solution_dict)
+		(; strategies, solution_dict, ρx_final, ρs_final)
 	end
 
 	function evaluate_preferences_at_solution(x, θ)
@@ -432,11 +491,7 @@ function demo(;
 	goal_position1 = [6.0, -1.0]
 	goal_position2 = [1.0, 6.0]
 
-	run_dir = if debug
-		joinpath("data", "Intersection_open_loop", "debug", run_id)
-	else
-		joinpath("data", "Intersection_open_loop", "runs", run_id)
-	end
+
 	data_dir = joinpath(run_dir, "data")
 	problem_data_dir = joinpath(data_dir, "problem")
 	solution_data_dir = joinpath(problem_data_dir, "solution")
@@ -574,11 +629,22 @@ function demo(;
 
 		epsilon_results = Pair{Float64, Any}[]
 		stage_warmstart = warmstart_solution #warmstart_solution #load_object("stage_warmstart.jld2") #warmstart_solution
+		stage_ρx = use_proximal ? proximal_solver_settings.ρx₀ : 0.0
+		stage_ρs = use_proximal ? proximal_solver_settings.ρs₀ : 0.0
 		solve_sequence_succeeded = true
 		instance_total_solve_time_sec = 0.0
 		for (ϵ₀, max_inner_iters) in zip(epsilon_schedule, max_inner_iters_schedule)
+			stage_ρx_before = stage_ρx
+			stage_ρs_before = stage_ρs
 			result = try
-				get_receding_horizon_solution(θ; z₀ = stage_warmstart, ϵ₀, max_inner_iters)
+				get_receding_horizon_solution(
+					θ;
+					z₀ = stage_warmstart,
+					ϵ₀,
+					max_inner_iters,
+					ρx_init = stage_ρx,
+					ρs_init = stage_ρs,
+				)
 			catch err
 				rethrow(err)
 			end
@@ -591,6 +657,12 @@ function demo(;
 			end
 			push!(epsilon_results, ϵ₀ => result)
 			instance_total_solve_time_sec += result.solution_dict["solve_time_sec"]
+			stage_ρx = result.ρx_final
+			stage_ρs = result.ρs_final
+			use_proximal &&
+				println(
+					"  proximal rho carryover for ϵ₀=$(ϵ₀): ρx $(stage_ρx_before) -> $(stage_ρx), ρs $(stage_ρs_before) -> $(stage_ρs)",
+				)
 
 			# warmstart next solve with the previous solution's primal variables
 			stage_warmstart = result.solution_dict["z"][1:(num_players*primal_dimension)]
@@ -727,6 +799,24 @@ function demo(;
 			"random_initial_state" => random_initial_state,
 			"epsilon_schedule" => epsilon_schedule,
 			"max_inner_iters_schedule" => max_inner_iters_schedule,
+			"max_outer_iters" => max_outer_iters,
+			"use_proximal" => use_proximal,
+			"proximal_solver_settings" =>
+				use_proximal ?
+				Dict(
+					"ρx₀" => proximal_solver_settings.ρx₀,
+					"ρs₀" => proximal_solver_settings.ρs₀,
+					"ρx_min" => proximal_solver_settings.ρx_min,
+					"ρx_max" => proximal_solver_settings.ρx_max,
+					"ρs_min" => proximal_solver_settings.ρs_min,
+					"ρs_max" => proximal_solver_settings.ρs_max,
+					"ρ_decrease" => proximal_solver_settings.ρ_decrease,
+					"ρ_increase" => proximal_solver_settings.ρ_increase,
+					"stable_step_threshold" => proximal_solver_settings.stable_step_threshold,
+					"unstable_step_threshold" => proximal_solver_settings.unstable_step_threshold,
+					"stable_inner_iter_threshold" => proximal_solver_settings.stable_inner_iter_threshold,
+					"stable_min_inner_iters" => proximal_solver_settings.stable_min_inner_iters,
+				) : Dict{String, Any}(),
 			"velocity_limit" => speed_component_limit,
 			"perturbation_scale" => perturbation_scale,
 		),

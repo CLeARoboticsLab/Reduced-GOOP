@@ -45,12 +45,19 @@ function BuildGOOPKKTSystem(
 	interior_point_slack_dims,
 	inequality_constraint_dual_dims;
 	backend_options = (;),
+	augment_parameters = nothing,
 ) where {T <: Union{SymbolicTracingUtils.FD.Node, SymbolicTracingUtils.Symbolics.Num}}
 	if T == SymbolicTracingUtils.FD.Node
 		backend = SymbolicTracingUtils.FastDifferentiationBackend()
 	else
 		@assert T === SymbolicTracingUtils.Symbolics.Num
 		backend = SymbolicTracingUtils.SymbolicsBackend()
+	end
+
+	with_parameters = if isnothing(augment_parameters)
+		(θ; kwargs...) -> θ
+	else
+		(θ; kwargs...) -> augment_parameters(θ; kwargs...)
 	end
 
 	F! = let
@@ -63,8 +70,10 @@ function BuildGOOPKKTSystem(
 			in_place = true,
 			backend_options,
 		)
-
-		(result, z; θ, ϵ, η) -> _F!(result, z, θ, ϵ, η)
+		(result, z; θ, ϵ, η, kwargs...) -> begin
+			θ_eval = with_parameters(θ; kwargs...)
+			_F!(result, z, θ_eval, ϵ, η)
+		end
 	end
 
 	∇F_z! = let
@@ -83,7 +92,10 @@ function BuildGOOPKKTSystem(
 		constant_entries =
 			SymbolicTracingUtils.get_constant_entries(∇F_symbolic, z_symbolic)
 		SymbolicTracingUtils.SparseFunction(
-			(result, z; θ, ϵ, η) -> _∇F!(result, z, θ, ϵ, η),
+			(result, z; θ, ϵ, η, kwargs...) -> begin
+				θ_eval = with_parameters(θ; kwargs...)
+				_∇F!(result, z, θ_eval, ϵ, η)
+			end,
 			rows,
 			cols,
 			size(∇F_symbolic),
