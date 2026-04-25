@@ -520,9 +520,7 @@ end
 
 function plot_convergence_plot(;
 	kkt_error_history,
-	total_iteration_history,
-	outer_end_total_iterations = Int[],
-	outer_end_trace_indices = Int[],
+	total_iters = nothing,
 	show_ylabel = true,
 )
 	axis_label_fontsize = 30
@@ -539,7 +537,12 @@ function plot_convergence_plot(;
 		yticklabelsize = tick_label_fontsize,
 	)
 
-	CairoMakie.lines!(ax, total_iteration_history, kkt_error_history, color = :dodgerblue, linewidth = 4)
+	iteration_axis = collect(1:length(kkt_error_history))
+	if !isnothing(total_iters) && total_iters > 0 && total_iters < length(iteration_axis)
+		iteration_axis = iteration_axis[1:total_iters]
+		kkt_error_history = kkt_error_history[1:total_iters]
+	end
+	CairoMakie.lines!(ax, iteration_axis, kkt_error_history, color = :dodgerblue, linewidth = 4)
 
 	return figure, ax
 end

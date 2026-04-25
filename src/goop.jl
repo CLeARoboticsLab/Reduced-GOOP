@@ -762,9 +762,13 @@ function generate_slacked_complete_kkt_system(
 				# 	(isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
 				# 	(isnothing(fₛ) ? 0 : λₛ' * fₛ) - (isnothing(gₛ) ? 0 : γₛ' * gₛ)
 				L =
-					sum(preference_slack .^ 2) + sum(sum(u .^ 2) for u in us) - γₚ' * (h .+ preference_slack) -
+					sum(preference_slack .^ 2)  - γₚ' * (h .+ preference_slack) -
 					(isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
 					(isnothing(fₛ) ? 0 : λₛ' * fₛ) - (isnothing(gₛ) ? 0 : γₛ' * gₛ)
+				player == 2 && let  # TODO: make this non hard-coded
+					goal_deviation = xs[end][1:2] .- θ[Block(2)][5:6] # Player 2
+					L += 0.03 * sum(goal_deviation .^ 2)
+				end
 
 				∇L = Symbolics.gradient(L, vcat(x[Block(player)], preference_slack))
 
@@ -931,8 +935,7 @@ function generate_slacked_complete_kkt_system(
 				2, # control_dimnesion
 			)
 			# L = sum(preference_slack) + 0.001sum(sum(u .^ 2) for u in us) - γₚ' * (h .+ preference_slack) - μₛ' * preference_slack -λ' * F - γ' * G
-			L = sum(preference_slack .^ 2) + sum(sum(u .^ 2) for u in us) - γₚ' * (h .+ preference_slack) -
-				λ' * F - γ' * G
+			L = sum(preference_slack .^ 2) - γₚ' * (h .+ preference_slack) - λ' * F - γ' * G
 			∇L = Symbolics.gradient(L, vcat(z, preference_slack))
 
 			F̃ = Vector{symbolic_type}(
@@ -1044,7 +1047,6 @@ function generate_slacked_complete_kkt_system(
 		interior_point_slack_dims,
 		inequality_constraint_dual_dims,
 	)
-
 end
 
 # Helper functions

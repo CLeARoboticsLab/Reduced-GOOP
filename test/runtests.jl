@@ -52,17 +52,20 @@ using BlockArrays: BlockArrays, BlockArray, Block, blocks, blocksizes
 
 	GOOP_kkt_system = QuasiGOOP.generate_slacked_reduced_kkt_system(GOOP_trial1)
 	parameter_value = θ
-	(; status, z, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters) = QuasiGOOP.solve(
-		QuasiGOOP.InteriorPoint(),
-		GOOP_kkt_system,
-		parameter_value;
-		z₀ = nothing, #[0.0, 0.0, 0.0, 0.0],
+	options = QuasiGOOP.InteriorPointOptions(;
 		tol = 1e-3,
 		η₀ = 0.0,
 		ϵ₀ = 1e-5, #0.01
 		max_inner_iters = 50,
 		max_outer_iters = 2,
 		min_stepsize = 1e-5,
+	)
+	(; status, z, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters) = QuasiGOOP.solve(
+		QuasiGOOP.InteriorPoint(),
+		GOOP_kkt_system,
+		parameter_value;
+		z₀ = nothing, #[0.0, 0.0, 0.0, 0.0],
+		options,
 	)
 	new_primals = x[1:n]
 	new_objective = J₁(new_primals, 0)

@@ -109,16 +109,19 @@ GOOP_trial1 = QuasiGOOP.ParametricGOOP(
 
 GOOP_kkt_system = QuasiGOOP.generate_slacked_complete_kkt_system(GOOP_trial1)
 parameter_value = θ
+solve_options = QuasiGOOP.InteriorPointOptions(;
+	tol = 1e-3,
+	min_stepsize = 1e-4,
+	max_outer_iters = 50,
+	ϵ₀ = 1e-5,
+	verbose = true,
+)
 status, z_sol_new_goop, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters = QuasiGOOP.solve(
 	QuasiGOOP.InteriorPoint(),
 	GOOP_kkt_system,
 	parameter_value;
-	tol = 1e-3,
-	min_stepsize = 1e-4,
-	max_outer_iters = 50,
 	z₀ = zeros(n),
-	ϵ₀ = 1e-5,
-	verbose = true,
+	options = solve_options,
 )
 @show status
 println("Primal solution: $(z_sol_new_goop[1:n])")

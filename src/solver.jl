@@ -2,6 +2,36 @@ using LinearAlgebra
 
 abstract type SolverType end
 struct InteriorPoint <: SolverType end
+struct PATHSolver <: SolverType end
+
+Base.@kwdef struct InteriorPointOptions
+	tol::Float64 = 1e-4
+	η₀::Float64 = 1e-4
+	ϵ₀::Union{Float64, Symbol} = :auto
+	max_inner_iters::Int = 20
+	max_outer_iters::Int = 50
+	tightening_rate::Float64 = 0.1
+	loosening_rate::Float64 = 0.5
+	min_stepsize::Float64 = 1e-4
+	linesearch::Symbol = :backtracking
+	verbose::Bool = false
+	linear_solve_algorithm::LinearSolve.SciMLLinearSolveAlgorithm = LinearSolve.KrylovJL_LSMR()
+	use_linsolve::Bool = false
+	record_convergence::Bool = false
+end
+
+Base.@kwdef struct PATHOptions
+	tol::Float64 = 1e-4
+	ϵ₀::Union{Float64, Symbol} = :auto
+	verbose::Bool = false
+	cumulative_iteration_limit::Int = 100000
+	proximal_perturbation::Float64 = 1e-2
+	major_iteration_limit::Int = 1000
+	minor_iteration_limit::Int = 2000
+	nms_initial_reference_factor::Int = 50
+	use_basics::Bool = true
+	use_start::Bool = true
+end
 
 """ Basic interior point solver, based on Nocedal & Wright, ch. 19.
 Computes step directions `δz` by solving the relaxed primal-dual system, i.e.
@@ -35,7 +65,7 @@ Keyword arguments:
 	- `linesearch::Symbol = :backtracking`: linesearch mode (`:backtracking` or `:fraction_to_boundary`).
 	- `verbose::Bool = false`: whether to print debug information.
 	- `linear_solve_algorithm::LinearSolve.SciMLLinearSolveAlgorithm`: the linear solve algorithm to use. Any solver from `LinearSolve.jl` that can handle nonsquare system can be used.
-	- `convergence_log::Union{Nothing,AbstractDict} = nothing`: optional output dictionary populated with convergence traces.
+		- `record_convergence::Bool = false`: if true, record and return `kkt_error_history`.
 	- `measure_solve_time::Bool = false`: if true, returns solve time measured with `@btime` (warmup run excludes compile) and includes `solve_time_sec`/`solve_time_ns` fields.
 	- `benchmark_samples::Int = 1`: number of @btime samples when `measure_solve_time = true`.
 	- `benchmark_evals::Int = 1`: number of evals per sample when `measure_solve_time = true`.
@@ -45,20 +75,22 @@ function solve(
 	mcp::GOOPKKTSystem,
 	θ::AbstractVector{<:Real};
 	z₀ = nothing,
-	tol = 1e-4,
-	η₀ = 1e-4,
-	ϵ₀ = :auto,
-	max_inner_iters = 20,
-	max_outer_iters = 50,
-	tightening_rate = 0.1,
-	loosening_rate = 0.5,
-	min_stepsize = 1e-4,
-	linesearch = :backtracking,
-	verbose = false,
-	linear_solve_algorithm = LinearSolve.KrylovJL_LSMR(), # LinearSolve.KrylovJL_LSMR(), # KrylovJL_CRAIGMR() for non-square KKT systems
-	convergence_log = nothing,
-	use_linsolve = false,
+	options::InteriorPointOptions = InteriorPointOptions(),
 )
+	tol = options.tol
+	η₀ = options.η₀
+	ϵ₀ = options.ϵ₀
+	max_inner_iters = options.max_inner_iters
+	max_outer_iters = options.max_outer_iters
+	tightening_rate = options.tightening_rate
+	loosening_rate = options.loosening_rate
+	min_stepsize = options.min_stepsize
+	linesearch = options.linesearch
+	verbose = options.verbose
+	linear_solve_algorithm = options.linear_solve_algorithm
+	use_linsolve = options.use_linsolve
+	record_convergence = options.record_convergence
+
 	# z = @something(z₀, begin
 	# 	z = zeros(mcp.variable_dimension)
 	# 	z[mcp.preference_slack_dims] .= 1.0
@@ -67,9 +99,9 @@ function solve(
 	# 	z
 	# end)
 	z = zeros(mcp.variable_dimension)
-	z[mcp.preference_slack_dims] .= 1.0
-	z[mcp.interior_point_slack_dims] .= 1.0
-	z[mcp.inequality_constraint_dual_dims] .= 1.0
+	z[mcp.preference_slack_dims] .= 1e-3
+	z[mcp.interior_point_slack_dims] .= 1e-3
+	z[mcp.inequality_constraint_dual_dims] .= 1e-3
 
 	if !isnothing(z₀)
 		z[mcp.primal_dims] .= z₀
@@ -114,20 +146,14 @@ function solve(
 	outer_iters = 1
 	kkt_error = Inf
 	is_fraction_to_boundary_linesearch = (linesearch == :fraction_to_boundary)
-	has_convergence_log = !isnothing(convergence_log)
 	kkt_error_history = Float64[]
-	total_iteration_history = Int[]
-	outer_iteration_history = Int[]
-	inner_iteration_history = Int[]
-	outer_end_total_iterations = Int[]
-	outer_end_trace_indices = Int[]
 	while outer_iters < max_outer_iters || iszero(total_iters)
 		inner_iters = 1
 		status = :solved
 
 		verbose && @info "Outer iteration $(outer_iters): ϵ = $ϵ, kkt_error = $kkt_error"
 
-		while inner_iters < max_inner_iters &&(kkt_error > tol) # (!is_fraction_to_boundary_linesearch || kkt_error > tol)
+		while inner_iters < max_inner_iters && (kkt_error > tol) # (!is_fraction_to_boundary_linesearch || kkt_error > tol)
 			total_iters += 1
 			# Compute the Newton step.
 			# TODO: Can add some adaptive regularization.
@@ -213,23 +239,13 @@ function solve(
 			@. γ += α_γ * δγ
 
 			kkt_error = norm(F, 2)
-			if has_convergence_log
+			if record_convergence
 				push!(kkt_error_history, kkt_error)
-				push!(total_iteration_history, total_iters)
-				push!(outer_iteration_history, outer_iters)
-				push!(inner_iteration_history, inner_iters)
 			end
 
 			verbose && println("KKT error = $kkt_error")
 
 			inner_iters += 1
-		end
-
-		if has_convergence_log &&
-		   !isempty(total_iteration_history) &&
-		   (isempty(outer_end_total_iterations) || last(outer_end_total_iterations) != total_iters)
-			push!(outer_end_total_iterations, total_iters)
-			push!(outer_end_trace_indices, length(total_iteration_history))
 		end
 
 		if linesearch == :fraction_to_boundary
@@ -251,16 +267,8 @@ function solve(
 		status = (kkt_error <= tol) ? :solved : :failed
 		# (kkt_error <= tol) && Main.@infiltrate
 	end
-	if has_convergence_log
-		convergence_log["kkt_error_history"] = kkt_error_history
-		convergence_log["total_iteration_history"] = total_iteration_history
-		convergence_log["outer_iteration_history"] = outer_iteration_history
-		convergence_log["inner_iteration_history"] = inner_iteration_history
-		convergence_log["outer_end_total_iterations"] = outer_end_total_iterations
-		convergence_log["outer_end_trace_indices"] = outer_end_trace_indices
-	end
 
-	(; status, z, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters)
+	(; status, z, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters, kkt_error_history)
 end
 
 """Helper function to compute the step size `α` which solves:
@@ -277,4 +285,27 @@ function fraction_to_the_boundary_linesearch(v, δ; max_stepsize = 1.0, τ = 0.9
 	end
 
 	α
+end
+
+
+function solve(
+	::PATHSolver,
+	mcp::GOOPKKTSystem,
+	θ::AbstractVector{<:Real};
+	z₀ = nothing,
+	options::PATHOptions = PATHOptions(),
+)
+	tol = options.tol
+	ϵ₀ = options.ϵ₀
+	verbose = options.verbose
+	cumulative_iteration_limit = options.cumulative_iteration_limit
+	proximal_perturbation = options.proximal_perturbation
+	major_iteration_limit = options.major_iteration_limit
+	minor_iteration_limit = options.minor_iteration_limit
+	nms_initial_reference_factor = options.nms_initial_reference_factor
+	use_basics = options.use_basics
+	use_start = options.use_start
+
+	println("here")
+
 end
