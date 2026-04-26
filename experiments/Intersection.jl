@@ -6,11 +6,9 @@ using TrajectoryGamesBase:
 using CairoMakie: CairoMakie
 using LaTeXStrings: @L_str
 using BlockArrays
-using JLD2, Distributions
-using Random
-using Symbolics
-using NonlinearSolve
-using LinearAlgebra
+using JLD2, Distributions, Random
+using Symbolics, NonlinearSolve, LinearAlgebra
+using ParametricMCPs
 using QuasiGOOP
 
 include(joinpath(@__DIR__, "Plotting.jl"))
@@ -307,7 +305,7 @@ function demo(;
 	else
 		GOOP_kkt_system = QuasiGOOP.generate_slacked_quasi_kkt_system(problem)
 	end
-	complete_GOOP_kkt_system = QuasiGOOP.generate_slacked_complete_kkt_system(problem)
+	# complete_GOOP_kkt_system = QuasiGOOP.generate_slacked_complete_kkt_system(problem)
 
 	println("MCP Dimension: ", GOOP_kkt_system.kkt_dimension)
 	println("variable Dimension: ", GOOP_kkt_system.variable_dimension)
@@ -615,7 +613,7 @@ end # end of demo()
 
 
 function solve_game_instance(
-	kkt_system,
+	kkt_system::Union{QuasiGOOP.GOOPKKTSystem, ParametricMCPs.ParametricMCP},
 	solver,
 	θ,
 	num_players,
@@ -637,19 +635,39 @@ function solve_game_instance(
 			loosening_rate = 0.05,
 			min_stepsize = 1e-20,
 			linesearch = :backtracking, # :backtracking, :fraction_to_boundary
-			verbose,
+			linear_solve_algorithm = QuasiGOOP.LinearSolve.KrylovJL_LSMR(),
+			use_linsolve = false,
 			record_convergence = true,
+			verbose,
 		)
 	else
-		QuasiGOOP.PATHOptions(; tol = 1e-5, ϵ₀, verbose)
+		QuasiGOOP.PATHOptions(;
+			convergence_tolerance = 1e-3, #1e-1
+			ϵ₀,
+			cumulative_iteration_limit = 1000000,
+			proximal_perturbation = 1e-2,
+			major_iteration_limit = 10000,
+			minor_iteration_limit = 15000,
+			nms_initial_reference_factor = 50000,
+			nms_maximum_watchdogs = 8000,
+			nms_memory_size = 16000,
+			nms_mstep_frequency = 5000,
+			lemke_start_type = "advanced",
+			lemke_rank_deficiency_iterations = 50,
+			restart_limit = 120,
+			gradient_step_limit = 120,
+			use_basics = true,
+			use_start = true,
+			verbose,
+		)
 	end
 	elapsed_time = @elapsed begin
 		output = QuasiGOOP.solve(
 			solver, # QuasiGOOP.InteriorPoint(), QuasiGOOP.PATHSolver()
 			kkt_system,
 			θ;
-			options,
 			z₀,
+			options,
 		)
 		if solver isa QuasiGOOP.InteriorPoint
 			(; status, z, x, s, σ, γ, kkt_error, ϵ, total_iters, kkt_error_history) = output
@@ -662,6 +680,7 @@ function solve_game_instance(
 			# TODO: PATH solver does not give total_iters and kkt error history
 		end
 	end
+
 	strategies = extract_player_strategies(
 		x,
 		num_players,
@@ -680,6 +699,7 @@ function solve_game_instance(
 		"total_iters" => total_iters,
 		"kkt_error_history" => kkt_error_history,
 	)
+
 	(; strategies, solution_dict)
 end
 

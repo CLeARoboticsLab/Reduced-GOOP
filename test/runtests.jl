@@ -58,7 +58,14 @@ using BlockArrays: BlockArrays, BlockArray, Block, blocks, blocksizes
 		ϵ₀ = 1e-5, #0.01
 		max_inner_iters = 50,
 		max_outer_iters = 2,
+		tightening_rate = 0.1,
+		loosening_rate = 0.5,
 		min_stepsize = 1e-5,
+		linesearch = :backtracking,
+		verbose = false,
+		linear_solve_algorithm = QuasiGOOP.LinearSolve.KrylovJL_LSMR(),
+		use_linsolve = false,
+		record_convergence = false,
 	)
 	(; status, z, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters) = QuasiGOOP.solve(
 		QuasiGOOP.InteriorPoint(),

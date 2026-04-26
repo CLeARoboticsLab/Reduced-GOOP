@@ -111,10 +111,18 @@ GOOP_kkt_system = QuasiGOOP.generate_slacked_complete_kkt_system(GOOP_trial1)
 parameter_value = θ
 solve_options = QuasiGOOP.InteriorPointOptions(;
 	tol = 1e-3,
+	η₀ = 1e-4,
+	max_inner_iters = 20,
 	min_stepsize = 1e-4,
 	max_outer_iters = 50,
 	ϵ₀ = 1e-5,
+	tightening_rate = 0.1,
+	loosening_rate = 0.5,
+	linesearch = :backtracking,
 	verbose = true,
+	linear_solve_algorithm = QuasiGOOP.LinearSolve.KrylovJL_LSMR(),
+	use_linsolve = false,
+	record_convergence = false,
 )
 status, z_sol_new_goop, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters = QuasiGOOP.solve(
 	QuasiGOOP.InteriorPoint(),

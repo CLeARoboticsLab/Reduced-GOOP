@@ -5,32 +5,39 @@ struct InteriorPoint <: SolverType end
 struct PATHSolver <: SolverType end
 
 Base.@kwdef struct InteriorPointOptions
-	tol::Float64 = 1e-4
-	η₀::Float64 = 1e-4
-	ϵ₀::Union{Float64, Symbol} = :auto
-	max_inner_iters::Int = 20
-	max_outer_iters::Int = 50
-	tightening_rate::Float64 = 0.1
-	loosening_rate::Float64 = 0.5
-	min_stepsize::Float64 = 1e-4
-	linesearch::Symbol = :backtracking
-	verbose::Bool = false
-	linear_solve_algorithm::LinearSolve.SciMLLinearSolveAlgorithm = LinearSolve.KrylovJL_LSMR()
-	use_linsolve::Bool = false
-	record_convergence::Bool = false
+	tol::Float64
+	η₀::Float64
+	ϵ₀::Union{Float64, Symbol}
+	max_inner_iters::Int
+	max_outer_iters::Int
+	tightening_rate::Float64
+	loosening_rate::Float64
+	min_stepsize::Float64
+	linesearch::Symbol
+	linear_solve_algorithm::LinearSolve.SciMLLinearSolveAlgorithm
+	use_linsolve::Bool
+	record_convergence::Bool
+	verbose::Bool
 end
 
 Base.@kwdef struct PATHOptions
-	tol::Float64 = 1e-4
-	ϵ₀::Union{Float64, Symbol} = :auto
-	verbose::Bool = false
-	cumulative_iteration_limit::Int = 100000
-	proximal_perturbation::Float64 = 1e-2
-	major_iteration_limit::Int = 1000
-	minor_iteration_limit::Int = 2000
-	nms_initial_reference_factor::Int = 50
-	use_basics::Bool = true
-	use_start::Bool = true
+	convergence_tolerance::Float64
+	ϵ₀::Union{Float64, Symbol}
+	cumulative_iteration_limit::Int
+	proximal_perturbation::Float64
+	major_iteration_limit::Int
+	minor_iteration_limit::Int
+	nms_initial_reference_factor::Int
+	nms_maximum_watchdogs::Int
+	nms_memory_size::Int
+	nms_mstep_frequency::Int
+	lemke_start_type::String
+	lemke_rank_deficiency_iterations::Int
+	restart_limit::Int
+	gradient_step_limit::Int
+	use_basics::Bool
+	use_start::Bool
+	verbose::Bool
 end
 
 """ Basic interior point solver, based on Nocedal & Wright, ch. 19.
@@ -65,7 +72,7 @@ Keyword arguments:
 	- `linesearch::Symbol = :backtracking`: linesearch mode (`:backtracking` or `:fraction_to_boundary`).
 	- `verbose::Bool = false`: whether to print debug information.
 	- `linear_solve_algorithm::LinearSolve.SciMLLinearSolveAlgorithm`: the linear solve algorithm to use. Any solver from `LinearSolve.jl` that can handle nonsquare system can be used.
-		- `record_convergence::Bool = false`: if true, record and return `kkt_error_history`.
+	- `record_convergence::Bool = false`: if true, record and return `kkt_error_history`.
 	- `measure_solve_time::Bool = false`: if true, returns solve time measured with `@btime` (warmup run excludes compile) and includes `solve_time_sec`/`solve_time_ns` fields.
 	- `benchmark_samples::Int = 1`: number of @btime samples when `measure_solve_time = true`.
 	- `benchmark_evals::Int = 1`: number of evals per sample when `measure_solve_time = true`.
@@ -75,7 +82,7 @@ function solve(
 	mcp::GOOPKKTSystem,
 	θ::AbstractVector{<:Real};
 	z₀ = nothing,
-	options::InteriorPointOptions = InteriorPointOptions(),
+	options::InteriorPointOptions,
 )
 	tol = options.tol
 	η₀ = options.η₀
@@ -86,10 +93,10 @@ function solve(
 	loosening_rate = options.loosening_rate
 	min_stepsize = options.min_stepsize
 	linesearch = options.linesearch
-	verbose = options.verbose
 	linear_solve_algorithm = options.linear_solve_algorithm
 	use_linsolve = options.use_linsolve
 	record_convergence = options.record_convergence
+	verbose = options.verbose
 
 	# z = @something(z₀, begin
 	# 	z = zeros(mcp.variable_dimension)
@@ -290,22 +297,36 @@ end
 
 function solve(
 	::PATHSolver,
-	mcp::GOOPKKTSystem,
+	mcp::ParametricMCP,
 	θ::AbstractVector{<:Real};
 	z₀ = nothing,
-	options::PATHOptions = PATHOptions(),
+	options::PATHOptions,
 )
-	tol = options.tol
-	ϵ₀ = options.ϵ₀
-	verbose = options.verbose
-	cumulative_iteration_limit = options.cumulative_iteration_limit
-	proximal_perturbation = options.proximal_perturbation
-	major_iteration_limit = options.major_iteration_limit
-	minor_iteration_limit = options.minor_iteration_limit
-	nms_initial_reference_factor = options.nms_initial_reference_factor
-	use_basics = options.use_basics
-	use_start = options.use_start
 
 	println("here")
 
+
+	# z, status, info = ParametricMCPs.solve(
+	# 	mcp,
+	# 	[θ, ϵ₀]; # ϵ₀ relaxation parameter is embedded into θ as θ[end] or θ[sum(paramters)+1]
+	# 	z₀,
+	# 	cumulative_iteration_limit = options.cumulative_iteration_limit,
+	# 	proximal_perturbation = options.proximal_perturbation,
+	# 	major_iteration_limit = options.major_iteration_limit,
+	# 	minor_iteration_limit = options.minor_iteration_limit,
+	# 	convergence_tolerance = options.convergence_tolerance, #1e-1
+	# 	nms_initial_reference_factor = options.nms_initial_reference_factor,
+	# 	nms_maximum_watchdogs = options.nms_maximum_watchdogs,
+	# 	nms_memory_size = options.nms_memory_size,
+	# 	nms_mstep_frequency = options.nms_mstep_frequency,
+	# 	lemke_start_type = options.lemke_start_type,
+	# 	lemke_rank_deficiency_iterations = options.lemke_rank_deficiency_iterations,
+	# 	restart_limit = options.restart_limit,
+	# 	gradient_step_limit = options.gradient_step_limit,
+	# 	use_basics = options.use_basics,
+	# 	use_start = options.use_start,
+	# 	verbose = options.verbose,
+	# )
+
+	# (; status, z, info)
 end
