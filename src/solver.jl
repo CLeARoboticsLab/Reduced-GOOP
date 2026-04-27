@@ -303,30 +303,27 @@ function solve(
 	options::PATHOptions,
 )
 
-	println("here")
+	z, status, info = ParametricMCPs.solve(
+		mcp,
+		[θ; options.ϵ₀]; # ϵ₀ relaxation parameter is embedded into θ as θ[end] or θ[sum(paramters)+1]
+		z₀,
+		cumulative_iteration_limit = options.cumulative_iteration_limit,
+		proximal_perturbation = options.proximal_perturbation,
+		major_iteration_limit = options.major_iteration_limit,
+		minor_iteration_limit = options.minor_iteration_limit,
+		convergence_tolerance = options.convergence_tolerance, #1e-1
+		nms_initial_reference_factor = options.nms_initial_reference_factor,
+		nms_maximum_watchdogs = options.nms_maximum_watchdogs,
+		nms_memory_size = options.nms_memory_size,
+		nms_mstep_frequency = options.nms_mstep_frequency,
+		lemke_start_type = options.lemke_start_type,
+		lemke_rank_deficiency_iterations = options.lemke_rank_deficiency_iterations,
+		restart_limit = options.restart_limit,
+		gradient_step_limit = options.gradient_step_limit,
+		use_basics = options.use_basics,
+		use_start = options.use_start,
+		verbose = options.verbose,
+	)
 
-
-	# z, status, info = ParametricMCPs.solve(
-	# 	mcp,
-	# 	[θ, ϵ₀]; # ϵ₀ relaxation parameter is embedded into θ as θ[end] or θ[sum(paramters)+1]
-	# 	z₀,
-	# 	cumulative_iteration_limit = options.cumulative_iteration_limit,
-	# 	proximal_perturbation = options.proximal_perturbation,
-	# 	major_iteration_limit = options.major_iteration_limit,
-	# 	minor_iteration_limit = options.minor_iteration_limit,
-	# 	convergence_tolerance = options.convergence_tolerance, #1e-1
-	# 	nms_initial_reference_factor = options.nms_initial_reference_factor,
-	# 	nms_maximum_watchdogs = options.nms_maximum_watchdogs,
-	# 	nms_memory_size = options.nms_memory_size,
-	# 	nms_mstep_frequency = options.nms_mstep_frequency,
-	# 	lemke_start_type = options.lemke_start_type,
-	# 	lemke_rank_deficiency_iterations = options.lemke_rank_deficiency_iterations,
-	# 	restart_limit = options.restart_limit,
-	# 	gradient_step_limit = options.gradient_step_limit,
-	# 	use_basics = options.use_basics,
-	# 	use_start = options.use_start,
-	# 	verbose = options.verbose,
-	# )
-
-	# (; status, z, info)
+	(; status, z, info)
 end

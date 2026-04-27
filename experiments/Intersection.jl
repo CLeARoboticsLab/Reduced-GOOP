@@ -280,7 +280,7 @@ function demo(;
 	perturbation_scale = 0.3
 	dynamics_model = :planar_double_integrator # :unicycle, :planar_double_integrator
 	goop_version = :complete # :complete, :reduced, :quasi 
-	solver = QuasiGOOP.InteriorPoint() # QuasiGOOP.InteriorPoint(), QuasiGOOP.PATHSolver()
+	solver = QuasiGOOP.PATHSolver() # QuasiGOOP.InteriorPoint(), QuasiGOOP.PATHSolver()
 	dynamics = build_intersection_dynamics(dynamics_model; dt = 0.5, control_bounds)
 
 	# run_id = "run_$(dynamics_model)_$(goop_version)_1_pref_$(num_instances)_instances_horizon_$(planning_horizon)_linesearch_$(linesearch)_goal_reaching_3"
@@ -299,16 +299,22 @@ function demo(;
 	)
 
 	if goop_version === :complete
-		GOOP_kkt_system = QuasiGOOP.generate_slacked_complete_kkt_system(problem)
+		if solver === QuasiGOOP.InteriorPoint()
+			GOOP_kkt_system = QuasiGOOP.generate_slacked_complete_kkt_system(problem)
+			println("[Primal-Dual] KKT Dimension: ", GOOP_kkt_system.kkt_dimension)
+			println("[Primal-Dual] variable Dimension: ", GOOP_kkt_system.variable_dimension)
+		else
+			GOOP_kkt_system = QuasiGOOP.generate_mcp_complete_kkt_system(problem)
+			println("[PATH] MCP Dimension: ", GOOP_kkt_system.problem_size)
+			println("[PATH] Variable Dimension: ", GOOP_kkt_system.lower_bounds |> length)
+		end
 	elseif goop_version === :reduced
 		GOOP_kkt_system = QuasiGOOP.generate_slacked_reduced_kkt_system(problem)
 	else
 		GOOP_kkt_system = QuasiGOOP.generate_slacked_quasi_kkt_system(problem)
 	end
-	# complete_GOOP_kkt_system = QuasiGOOP.generate_slacked_complete_kkt_system(problem)
 
-	println("MCP Dimension: ", GOOP_kkt_system.kkt_dimension)
-	println("variable Dimension: ", GOOP_kkt_system.variable_dimension)
+
 
 	dynamics_dimension = state_dim(dynamics) + control_dim(dynamics)
 	primal_dimension = dynamics_dimension * planning_horizon
@@ -460,7 +466,8 @@ function demo(;
 			# )
 
 			# warmstart next solve with the previous solution's primal variables
-			stage_warmstart = result.solution_dict["z"][1:(num_players*primal_dimension)]
+			# TODO: this needs to be fixed for PATH, use very first warmstart for now
+			stage_warmstart = warmstart_solution # result.solution_dict["z"][1:(num_players*primal_dimension)]
 		end
 		if !solve_sequence_succeeded
 			if !random_initial_state
@@ -498,32 +505,32 @@ function demo(;
 		for (ϵ₀, result) in epsilon_results
 			solution_dict = result.solution_dict
 			# Evaluate preference values at the solved primal trajectory for reporting.
-			preference_values = evaluate_preferences_at_solution(
-				problem,
-				solution_dict["x"][1:(num_players*primal_dimension)],
-				θ,
-			)
-			solution_dict["preference_values"] = preference_values
-			println("  ϵ₀ = $(round(ϵ₀; digits = 5)):")
-			slack_start = 1
-			for (player_idx, player_preferences) in enumerate(preference_values)
-				println("    player $(player_idx): $(format_5dp(player_preferences))")
-				player_slack_dim = sum(
-					length(vec(player_preferences[pref_idx])) for pref_idx in eachindex(player_preferences) if
-																  problem.is_prioritized_constraint[player_idx][pref_idx]
-				)
-				player_slacks = if player_slack_dim > 0
-					solution_dict["s"][
-						slack_start:(slack_start+player_slack_dim-1)
-					]
-				else
-					Float64[]
-				end
-				slack_start += player_slack_dim
-				println("      preference_slacks: $(format_5dp(player_slacks))")
-				# player_idx == 2 && println("	  γ_pref: $(format_5dp(solution_dict["z"][353:368]))") # γₚ_2_2 for current setup
-				# player_idx == 2 && println("	  σ_pref: $(format_5dp(solution_dict["z"][113:128]))") # σₚ_2_2 for current setup
-			end
+			# preference_values = evaluate_preferences_at_solution(
+			# 	problem,
+			# 	solution_dict["x"][1:(num_players*primal_dimension)],
+			# 	θ,
+			# )
+			# solution_dict["preference_values"] = preference_values
+			# println("  ϵ₀ = $(round(ϵ₀; digits = 5)):")
+			# slack_start = 1
+			# for (player_idx, player_preferences) in enumerate(preference_values)
+			# 	println("    player $(player_idx): $(format_5dp(player_preferences))")
+			# 	player_slack_dim = sum(
+			# 		length(vec(player_preferences[pref_idx])) for pref_idx in eachindex(player_preferences) if
+			# 													  problem.is_prioritized_constraint[player_idx][pref_idx]
+			# 	)
+			# 	player_slacks = if player_slack_dim > 0
+			# 		solution_dict["s"][
+			# 			slack_start:(slack_start+player_slack_dim-1)
+			# 		]
+			# 	else
+			# 		Float64[]
+			# 	end
+			# 	slack_start += player_slack_dim
+			# 	println("      preference_slacks: $(format_5dp(player_slacks))")
+			# 	# player_idx == 2 && println("	  γ_pref: $(format_5dp(solution_dict["z"][353:368]))") # γₚ_2_2 for current setup
+			# 	# player_idx == 2 && println("	  σ_pref: $(format_5dp(solution_dict["z"][113:128]))") # σₚ_2_2 for current setup
+			# end
 
 			# Save the full solution dictionary for this epsilon stage.
 			JLD2.save_object(
@@ -534,12 +541,12 @@ function demo(;
 				solution_dict,
 			)
 
-			# Build diagnostic figures from the saved solution payload.
-			convergence_fig, _ = plot_convergence_plot(
-				;
-				kkt_error_history = log10.(solution_dict["kkt_error_history"]),
-				total_iters = solution_dict["total_iters"],
-			)
+			# # Build diagnostic figures from the saved solution payload.
+			# convergence_fig, _ = plot_convergence_plot(
+			# 	;
+			# 	kkt_error_history = log10.(solution_dict["kkt_error_history"]),
+			# 	total_iters = solution_dict["total_iters"],
+			# )
 			trajectory_fig, _ = plot_intersection_trajectories(
 				;
 				map_end,
@@ -561,13 +568,13 @@ function demo(;
 				control_ub = control_bounds.ub,
 			)
 			# Export one figure per metric to keep downstream analysis simple.
-			CairoMakie.save(
-				joinpath(
-					convergence_plots_dir,
-					"convergence_instance_$(solved_attempts)_eps$(ϵ₀).pdf",
-				),
-				convergence_fig,
-			)
+			# CairoMakie.save(
+			# 	joinpath(
+			# 		convergence_plots_dir,
+			# 		"convergence_instance_$(solved_attempts)_eps$(ϵ₀).pdf",
+			# 	),
+			# 	convergence_fig,
+			# )
 			CairoMakie.save(
 				joinpath(
 					trajectory_plots_dir,
@@ -676,8 +683,9 @@ function solve_game_instance(
 			(; z, status, info) = output
 			@show status
 			Int(status) != 1 && return nothing
-			# TODO: Get x,s, kkt error from z for PATH solver as well (currently only supports InteriorPoint).
-			# TODO: PATH solver does not give total_iters and kkt error history
+			# TODO: Get x, s from z
+			kkt_error = info.residual 
+			x = vcat(z[1:24],z[210:233])
 		end
 	end
 
@@ -692,12 +700,12 @@ function solve_game_instance(
 		"strategies" => strategies,
 		"z" => z,
 		"x" => x,
-		"s" => s,
+		# "s" => s,
 		"solve_time_sec" => elapsed_time,
 		"kkt_error" => kkt_error,
-		"ϵ" => ϵ,
-		"total_iters" => total_iters,
-		"kkt_error_history" => kkt_error_history,
+		# "ϵ" => ϵ, # TODO: fix this as well
+		# "total_iters" => total_iters, # TODO: PATH solver does not give total_iters and kkt error history
+		# "kkt_error_history" => kkt_error_history,
 	)
 
 	(; strategies, solution_dict)
