@@ -275,17 +275,18 @@ function demo(;
 	collision_avoidance = 1.3
 	speed_component_limit = 1.5
 	num_instances = 1
-	epsilon_schedule = [1.0*0.5^(j-1) for j in 1:11] # 1:11 
+	epsilon_schedule = [1.0*0.5^(j-1) for j in 1:12] # 1:11 
 	max_inner_iters_schedule = fill(5000, length(epsilon_schedule))
 	perturbation_scale = 0.3
 	dynamics_model = :planar_double_integrator # :unicycle, :planar_double_integrator
 	goop_version = :complete # :complete, :reduced, :quasi 
-	solver = QuasiGOOP.PATHSolver() # QuasiGOOP.InteriorPoint(), QuasiGOOP.PATHSolver()
+	solver = QuasiGOOP.InteriorPoint() # QuasiGOOP.InteriorPoint(), QuasiGOOP.PATHSolver()
 	dynamics = build_intersection_dynamics(dynamics_model; dt = 0.5, control_bounds)
 
 	# run_id = "run_$(dynamics_model)_$(goop_version)_1_pref_$(num_instances)_instances_horizon_$(planning_horizon)_linesearch_$(linesearch)_goal_reaching_3"
 
-	run_id = "0_PATH_init_vel2_1.0"
+	# run_id = "0_PATH_init_vel2_1.0"
+	run_id = "0_PDIP_init_vel2_1.0_w_total_complementarity"
 
 	(; problem, flatten_parameters) = get_setup(
 		num_players;
@@ -314,14 +315,92 @@ function demo(;
 		GOOP_kkt_system = QuasiGOOP.generate_slacked_quasi_kkt_system(problem)
 	end
 
+	function solve_game_instance(θ; z₀, ϵ₀, max_inner_iters)
+		options = if solver isa QuasiGOOP.InteriorPoint
+			QuasiGOOP.InteriorPointOptions(;
+				tol = 1e-5,
+				η₀ = 0.0,
+				ϵ₀,
+				max_inner_iters,
+				max_outer_iters = 2,
+				tightening_rate = 0.001,
+				loosening_rate = 0.05,
+				min_stepsize = 1e-20,
+				linesearch = :backtracking, # :backtracking, :fraction_to_boundary
+				linear_solve_algorithm = QuasiGOOP.LinearSolve.KrylovJL_LSMR(),
+				use_linsolve = false,
+				record_convergence = true,
+				verbose,
+			)
+		else
+			QuasiGOOP.PATHOptions(;
+				convergence_tolerance = 1e-4, #1e-1
+				ϵ₀,
+				cumulative_iteration_limit = 1000000,
+				proximal_perturbation = 1e-2,
+				major_iteration_limit = 10000,
+				minor_iteration_limit = 15000,
+				nms_initial_reference_factor = 50000,
+				nms_maximum_watchdogs = 8000,
+				nms_memory_size = 16000,
+				nms_mstep_frequency = 5000,
+				lemke_start_type = "advanced",
+				lemke_rank_deficiency_iterations = 50,
+				restart_limit = 120,
+				gradient_step_limit = 120,
+				use_basics = true,
+				use_start = true,
+				verbose,
+			)
+		end
+		elapsed_time = @elapsed begin
+			output = QuasiGOOP.solve(
+				solver, # QuasiGOOP.InteriorPoint(), QuasiGOOP.PATHSolver()
+				GOOP_kkt_system,
+				θ;
+				z₀,
+				options,
+			)
+			if solver isa QuasiGOOP.InteriorPoint
+				(; status, z, x, s, σ, γ, kkt_error, ϵ, total_iters, kkt_error_history) = output
+				status == :failed && return nothing
+			else
+				(; status, z, ϵ, info) = output
+				@show status
+				Int(status) != 1 && return nothing
+				kkt_error = info.residual
+				x = z[1:(num_players*primal_dimension)]
+				# println("s^1: z[97:112] = ", z[97:112]) 
+				# println("s^2: z[234:249] = ", z[234:249])
+			end
+		end
 
+		strategies = extract_player_strategies(
+			x,
+			num_players,
+			primal_dimension,
+			dynamics,
+		)
+
+		solution_dict = Dict(
+			"strategies" => strategies,
+			"z" => z,
+			"x" => x,
+			# "s" => s,
+			"solve_time_sec" => elapsed_time,
+			"kkt_error" => kkt_error,
+			"ϵ" => ϵ, 
+			# "total_iters" => total_iters, # TODO: PATH solver does not give total_iters and kkt error history
+			# "kkt_error_history" => kkt_error_history,
+		)
+
+		(; strategies, solution_dict)
+	end
 
 	dynamics_dimension = state_dim(dynamics) + control_dim(dynamics)
 	primal_dimension = dynamics_dimension * planning_horizon
-
 	obstacle_position = [0.25, 0.15] # placeholder
-	base_initial_state1, base_initial_state2 =
-		default_intersection_initial_states(dynamics_model)
+	base_initial_state1, base_initial_state2 = default_intersection_initial_states(dynamics_model)
 	goal_position1 = [6.0, -1.0]
 	goal_position2 = [1.0, 6.0]
 
@@ -414,16 +493,10 @@ function demo(;
 		for (ϵ₀, max_inner_iters) in zip(epsilon_schedule, max_inner_iters_schedule)
 			result = try
 				solve_game_instance(
-					GOOP_kkt_system,
-					solver,
-					θ,
-					num_players,
-					primal_dimension,
-					dynamics;
+					θ;
 					z₀ = stage_warmstart,
 					ϵ₀,
 					max_inner_iters,
-					verbose,
 				)
 			catch err
 				rethrow(err)
@@ -505,32 +578,32 @@ function demo(;
 		for (ϵ₀, result) in epsilon_results
 			solution_dict = result.solution_dict
 			# Evaluate preference values at the solved primal trajectory for reporting.
-			# preference_values = evaluate_preferences_at_solution(
-			# 	problem,
-			# 	solution_dict["x"][1:(num_players*primal_dimension)],
-			# 	θ,
-			# )
-			# solution_dict["preference_values"] = preference_values
-			# println("  ϵ₀ = $(round(ϵ₀; digits = 5)):")
-			# slack_start = 1
-			# for (player_idx, player_preferences) in enumerate(preference_values)
-			# 	println("    player $(player_idx): $(format_5dp(player_preferences))")
-			# 	player_slack_dim = sum(
-			# 		length(vec(player_preferences[pref_idx])) for pref_idx in eachindex(player_preferences) if
-			# 													  problem.is_prioritized_constraint[player_idx][pref_idx]
-			# 	)
-			# 	player_slacks = if player_slack_dim > 0
-			# 		solution_dict["s"][
-			# 			slack_start:(slack_start+player_slack_dim-1)
-			# 		]
-			# 	else
-			# 		Float64[]
-			# 	end
-			# 	slack_start += player_slack_dim
-			# 	println("      preference_slacks: $(format_5dp(player_slacks))")
-			# 	# player_idx == 2 && println("	  γ_pref: $(format_5dp(solution_dict["z"][353:368]))") # γₚ_2_2 for current setup
-			# 	# player_idx == 2 && println("	  σ_pref: $(format_5dp(solution_dict["z"][113:128]))") # σₚ_2_2 for current setup
-			# end
+			preference_values = evaluate_preferences_at_solution(
+				problem,
+				solution_dict["x"][1:(num_players*primal_dimension)],
+				θ,
+			)
+			solution_dict["preference_values"] = preference_values
+			println("  ϵ₀ = $(round(ϵ₀; digits = 5)):")
+			slack_start = 1
+			for (player_idx, player_preferences) in enumerate(preference_values)
+				println("    player $(player_idx): $(format_5dp(player_preferences))")
+				# player_slack_dim = sum(
+				# 	length(vec(player_preferences[pref_idx])) for pref_idx in eachindex(player_preferences) if
+				# 												  problem.is_prioritized_constraint[player_idx][pref_idx]
+				# )
+				# player_slacks = if player_slack_dim > 0
+				# 	solution_dict["s"][
+				# 		slack_start:(slack_start+player_slack_dim-1)
+				# 	]
+				# else
+				# 	Float64[]
+				# end
+				# slack_start += player_slack_dim
+				# println("      preference_slacks: $(format_5dp(player_slacks))")
+				# # player_idx == 2 && println("	  γ_pref: $(format_5dp(solution_dict["z"][353:368]))") # γₚ_2_2 for current setup
+				# # player_idx == 2 && println("	  σ_pref: $(format_5dp(solution_dict["z"][113:128]))") # σₚ_2_2 for current setup
+			end
 
 			# Save the full solution dictionary for this epsilon stage.
 			JLD2.save_object(
@@ -618,98 +691,6 @@ function demo(;
 
 end # end of demo()
 
-
-function solve_game_instance(
-	kkt_system::Union{QuasiGOOP.GOOPKKTSystem, ParametricMCPs.ParametricMCP},
-	solver,
-	θ,
-	num_players,
-	primal_dimension,
-	dynamics;
-	z₀,
-	ϵ₀,
-	max_inner_iters,
-	verbose,
-)
-	options = if solver isa QuasiGOOP.InteriorPoint
-		QuasiGOOP.InteriorPointOptions(;
-			tol = 1e-5,
-			η₀ = 0.0,
-			ϵ₀,
-			max_inner_iters,
-			max_outer_iters = 2,
-			tightening_rate = 0.001,
-			loosening_rate = 0.05,
-			min_stepsize = 1e-20,
-			linesearch = :backtracking, # :backtracking, :fraction_to_boundary
-			linear_solve_algorithm = QuasiGOOP.LinearSolve.KrylovJL_LSMR(),
-			use_linsolve = false,
-			record_convergence = true,
-			verbose,
-		)
-	else
-		QuasiGOOP.PATHOptions(;
-			convergence_tolerance = 1e-3, #1e-1
-			ϵ₀,
-			cumulative_iteration_limit = 1000000,
-			proximal_perturbation = 1e-2,
-			major_iteration_limit = 10000,
-			minor_iteration_limit = 15000,
-			nms_initial_reference_factor = 50000,
-			nms_maximum_watchdogs = 8000,
-			nms_memory_size = 16000,
-			nms_mstep_frequency = 5000,
-			lemke_start_type = "advanced",
-			lemke_rank_deficiency_iterations = 50,
-			restart_limit = 120,
-			gradient_step_limit = 120,
-			use_basics = true,
-			use_start = true,
-			verbose,
-		)
-	end
-	elapsed_time = @elapsed begin
-		output = QuasiGOOP.solve(
-			solver, # QuasiGOOP.InteriorPoint(), QuasiGOOP.PATHSolver()
-			kkt_system,
-			θ;
-			z₀,
-			options,
-		)
-		if solver isa QuasiGOOP.InteriorPoint
-			(; status, z, x, s, σ, γ, kkt_error, ϵ, total_iters, kkt_error_history) = output
-			status == :failed && return nothing
-		else
-			(; z, status, info) = output
-			@show status
-			Int(status) != 1 && return nothing
-			# TODO: Get x, s from z
-			kkt_error = info.residual 
-			x = vcat(z[1:24],z[210:233])
-		end
-	end
-
-	strategies = extract_player_strategies(
-		x,
-		num_players,
-		primal_dimension,
-		dynamics,
-	)
-
-	solution_dict = Dict(
-		"strategies" => strategies,
-		"z" => z,
-		"x" => x,
-		# "s" => s,
-		"solve_time_sec" => elapsed_time,
-		"kkt_error" => kkt_error,
-		# "ϵ" => ϵ, # TODO: fix this as well
-		# "total_iters" => total_iters, # TODO: PATH solver does not give total_iters and kkt error history
-		# "kkt_error_history" => kkt_error_history,
-	)
-
-	(; strategies, solution_dict)
-end
 
 
 function build_intersection_dynamics(

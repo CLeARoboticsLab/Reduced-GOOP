@@ -106,9 +106,9 @@ function solve(
 	# 	z
 	# end)
 	z = zeros(mcp.variable_dimension)
-	z[mcp.preference_slack_dims] .= 1e-3
-	z[mcp.interior_point_slack_dims] .= 1e-3
-	z[mcp.inequality_constraint_dual_dims] .= 1e-3
+	z[mcp.preference_slack_dims] .= 1.0
+	z[mcp.interior_point_slack_dims] .= 1.0
+	z[mcp.inequality_constraint_dual_dims] .= 1.0
 
 	if !isnothing(z₀)
 		z[mcp.primal_dims] .= z₀
@@ -325,5 +325,5 @@ function solve(
 		verbose = options.verbose,
 	)
 
-	(; status, z, info)
+	(; status, z, ϵ = options.ϵ₀, info)
 end

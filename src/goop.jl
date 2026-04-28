@@ -698,12 +698,12 @@ function generate_slacked_complete_kkt_system(
 			)
 			push!(Γ, γₛ...)
 
-			σ = SymbolicTracingUtils.make_variables(
-				backend,
-				Symbol("σ_$(player)_$(level)"),
-				goop.inequality_dims[player],
-			)
-			push!(Σ, σ...)
+			# σ = SymbolicTracingUtils.make_variables(
+			# 	backend,
+			# 	Symbol("σ_$(player)_$(level)"),
+			# 	goop.inequality_dims[player],
+			# )
+			# push!(Σ, σ...)
 
 			σₛ = SymbolicTracingUtils.make_variables(
 				backend,
@@ -723,19 +723,19 @@ function generate_slacked_complete_kkt_system(
 				)
 				push!(s, preference_slack...)
 
-				σₚ = SymbolicTracingUtils.make_variables(
-					backend,
-					Symbol("σₚ_$(player)_$(level)"),
-					length(h),
-				)
-				push!(Σ, σₚ...)
+				# σₚ = SymbolicTracingUtils.make_variables(
+				# 	backend,
+				# 	Symbol("σₚ_$(player)_$(level)"),
+				# 	length(h),
+				# )
+				# push!(Σ, σₚ...)
 
-				σₚₛ = SymbolicTracingUtils.make_variables(
-					backend,
-					Symbol("σₚₛ_$(player)_$(level)"),
-					length(h),
-				)
-				push!(Σ, σₚₛ...)
+				# σₚₛ = SymbolicTracingUtils.make_variables(
+				# 	backend,
+				# 	Symbol("σₚₛ_$(player)_$(level)"),
+				# 	length(h),
+				# )
+				# push!(Σ, σₚₛ...)
 
 				γₚ = SymbolicTracingUtils.make_variables(
 					backend,
@@ -765,10 +765,10 @@ function generate_slacked_complete_kkt_system(
 					sum(preference_slack .^ 2) - γₚ' * (h .+ preference_slack) -
 					(isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
 					(isnothing(fₛ) ? 0 : λₛ' * fₛ) - (isnothing(gₛ) ? 0 : γₛ' * gₛ)
-				player == 2 && let  # TODO: make this non hard-coded
-					goal_deviation = xs[end][1:2] .- θ[Block(2)][5:6] # Player 2
-					L += 0.03 * sum(goal_deviation .^ 2)
-				end
+				# player == 2 && let  # TODO: make this non hard-coded
+				# 	goal_deviation = xs[end][1:2] .- θ[Block(2)][5:6] # Player 2
+				# 	L += 0.03 * sum(goal_deviation .^ 2)
+				# end
 
 				∇L = Symbolics.gradient(L, vcat(x[Block(player)], preference_slack))
 
@@ -778,15 +778,14 @@ function generate_slacked_complete_kkt_system(
 						[
 							∇L #.+ η * vcat(x[Block(player)], preference_slack)
 							f
-							fₛ
-							h .+ preference_slack .- σₚ
-							σₚ .* γₚ .- ϵ
+							# h .+ preference_slack .- σₚ
+							# σₚ .* γₚ .- ϵ
 							# preference_slack .- σₚₛ
 							# σₚₛ .* μₛ .- ϵ
-							isnothing(g) ? nothing : g .- σ
-							isnothing(g) ? nothing : σ .* γ .- ϵ
-							isnothing(gₛ) ? nothing : gₛ .- σₛ
-							isnothing(gₛ) ? nothing : σₛ .* γₛ .- ϵ
+							# isnothing(g) ? nothing : g .- σ
+							# isnothing(g) ? nothing : σ .* γ .- ϵ
+							# isnothing(gₛ) ? nothing : gₛ .- σₛ
+							# isnothing(gₛ) ? nothing : σₛ .* γₛ .- ϵ
 						],
 					),
 				)
@@ -796,12 +795,11 @@ function generate_slacked_complete_kkt_system(
 						[
 							h .+ preference_slack
 							γₚ
-							#
+							ϵ - γₚ' * (h .+ preference_slack)
 							# μₛ
 							isnothing(g) ? nothing : γ
-							isnothing(gₛ) ? nothing : γₛ
 							isnothing(g) ? nothing : g
-							isnothing(gₛ) ? nothing : gₛ
+							isnothing(g) ? nothing : ϵ - γ' * g
 						],
 					),
 				)
@@ -829,11 +827,11 @@ function generate_slacked_complete_kkt_system(
 						[
 							∇L #.+ η * x[Block(player)]
 							f
-							fₛ
-							isnothing(g) ? nothing : g .- σ
-							isnothing(g) ? nothing : σ .* γ .- ϵ
-							isnothing(gₛ) ? nothing : gₛ .- σₛ
-							isnothing(gₛ) ? nothing : σₛ .* γₛ .- ϵ
+							# fₛ
+							# isnothing(g) ? nothing : g .- σ
+							# isnothing(g) ? nothing : σ .* γ .- ϵ
+							# isnothing(gₛ) ? nothing : gₛ .- σₛ
+							# isnothing(gₛ) ? nothing : σₛ .* γₛ .- ϵ
 						],
 					),
 				)
@@ -842,9 +840,10 @@ function generate_slacked_complete_kkt_system(
 						!isnothing,
 						[
 							isnothing(g) ? nothing : γ
-							isnothing(gₛ) ? nothing : γₛ
+							# isnothing(gₛ) ? nothing : γₛ
 							isnothing(g) ? nothing : g
-							isnothing(gₛ) ? nothing : gₛ
+							# isnothing(gₛ) ? nothing : gₛ
+							isnothing(g) ? nothing : ϵ - γ' * g
 						],
 					),
 				)
@@ -884,12 +883,12 @@ function generate_slacked_complete_kkt_system(
 		)
 		push!(Γ, γ...)
 
-		σ = SymbolicTracingUtils.make_variables(
-			backend,
-			Symbol("σ_$(player)_$(level)"),
-			length(G),
-		)
-		push!(Σ, σ...)
+		# σ = SymbolicTracingUtils.make_variables(
+		# 	backend,
+		# 	Symbol("σ_$(player)_$(level)"),
+		# 	length(G),
+		# )
+		# push!(Σ, σ...)
 
 		if first(is_prioritized_constraint)
 			# Highest priority is a constraint.
@@ -900,19 +899,19 @@ function generate_slacked_complete_kkt_system(
 			)
 			push!(s, preference_slack...)
 
-			σₚ = SymbolicTracingUtils.make_variables(
-				backend,
-				Symbol("σₚ_$(player)_$(level)"),
-				length(h),
-			)
-			push!(Σ, σₚ...)
+			# σₚ = SymbolicTracingUtils.make_variables(
+			# 	backend,
+			# 	Symbol("σₚ_$(player)_$(level)"),
+			# 	length(h),
+			# )
+			# push!(Σ, σₚ...)
 
-			σₚₛ = SymbolicTracingUtils.make_variables(
-				backend,
-				Symbol("σₚₛ_$(player)_$(level)"),
-				length(h),
-			)
-			push!(Σ, σₚₛ...)
+			# σₚₛ = SymbolicTracingUtils.make_variables(
+			# 	backend,
+			# 	Symbol("σₚₛ_$(player)_$(level)"),
+			# 	length(h),
+			# )
+			# push!(Σ, σₚₛ...)
 
 			γₚ = SymbolicTracingUtils.make_variables(
 				backend,
@@ -943,12 +942,12 @@ function generate_slacked_complete_kkt_system(
 					!isnothing,
 					[
 						∇L #.+ η * vcat(z, preference_slack)
-						h .+ preference_slack .- σₚ
-						σₚ .* γₚ .- ϵ
+						# h .+ preference_slack .- σₚ
+						# σₚ .* γₚ .- ϵ
 						# preference_slack .- σₚₛ
 						# σₚₛ .* μₛ .- ϵ
-						G .- σ
-						σ .* γ .- ϵ
+						# G .- σ
+						# σ .* γ .- ϵ
 						F
 					],
 				),
@@ -959,12 +958,30 @@ function generate_slacked_complete_kkt_system(
 					[
 						h .+ preference_slack
 						γₚ
+						ϵ - γₚ' * (h .+ preference_slack)
 						# μₛ
 						γ
 						G
+						ϵ - γ' * G
 					],
 				),
 			)
+			if level == 1
+				σ_g = SymbolicTracingUtils.make_variables(
+					backend,
+					Symbol("σ_g_$(player)_$(level)"),
+					length(G),
+				)
+				push!(Σ, σ_g...)
+				σₚ = SymbolicTracingUtils.make_variables(
+					backend,
+					Symbol("σₚ_$(player)_$(level)"),
+					length(h),
+				)
+				push!(Σ, σₚ...)
+
+				return (; F = [F̃; h .+ preference_slack .- σₚ; ϵ - γₚ' * (h .+ preference_slack); G .- σ_g; ϵ - γ' * G], G = G̃, z = Vector{symbolic_type}([z; preference_slack; λ; γ; γₚ; σ_g]))
+			end
 			return (; F = F̃, G = G̃, z = Vector{symbolic_type}([z; preference_slack; λ; γ; γₚ]))
 		else
 			@assert length(h) == 1 "Expected a single preference function at the level $(level), but got $(length(h))"
@@ -975,9 +992,9 @@ function generate_slacked_complete_kkt_system(
 				filter!(
 					!isnothing,
 					[
-						∇L #.+ η * z
-						G .- σ
-						σ .* γ .- ϵ
+						∇L
+						# G .- σ
+						# σ .* γ .- ϵ
 						F
 					],
 				),
@@ -988,9 +1005,19 @@ function generate_slacked_complete_kkt_system(
 					[
 						γ
 						G
+						ϵ - γ' * G
 					],
 				),
 			)
+			if level == 1
+				σ_g = SymbolicTracingUtils.make_variables(
+					backend,
+					Symbol("σ_g_$(player)_$(level)"),
+					length(G),
+				)
+				push!(Σ, σ_g...)
+				return (; F = [F̃; G .- σ_g; ϵ - γ' * G], G = G̃, z = Vector{symbolic_type}([z; λ; γ; σ_g]))
+			end
 			return (; F = F̃, G = G̃, z = Vector{symbolic_type}([z; λ; γ]))
 		end
 	end
@@ -1064,10 +1091,10 @@ function generate_mcp_complete_kkt_system(
 	x =
 		SymbolicTracingUtils.make_variables(backend, :x, sum(goop.primal_dims)) |>
 		to_blockvector(goop.primal_dims)
-	θ = 
+	θ =
 		SymbolicTracingUtils.make_variables(backend, :θ, sum(vcat(goop.parameter_dims, [1]))) |>
 		to_blockvector(vcat(goop.parameter_dims, [1]))
-	ϵ = θ[sum(goop.parameter_dims) + 1] # Store the relaxation parameter as the last element of θ.
+	ϵ = θ[sum(goop.parameter_dims)+1] # Store the relaxation parameter as the last element of θ.
 
 	symbolic_type = eltype(x)
 
@@ -1153,6 +1180,8 @@ function generate_mcp_complete_kkt_system(
 						[
 							∇L
 							f
+							ϵ .- γₚ .* (h .+ preference_slack)
+							isnothing(g) ? nothing : ϵ .- γ .* g
 						],
 					),
 				)
@@ -1162,13 +1191,13 @@ function generate_mcp_complete_kkt_system(
 						[
 							h .+ preference_slack
 							γₚ
-							ϵ - γₚ' * (h .+ preference_slack)
+							# ϵ - γₚ' * (h .+ preference_slack)
 							# preference_slack
 							# μₛ
 							# ϵ - preference_slack .* μₛ
 							isnothing(g) ? nothing : g
 							isnothing(g) ? nothing : γ
-							isnothing(g) ? nothing : ϵ - γ' * g
+							# isnothing(g) ? nothing : ϵ - γ' * g
 						],
 					),
 				)
@@ -1193,6 +1222,7 @@ function generate_mcp_complete_kkt_system(
 						[
 							∇L
 							f
+							isnothing(g) ? nothing : ϵ .- γ .* g
 						],
 					),
 				)
@@ -1202,7 +1232,7 @@ function generate_mcp_complete_kkt_system(
 						[
 							isnothing(g) ? nothing : g
 							isnothing(g) ? nothing : γ
-							isnothing(g) ? nothing : ϵ - γ' * g
+							# isnothing(g) ? nothing : ϵ - γ' * g
 						],
 					),
 				)
@@ -1267,53 +1297,50 @@ function generate_mcp_complete_kkt_system(
 			L = sum(preference_slack .^ 2) - γₚ' * (h .+ preference_slack) - λ' * F - γ' * G
 			∇L = Symbolics.gradient(L, vcat(z, preference_slack))
 
-			F̃ = Vector{symbolic_type}([∇L; F])
+			F̃ = Vector{symbolic_type}([
+				∇L
+				F
+				ϵ .- γₚ .* (h .+ preference_slack)
+				ϵ .- γ .* G
+			])
 			G̃ = Vector{symbolic_type}([
 				h .+ preference_slack # h(x) + s ≥ 0
 				γₚ
-				ϵ - γₚ' * (h .+ preference_slack)
+				# ϵ - γₚ' * (h .+ preference_slack)
 				# preference_slack 		# s ≥ 0
 				# μₛ
 				# ϵ - preference_slack .* μₛ
 				G
 				γ
-				ϵ - γ' * G
-			]
-			)
-			level == 1 && return (; F = F̃, G = [G; h .+ preference_slack], z = Vector{symbolic_type}([z; preference_slack; λ; γ; γₚ]))
+				# ϵ - γ' * G
+			])
+			# level == 1 && return (; F = F̃, G = [G; h .+ preference_slack], z = Vector{symbolic_type}([z; preference_slack; λ; γ; γₚ]))
+			level == 1 && return (; F = [∇L; F], G = [G; h .+ preference_slack], z = Vector{symbolic_type}([z; preference_slack; λ; γ; γₚ]))
 			return (; F = F̃, G = G̃, z = Vector{symbolic_type}([z; preference_slack; λ; γ; γₚ]))
 		else
 			@assert length(h) == 1 "Expected a single preference function at the level $(level), but got $(length(h))"
 			# Current priority is a cost.
 			L = h - λ' * F - γ' * G
 			∇L = Symbolics.gradient(L, z)
-			F̃ = Vector{symbolic_type}(
-				filter!(
-					!isnothing,
-					[
-						∇L
-						F
-					],
-				),
-			)
-			G̃ = Vector{symbolic_type}(
-				filter!(
-					!isnothing,
-					[
-						γ
-						G
-						ϵ - γ' * G
-					],
-				),
-			)
-			level == 1 && return (; F = F̃, G = G, z = Vector{symbolic_type}([z; λ; γ]))
+			F̃ = Vector{symbolic_type}([
+				∇L
+				F
+				ϵ .- γ .* G
+			])
+			G̃ = Vector{symbolic_type}([
+				γ
+				G
+				# ϵ - γ' * G
+			])
+			# level == 1 && return (; F = F̃, G = G, z = Vector{symbolic_type}([z; λ; γ]))
+			level == 1 && return (; F = [∇L; F], G = G, z = Vector{symbolic_type}([z; λ; γ]))
 			return (; F = F̃, G = G̃, z = Vector{symbolic_type}([z; λ; γ]))
 		end
 	end
 
 	# Recursively generate and stack player-wise KKT conditions.
 	stacked_kkt = let
-		per_player = map(1:goop.num_players) do player
+		kkt_per_player = map(1:goop.num_players) do player
 			(; F, G, z) = construct_player_kkt_conditions(
 				goop.preferences[player],
 				goop.is_prioritized_constraint[player];
@@ -1322,17 +1349,30 @@ function generate_mcp_complete_kkt_system(
 			F_mcp = Vector{symbolic_type}(vcat(F, G))
 			z̅ = vcat(fill(Inf, length(F)), fill(Inf, length(G)))
 			z̲ = vcat(fill(-Inf, length(F)), fill(0.0, length(G)))
+
 			(; F_mcp, z, z̅, z̲)
 		end
 
-		(
-			F_mcp = Vector{symbolic_type}(vcat((pair.F_mcp for pair in per_player)...)),
-			z = Vector{symbolic_type}(vcat((pair.z for pair in per_player)...)),
-			z̅ = vcat((pair.z̅ for pair in per_player)...),
-			z̲ = vcat((pair.z̲ for pair in per_player)...),
+		F_mcp = Vector{symbolic_type}(vcat((pair.F_mcp for pair in kkt_per_player)...))
+		z = Vector{symbolic_type}(vcat((pair.z for pair in kkt_per_player)...))
+		z̅ = vcat((pair.z̅ for pair in kkt_per_player)...)
+		z̲ = vcat((pair.z̲ for pair in kkt_per_player)...)
+
+		# Permute so all primal rows come first.
+		z_lengths = length.(getfield.(kkt_per_player, :z))
+		offsets = cumsum(vcat(0, z_lengths[1:(end-1)]))
+		primal_idx = mapreduce(vcat, 1:goop.num_players) do player
+			(1+offsets[player]):(goop.primal_dims[player]+offsets[player])
+		end
+
+		(;
+			F_mcp = vcat(F_mcp[primal_idx], F_mcp[Not(primal_idx)]),
+			z = vcat(z[primal_idx], z[Not(primal_idx)]),
+			z̅ = vcat(z̅[primal_idx], z̅[Not(primal_idx)]),
+			z̲ = vcat(z̲[primal_idx], z̲[Not(primal_idx)]),
 		)
 	end
-	
+
 	# Collect MCP components from the stacked KKT conditions.
 	F_mcp = stacked_kkt.F_mcp
 	z = stacked_kkt.z
@@ -1340,7 +1380,9 @@ function generate_mcp_complete_kkt_system(
 	z̲ = stacked_kkt.z̲
 
 	# Build and return ParametricMCP.
-	ParametricMCP(F_mcp, z, collect(θ), z̲, z̅; compute_sensitivities = false)
+	Main.@infiltrate
+	θ = Vector{symbolic_type}(θ)
+	ParametricMCP(F_mcp, z, θ, z̲, z̅; compute_sensitivities = false)
 end
 
 # Helper functions
