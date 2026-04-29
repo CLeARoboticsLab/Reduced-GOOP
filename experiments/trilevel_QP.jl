@@ -1,16 +1,16 @@
 using QuasiGOOP
 
-# Trilevel Equality-Constrained Quadratic Program (Toy Example)
-# --------------------------------------------------------------
-#
-# Upper-level problem:
-#   min_{x} (1/2)x' Q₁ x + c₁'x
-#   subject to:
-#       x ∈ argmin_{x} (1/2)x' Q₂ x + c₂' x
-#                         subject to: x ∈ argmin_{x} (1/2)x' Q₃ x + c₃' x
-#                                                       A₃x = b₃
-#
-# --------------------------------------------------------------
+""" Trilevel Equality-Constrained Quadratic Program (Toy Example)
+--------------------------------------------------------------
+
+ Upper-level problem:
+   min_{x} (1/2)x' Q₁ x + c₁'x
+   subject to:#       x ∈ argmin_{x} (1/2)x' Q₂ x + c₂' x
+                         subject to: x ∈ argmin_{x} (1/2)x' Q₃ x + c₃' x
+                                                       A₃x = b₃
+
+ --------------------------------------------------------------
+ """
 n = 4 # x dimension
 m = 2 # equality dimension
 backend = SymbolicTracingUtils.SymbolicsBackend()
@@ -18,9 +18,9 @@ backend = SymbolicTracingUtils.SymbolicsBackend()
 # Problem data
 Q₁ = I(n)
 c₁ = [1.0, 0.0, -1.0, 2.0]
-Q₂ = 2I(n) # [0 0 0 0; 0 1 0 0; 0 0 2 0; 0 0 0 1]
+Q₂ = [0 0 0 0; 0 1 0 0; 0 0 2 0; 0 0 0 1]
 c₂ = [-1.0, 2.0, 0.0, 1.0]
-Q₃ = 3I(n)# -[1 0 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 0]
+Q₃ = -[1 0 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 0]
 c₃ = -[0.5, -0.5, 1.0, 0.0]
 A₃ = [1 0 1 1; 1 0 0 1] # A₃x = b₃
 b₃ = [1.0, 1.0]

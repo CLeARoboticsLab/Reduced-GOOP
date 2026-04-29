@@ -1179,9 +1179,7 @@ function generate_mcp_complete_kkt_system(
 						!isnothing,
 						[
 							∇L
-							f
-							ϵ .- γₚ .* (h .+ preference_slack)
-							isnothing(g) ? nothing : ϵ .- γ .* g
+							isnothing(f) ? nothing : f
 						],
 					),
 				)
@@ -1191,13 +1189,13 @@ function generate_mcp_complete_kkt_system(
 						[
 							h .+ preference_slack
 							γₚ
-							# ϵ - γₚ' * (h .+ preference_slack)
+							ϵ - γₚ' * (h .+ preference_slack)
 							# preference_slack
 							# μₛ
 							# ϵ - preference_slack .* μₛ
 							isnothing(g) ? nothing : g
 							isnothing(g) ? nothing : γ
-							# isnothing(g) ? nothing : ϵ - γ' * g
+							isnothing(g) ? nothing : ϵ - γ' * g
 						],
 					),
 				)
@@ -1205,10 +1203,17 @@ function generate_mcp_complete_kkt_system(
 					vcat(
 						x[Block(player)],
 						preference_slack,
-						γₚ,
 						(isnothing(f) ? [] : λ),
+						γₚ,
 						(isnothing(g) ? [] : γ),
 					),
+				)
+				level == 1 && return (;
+					F,
+					G = Vector{symbolic_type}(
+						isnothing(g) ? h .+ preference_slack : [h .+ preference_slack; g],
+					),
+					z,
 				)
 				return (; F, G, z)
 			else
@@ -1221,8 +1226,7 @@ function generate_mcp_complete_kkt_system(
 						!isnothing,
 						[
 							∇L
-							f
-							isnothing(g) ? nothing : ϵ .- γ .* g
+							isnothing(f) ? nothing : f
 						],
 					),
 				)
@@ -1232,7 +1236,7 @@ function generate_mcp_complete_kkt_system(
 						[
 							isnothing(g) ? nothing : g
 							isnothing(g) ? nothing : γ
-							# isnothing(g) ? nothing : ϵ - γ' * g
+							isnothing(g) ? nothing : ϵ - γ' * g
 						],
 					),
 				)
@@ -1242,6 +1246,11 @@ function generate_mcp_complete_kkt_system(
 						(isnothing(f) ? [] : λ),
 						(isnothing(g) ? [] : γ),
 					),
+				)
+				level == 1 && return (;
+					F,
+					G = isnothing(g) ? symbolic_type[] : Vector{symbolic_type}(g),
+					z,
 				)
 				return (; F, G, z)
 			end
@@ -1300,23 +1309,24 @@ function generate_mcp_complete_kkt_system(
 			F̃ = Vector{symbolic_type}([
 				∇L
 				F
-				ϵ .- γₚ .* (h .+ preference_slack)
-				ϵ .- γ .* G
 			])
 			G̃ = Vector{symbolic_type}([
 				h .+ preference_slack # h(x) + s ≥ 0
 				γₚ
-				# ϵ - γₚ' * (h .+ preference_slack)
+				ϵ - γₚ' * (h .+ preference_slack)
 				# preference_slack 		# s ≥ 0
 				# μₛ
 				# ϵ - preference_slack .* μₛ
 				G
 				γ
-				# ϵ - γ' * G
+				ϵ - γ' * G
 			])
-			# level == 1 && return (; F = F̃, G = [G; h .+ preference_slack], z = Vector{symbolic_type}([z; preference_slack; λ; γ; γₚ]))
-			level == 1 && return (; F = [∇L; F], G = [G; h .+ preference_slack], z = Vector{symbolic_type}([z; preference_slack; λ; γ; γₚ]))
-			return (; F = F̃, G = G̃, z = Vector{symbolic_type}([z; preference_slack; λ; γ; γₚ]))
+			level == 1 && return (; 
+				F = F̃, 
+				G = [h .+ preference_slack; G], 
+				z = [z; preference_slack; λ; γₚ; γ],
+			)
+			return (; F = F̃, G = G̃, z = [z; preference_slack; λ; γₚ; γ])
 		else
 			@assert length(h) == 1 "Expected a single preference function at the level $(level), but got $(length(h))"
 			# Current priority is a cost.
@@ -1325,16 +1335,18 @@ function generate_mcp_complete_kkt_system(
 			F̃ = Vector{symbolic_type}([
 				∇L
 				F
-				ϵ .- γ .* G
 			])
 			G̃ = Vector{symbolic_type}([
 				γ
 				G
-				# ϵ - γ' * G
+				ϵ - γ' * G
 			])
-			# level == 1 && return (; F = F̃, G = G, z = Vector{symbolic_type}([z; λ; γ]))
-			level == 1 && return (; F = [∇L; F], G = G, z = Vector{symbolic_type}([z; λ; γ]))
-			return (; F = F̃, G = G̃, z = Vector{symbolic_type}([z; λ; γ]))
+			level == 1 && return (;
+				F = F̃, 
+				G = G, 
+				z = [z; λ; γ],
+			)
+			return (; F = F̃, G = G̃, z = [z; λ; γ])
 		end
 	end
 
@@ -1380,7 +1392,6 @@ function generate_mcp_complete_kkt_system(
 	z̲ = stacked_kkt.z̲
 
 	# Build and return ParametricMCP.
-	Main.@infiltrate
 	θ = Vector{symbolic_type}(θ)
 	ParametricMCP(F_mcp, z, θ, z̲, z̅; compute_sensitivities = false)
 end

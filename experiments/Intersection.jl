@@ -275,18 +275,18 @@ function demo(;
 	collision_avoidance = 1.3
 	speed_component_limit = 1.5
 	num_instances = 1
-	epsilon_schedule = [1.0*0.5^(j-1) for j in 1:12] # 1:11 
+	epsilon_schedule = [1.0*0.5^(j-1) for j in 1:13] # 1:11 
 	max_inner_iters_schedule = fill(5000, length(epsilon_schedule))
 	perturbation_scale = 0.3
 	dynamics_model = :planar_double_integrator # :unicycle, :planar_double_integrator
 	goop_version = :complete # :complete, :reduced, :quasi 
-	solver = QuasiGOOP.InteriorPoint() # QuasiGOOP.InteriorPoint(), QuasiGOOP.PATHSolver()
+	solver = QuasiGOOP.PATHSolver() # QuasiGOOP.InteriorPoint(), QuasiGOOP.PATHSolver()
 	dynamics = build_intersection_dynamics(dynamics_model; dt = 0.5, control_bounds)
 
 	# run_id = "run_$(dynamics_model)_$(goop_version)_1_pref_$(num_instances)_instances_horizon_$(planning_horizon)_linesearch_$(linesearch)_goal_reaching_3"
 
-	# run_id = "0_PATH_init_vel2_1.0"
-	run_id = "0_PDIP_init_vel2_1.0_w_total_complementarity"
+	run_id = "0_PATH_init_vel2_1.0"
+	# run_id = "0_PDIP_init_vel2_1.0_w_total_complementarity"
 
 	(; problem, flatten_parameters) = get_setup(
 		num_players;
@@ -370,8 +370,6 @@ function demo(;
 				Int(status) != 1 && return nothing
 				kkt_error = info.residual
 				x = z[1:(num_players*primal_dimension)]
-				# println("s^1: z[97:112] = ", z[97:112]) 
-				# println("s^2: z[234:249] = ", z[234:249])
 			end
 		end
 
