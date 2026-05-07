@@ -279,7 +279,7 @@ function demo(;
 	max_inner_iters_schedule = fill(5000, length(epsilon_schedule))
 	perturbation_scale = 0.3
 	dynamics_model = :planar_double_integrator # :unicycle, :planar_double_integrator
-	goop_version = :complete # :complete, :reduced, :quasi 
+	goop_version = :reduced # :complete, :reduced, :quasi 
 	solver = QuasiGOOP.PATHSolver() # QuasiGOOP.InteriorPoint(), QuasiGOOP.PATHSolver()
 	dynamics = build_intersection_dynamics(dynamics_model; dt = 0.5, control_bounds)
 
@@ -299,20 +299,30 @@ function demo(;
 		lane_width,
 	)
 
-	if goop_version === :complete
-		if solver === QuasiGOOP.InteriorPoint()
-			GOOP_kkt_system = QuasiGOOP.generate_slacked_complete_kkt_system(problem)
-			println("[Primal-Dual] KKT Dimension: ", GOOP_kkt_system.kkt_dimension)
-			println("[Primal-Dual] variable Dimension: ", GOOP_kkt_system.variable_dimension)
-		else
-			GOOP_kkt_system = QuasiGOOP.generate_mcp_complete_kkt_system(problem)
-			println("[PATH] MCP Dimension: ", GOOP_kkt_system.problem_size)
-			println("[PATH] Variable Dimension: ", GOOP_kkt_system.lower_bounds |> length)
-		end
-	elseif goop_version === :reduced
-		GOOP_kkt_system = QuasiGOOP.generate_slacked_reduced_kkt_system(problem)
+	kkt_generators = if solver isa QuasiGOOP.InteriorPoint
+		Dict(
+			:complete => QuasiGOOP.generate_slacked_complete_kkt_system,
+			:reduced => QuasiGOOP.generate_slacked_reduced_kkt_system,
+			:quasi => QuasiGOOP.generate_slacked_quasi_kkt_system,
+		)
 	else
-		GOOP_kkt_system = QuasiGOOP.generate_slacked_quasi_kkt_system(problem)
+		Dict(
+			:complete => QuasiGOOP.generate_mcp_complete_kkt_system,
+			:reduced => QuasiGOOP.generate_mcp_reduced_kkt_system,
+			# :quasi => QuasiGOOP.generate_mcp_quasi_kkt_system,
+		)
+	end
+
+	GOOP_kkt_system = get(kkt_generators, goop_version, nothing) # return nothing if goop_version key is not found
+	isnothing(GOOP_kkt_system) && error("Unknown GOOP version: $(goop_version)")
+	GOOP_kkt_system = GOOP_kkt_system(problem)
+
+	if solver isa QuasiGOOP.InteriorPoint
+		println("[Primal-Dual] KKT Dimension: ", GOOP_kkt_system.kkt_dimension)
+		println("[Primal-Dual] variable Dimension: ", GOOP_kkt_system.variable_dimension)
+	else
+		println("[PATH] MCP Dimension: ", GOOP_kkt_system.problem_size)
+		println("[PATH] Variable Dimension: ", length(GOOP_kkt_system.lower_bounds))
 	end
 
 	function solve_game_instance(θ; z₀, ϵ₀, max_inner_iters)
@@ -387,7 +397,7 @@ function demo(;
 			# "s" => s,
 			"solve_time_sec" => elapsed_time,
 			"kkt_error" => kkt_error,
-			"ϵ" => ϵ, 
+			"ϵ" => ϵ,
 			# "total_iters" => total_iters, # TODO: PATH solver does not give total_iters and kkt error history
 			# "kkt_error_history" => kkt_error_history,
 		)

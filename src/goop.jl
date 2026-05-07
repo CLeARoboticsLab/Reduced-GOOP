@@ -73,6 +73,7 @@ mutable struct QuasiLagrangianTerm{T <: Symbolics.Num}
 end
 
 const _complete_kkt_debug_snapshot = Ref{Any}(nothing)
+const _reduced_kkt_debug_snapshot = Ref{Any}(nothing)
 
 function Symbolics.gradient(f::QuasiLagrangianTerm, x::AbstractVector{<:Symbolics.Num})
 	next_order = f.deriv_order + 1
@@ -169,12 +170,12 @@ function generate_slacked_reduced_kkt_system(
 
 	# Keep track of all equality constraint duals (λ) that we create.
 	Λ = symbolic_type[]
-	Φ = symbolic_type[] # 10/25: store duals for complementarity slackness 
+	Φ = symbolic_type[] # 10/25: store duals for complementarity slackness
 	Φₛ = symbolic_type[] # store duals for complementarity slackness for shared constraints
 
 	# Keep track of all inequality constraint duals (γ) that we create.
 	Γ = symbolic_type[]
-	Γ_cs_by_player = [symbolic_type[] for _ in 1:goop.num_players] # 10/25: store duals for complementarity slackness
+	Γ_by_player = [symbolic_type[] for _ in 1:goop.num_players] # 10/25: store duals for complementarity slackness
 	Γ_cs_shared_by_player = [symbolic_type[] for _ in 1:goop.num_players] # store duals for complementarity slackness for shared constraints
 
 	# Keep track of all lower level policy constraint duals (ψ) that we create.
@@ -208,7 +209,7 @@ function generate_slacked_reduced_kkt_system(
 			goop.inequality_dims[player],
 		)
 		push!(Γ, γ...)
-		push!(Γ_cs_by_player[player], γ...) # 10/25
+		push!(Γ_by_player[player], γ...) # 10/25
 
 		γ̃ₛ = SymbolicTracingUtils.make_variables(
 			backend,
@@ -284,7 +285,11 @@ function generate_slacked_reduced_kkt_system(
 				∇L, π_terms = if drop_higher_order_terms
 					lagrangian_terms = QuasiLagrangianTerm[]
 					_push_quasi_lagrangian_term!(lagrangian_terms, sum(preference_slack .^ 2))
-					_push_quasi_lagrangian_term!(lagrangian_terms, h .+ preference_slack, γₚ)
+					_push_quasi_lagrangian_term!(
+						lagrangian_terms,
+						vcat(h .+ preference_slack, isnothing(P) ? symbolic_type[] : P),
+						γₚ,
+					)
 					_push_quasi_lagrangian_term!(lagrangian_terms, f, λ)
 					_push_quasi_lagrangian_term!(lagrangian_terms, g, γ)
 					_push_quasi_lagrangian_term!(lagrangian_terms, fₛ, λₛ)
@@ -313,7 +318,7 @@ function generate_slacked_reduced_kkt_system(
 				return (; F, π = ∇L, π_term_groups = [π_terms])
 			else
 				@assert length(h) == 1 "Expected a single preference function at the base level, but got $(length(h))"
-				# Highest priority is a cost. 
+				# Highest priority is a cost.
 
 				L = h - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
 					(isnothing(fₛ) ? 0 : λₛ' * fₛ) - (isnothing(gₛ) ? 0 : γₛ' * gₛ)
@@ -426,8 +431,8 @@ function generate_slacked_reduced_kkt_system(
 			# )
 			# push!(Γ, μₛ...)
 
-			# Form partial Lagrangian at this stage.
-			blocked_Γ_cs = g === nothing ? nothing : make_blocks(Γ_cs_by_player[player], goop.inequality_dims[player])
+			# Form reduced Lagrangian at this stage.
+			blocked_Γ_cs = g === nothing ? nothing : make_blocks(Γ_by_player[player], goop.inequality_dims[player])
 			blocked_Γ_cs_shared = gₛ === nothing ? nothing : make_blocks(Γ_cs_shared_by_player[player], goop.shared_inequality_dims)
 			# L =
 			# 	sum(preference_slack) - γₚ' * (h .+ preference_slack) - μₛ' * preference_slack -
@@ -447,7 +452,11 @@ function generate_slacked_reduced_kkt_system(
 			∇L, π_terms = if drop_higher_order_terms
 				lagrangian_terms = QuasiLagrangianTerm[]
 				_push_quasi_lagrangian_term!(lagrangian_terms, sum(preference_slack .^ 2))
-				_push_quasi_lagrangian_term!(lagrangian_terms, h .+ preference_slack, γₚ)
+				_push_quasi_lagrangian_term!(
+					lagrangian_terms,
+					vcat(h .+ preference_slack, isnothing(P) ? symbolic_type[] : P),
+					γₚ,
+				)
 				_append_quasi_policy_terms!(lagrangian_terms, π_term_groups, ψ)
 				_push_quasi_lagrangian_term!(lagrangian_terms, f, λ)
 				_push_quasi_lagrangian_term!(lagrangian_terms, g, γ)
@@ -486,7 +495,7 @@ function generate_slacked_reduced_kkt_system(
 			@assert length(h) == 1 "Expected a single preference function at the level $(level), but got $(length(h))"
 			# Current priority is a cost.
 			# TODO: dual variables for preference inequalities
-			blocked_Γ_cs = g === nothing ? nothing : make_blocks(Γ_cs_by_player[player], goop.inequality_dims[player])
+			blocked_Γ_cs = g === nothing ? nothing : make_blocks(Γ_by_player[player], goop.inequality_dims[player])
 			blocked_Γ_cs_shared = gₛ === nothing ? nothing : make_blocks(Γ_cs_shared_by_player[player], goop.shared_inequality_dims)
 			L =
 				h - ψ' * π - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
@@ -751,7 +760,7 @@ function generate_slacked_complete_kkt_system(
 				# )
 				# push!(Γ, μₛ...)
 
-				# Form partial Lagrangian at this stage.
+				# Form Lagrangian at this stage.
 				(; xs, us) = unflatten_trajectory(
 					x[Block(player)],
 					4, #state_dimension,
@@ -927,7 +936,7 @@ function generate_slacked_complete_kkt_system(
 			# )
 			# push!(Γ, μₛ...)
 
-			# Form partial Lagrangian at this stage.
+			# Form Lagrangian at this stage.
 			(; xs, us) = unflatten_trajectory(
 				x[Block(player)],
 				4, #state_dimension,
@@ -1076,6 +1085,621 @@ function generate_slacked_complete_kkt_system(
 	)
 end
 
+"""[PATH Solver] Build the reduced KKT system as a `ParametricMCP`.
+	- Shared constraints are not modeled separately; they are embedded in each player's constraints.
+	- No interior-point slack variables ('σ') are introduced for inequality constraints.
+	- The relaxation parameter `ϵ` is stored in `θ[end]`.
+	- Relaxed complementarity is represented by the inequality `γ .* g - ϵ ≤ 0`.
+	- Stores inequality duals in `y` instead of `z`
+	- Preference constraints are stored explicitly by player and level, then flattened locally when needed.
+"""
+
+function generate_mcp_reduced_kkt_system(
+	goop::ParametricGOOP;
+	backend = SymbolicTracingUtils.SymbolicsBackend(),
+	drop_higher_order_terms = false,
+)
+	# Symbolic variables for all primals, parameters, and duals for shared constraints.
+	x =
+		SymbolicTracingUtils.make_variables(backend, :x, sum(goop.primal_dims)) |>
+		to_blockvector(goop.primal_dims)
+	θ =
+		SymbolicTracingUtils.make_variables(backend, :θ, sum(vcat(goop.parameter_dims, [1]))) |>
+		to_blockvector(vcat(goop.parameter_dims, [1]))
+	ϵ = θ[sum(goop.parameter_dims)+1] # Store the relaxation parameter as the last element of θ.
+
+	symbolic_type = eltype(x)
+
+	flatten_level_vectors(level_vectors, levels) =
+		isempty(levels) ? symbolic_type[] :
+		Vector{symbolic_type}(vcat((level_vectors[level] for level in levels)...))
+
+	# Keep track of all the preference (s) we create.
+	s = symbolic_type[]
+
+	# Keep track of all equality constraint duals (λ) that we create.
+	Λ = symbolic_type[]
+	Φ = symbolic_type[] # 10/25: store duals for complementarity slackness
+
+	# Keep track of all inequality constraint duals (γ) that we create.
+	Γ = symbolic_type[]
+	Γ_by_player_level = [
+		[symbolic_type[] for _ in 1:length(goop.preferences[player])]
+		for player in 1:goop.num_players
+	]
+	# Store each prioritized level's own preference constraints Pₖ = hₖ + sₖ and
+	# its own preference duals γₚ,ₖ. Non-prioritized levels intentionally remain
+	# empty vectors, so lower-level preference complementarity can be built level by level.
+	Γₚ_by_player_level = [
+		[symbolic_type[] for _ in 1:length(goop.preferences[player])]
+		for player in 1:goop.num_players
+	]
+	preference_constraints_by_player_level = [
+		[symbolic_type[] for _ in 1:length(goop.preferences[player])]
+		for player in 1:goop.num_players
+	]
+	preference_slacks_by_player_level = [
+		[symbolic_type[] for _ in 1:length(goop.preferences[player])]
+		for player in 1:goop.num_players
+	]
+
+	# Keep track of all lower level policy constraint duals (ψ) that we create.
+	Ψ = symbolic_type[]
+
+	# Recursive function to construct a player's KKT conditions.
+	function construct_player_kkt_conditions(
+		preferences,
+		is_prioritized_constraint;
+		player,
+	)
+		num_levels = length(goop.preferences[player]) # Kⁱ
+		@assert length(preferences) == length(is_prioritized_constraint)
+		level = 1 + num_levels - length(preferences)
+
+		f = isnothing(goop.equality_constraints[player]) ? nothing :
+			goop.equality_constraints[player](x, θ)
+		g = isnothing(goop.inequality_constraints[player]) ? nothing :
+			goop.inequality_constraints[player](x, θ)
+
+		# Base case is the inner-most layer.
+		if length(preferences) == 1
+
+			λ = SymbolicTracingUtils.make_variables(
+				backend,
+				Symbol("λ_$(player)_$(level)"),
+				goop.equality_dims[player],
+			)
+			push!(Λ, λ...)
+
+			γ = SymbolicTracingUtils.make_variables(
+				backend,
+				Symbol("γ_$(player)_$(level)"),
+				goop.inequality_dims[player],
+			)
+			push!(Γ, γ...)
+			Γ_by_player_level[player][level] = γ
+
+			h = only(preferences)(x, θ)
+
+			if only(is_prioritized_constraint)
+				# Highest priority is a constraint.
+				preference_slack = SymbolicTracingUtils.make_variables(
+					backend,
+					Symbol("s_$(player)_$(level)"),
+					length(h),
+				)
+				push!(s, preference_slack...)
+				preference_slacks_by_player_level[player][level] = preference_slack
+
+				γₚ = SymbolicTracingUtils.make_variables(
+					backend,
+					Symbol("γₚ_$(player)_$(level)"),
+					length(h),
+				)
+				push!(Γ, γₚ...)
+				Γₚ_by_player_level[player][level] = γₚ
+
+				# Form Lagrangian at this stage.
+				L =
+					sum(preference_slack .^ 2) - γₚ' * (h .+ preference_slack) -
+					(isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g)
+
+				vars = vcat(x[Block(player)], preference_slack)
+				∇L, π_terms = if drop_higher_order_terms
+					lagrangian_terms = QuasiLagrangianTerm[]
+					_push_quasi_lagrangian_term!(lagrangian_terms, sum(preference_slack .^ 2))
+					_push_quasi_lagrangian_term!(lagrangian_terms, h .+ preference_slack, γₚ)
+					_push_quasi_lagrangian_term!(lagrangian_terms, f, λ)
+					_push_quasi_lagrangian_term!(lagrangian_terms, g, γ)
+					_quasi_gradient_from_terms(lagrangian_terms, vars)
+				else
+					Symbolics.gradient(L, vars), QuasiLagrangianTerm[]
+				end
+
+				F = Vector{symbolic_type}(
+					filter!(
+						!isnothing,
+						[
+							∇L
+							isnothing(f) ? nothing : f
+						],
+					),
+				)
+
+				z = Vector{symbolic_type}(
+					vcat(
+						x[Block(player)],
+						preference_slack,
+						(isnothing(f) ? [] : λ),
+					),
+				)
+
+				current_preference_constraints = Vector{symbolic_type}(h .+ preference_slack)
+				preference_constraints_by_player_level[player][level] = current_preference_constraints
+				Γₚ_by_player_level[player][level] = γₚ
+
+				G, y = if level == 1
+					if isnothing(g)
+						current_preference_constraints, Vector{symbolic_type}(γₚ)
+					else
+						Vector{symbolic_type}([current_preference_constraints; g]), Vector{symbolic_type}([γₚ; γ])
+					end
+				else
+					nothing, nothing
+				end
+				return (; F, z, G, y, π = ∇L, π_term_groups = [π_terms])
+			else
+				@assert length(h) == 1 "Expected a single preference function at the base level, but got $(length(h))"
+				# Highest priority is a cost.
+
+				L = h - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g)
+
+				∇L, π_terms = if drop_higher_order_terms
+					lagrangian_terms = QuasiLagrangianTerm[]
+					_push_quasi_lagrangian_term!(lagrangian_terms, h)
+					_push_quasi_lagrangian_term!(lagrangian_terms, f, λ)
+					_push_quasi_lagrangian_term!(lagrangian_terms, g, γ)
+					_quasi_gradient_from_terms(lagrangian_terms, x[Block(player)])
+				else
+					Symbolics.gradient(L, x[Block(player)]), QuasiLagrangianTerm[]
+				end
+
+				F = Vector{symbolic_type}(
+					filter!(
+						!isnothing,
+						[
+							∇L
+							isnothing(f) ? nothing : f
+						],
+					),
+				)
+
+				z = Vector{symbolic_type}(
+					vcat(
+						x[Block(player)],
+						(isnothing(f) ? [] : λ),
+					),
+				)
+
+				G, y = if level == 1
+					if isnothing(g)
+						symbolic_type[], symbolic_type[]
+					else
+						Vector{symbolic_type}(g), Vector{symbolic_type}(γ)
+					end
+				else
+					nothing, nothing
+				end
+				return (; F, z, G, y, π = ∇L, π_term_groups = [π_terms])
+			end
+		end
+
+		# Handle higher levels via tail recursion.
+		(; F, z, G, y, π, π_term_groups) = construct_player_kkt_conditions(
+			preferences[2:end],
+			is_prioritized_constraint[2:end];
+			player,
+		)
+		h = first(preferences)(x, θ)
+
+		λ = SymbolicTracingUtils.make_variables(
+			backend,
+			Symbol("λ_$(player)_$(level)"),
+			goop.equality_dims[player],
+		)
+		push!(Λ, λ...)
+
+		γ = SymbolicTracingUtils.make_variables(
+			backend,
+			Symbol("γ_$(player)_$(level)"),
+			goop.inequality_dims[player],
+		)
+		push!(Γ, γ...)
+		Γ_by_player_level[player][level] = γ
+
+		ψ = SymbolicTracingUtils.make_variables(
+			backend,
+			Symbol("ψ_$(player)_$(level)"),
+			length(π),
+		)
+		push!(Ψ, ψ...)
+
+		lower_levels = (level+1):num_levels
+		lower_prioritized_levels = [
+			lower_level
+			for lower_level in lower_levels
+			if goop.is_prioritized_constraint[player][lower_level]
+		]
+		has_lower_preference_constraints = !isempty(lower_prioritized_levels)
+		lower_preference_constraints =
+			has_lower_preference_constraints ?
+			flatten_level_vectors(preference_constraints_by_player_level[player], lower_prioritized_levels) :
+			symbolic_type[]
+		lower_preference_slacks =
+			has_lower_preference_constraints ?
+			flatten_level_vectors(preference_slacks_by_player_level[player], lower_prioritized_levels) :
+			symbolic_type[]
+
+		# Duals (γₚₗ) for lower level preference constraints (if exist) 
+		γₚₗ = !has_lower_preference_constraints ? symbolic_type[] :
+			  SymbolicTracingUtils.make_variables(
+			backend,
+			Symbol("γₚₗ_$(player)_$(level)"),
+			length(lower_preference_constraints),
+		)
+		push!(Γ, γₚₗ...)
+
+		# Duals for complementarity slackness for lower levels (w.r.t. g ≥ 0)
+		ϕ = isnothing(g) ? symbolic_type[] :
+			SymbolicTracingUtils.make_variables(
+			backend,
+			Symbol("ϕ_$(player)_$(level)"),
+			length(lower_levels), # ℓ = 1 to Kⁱ - k, use sum(complementarity) ≤ ϵ
+		)
+		push!(Φ, ϕ...)
+
+		# Duals for complementarity slackness for lower levels (w.r.t. lower level preference constraints)
+		ϕₚ = !has_lower_preference_constraints ? symbolic_type[] :
+			 SymbolicTracingUtils.make_variables(
+			backend,
+			Symbol("ϕₚ_$(player)_$(level)"),
+			length(lower_prioritized_levels),
+		)
+		push!(Φ, ϕₚ...)
+
+		# Lower level γ, γₚ duals and lower level complmentarity constraints
+		lower_level_Γ =
+			isnothing(g) ? nothing :
+			flatten_level_vectors(Γ_by_player_level[player], lower_levels)
+
+		lower_level_complementarity =
+			isnothing(g) ? nothing :
+			Vector{symbolic_type}([
+				ϵ - sum(g .* Γ_by_player_level[player][lower_level])
+				for lower_level in lower_levels
+			])
+
+		lower_level_Γₚ =
+			!has_lower_preference_constraints ? nothing :
+			flatten_level_vectors(Γₚ_by_player_level[player], lower_prioritized_levels)
+
+		lower_level_preference_complementarity =
+			!has_lower_preference_constraints ? nothing :
+			Vector{symbolic_type}([
+				ϵ - sum(
+					preference_constraints_by_player_level[player][lower_level] .*
+					Γₚ_by_player_level[player][lower_level],
+				)
+				for lower_level in lower_prioritized_levels
+			])
+
+
+		if first(is_prioritized_constraint)
+			# Highest priority is a constraint.
+			preference_slack = SymbolicTracingUtils.make_variables(
+				backend,
+				Symbol("s_$(player)_$(level)"),
+				length(h),
+			)
+			push!(s, preference_slack...)
+			preference_slacks_by_player_level[player][level] = preference_slack
+
+			# Duals for current level preference constraints
+			γₚ = SymbolicTracingUtils.make_variables(
+				backend,
+				Symbol("γₚ_$(player)_$(level)"),
+				length(h),
+			)
+			push!(Γ, γₚ...)
+
+			current_preference_constraints = Vector{symbolic_type}(h .+ preference_slack)
+			preference_constraints_by_player_level[player][level] = Vector{symbolic_type}(
+				vcat(current_preference_constraints, lower_preference_constraints),
+			)
+			Γₚ_by_player_level[player][level] = Vector{symbolic_type}(
+				vcat(γₚ, γₚₗ),
+			)
+
+			# Form reduced Lagrangian at this stage.
+			L =
+				sum(preference_slack .^ 2) - ψ' * π - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
+				γₚ' * current_preference_constraints -
+				(!has_lower_preference_constraints ? 0 : γₚₗ' * lower_preference_constraints) -
+				(isnothing(lower_level_complementarity) ? 0 : ϕ' * lower_level_complementarity) -
+				(isnothing(lower_level_preference_complementarity) ? 0 : ϕₚ' * lower_level_preference_complementarity)
+
+			vars = vcat(x[Block(player)], preference_slack, lower_preference_slacks)
+
+			# TODO: Implement the above for QuasiGOOP
+			∇L, π_terms = if drop_higher_order_terms
+				lagrangian_terms = QuasiLagrangianTerm[]
+				_push_quasi_lagrangian_term!(lagrangian_terms, sum(preference_slack .^ 2))
+				_push_quasi_lagrangian_term!(
+					lagrangian_terms,
+					current_preference_constraints,
+					γₚ,
+				)
+				_push_quasi_lagrangian_term!(
+					lagrangian_terms,
+					has_lower_preference_constraints ? lower_preference_constraints : nothing,
+					γₚₗ,
+				)
+				_append_quasi_policy_terms!(lagrangian_terms, π_term_groups, ψ)
+				_push_quasi_lagrangian_term!(lagrangian_terms, f, λ)
+				_push_quasi_lagrangian_term!(lagrangian_terms, g, γ)
+				_push_quasi_lagrangian_term!(lagrangian_terms, fₛ, λ̃ₛ)
+				_push_quasi_lagrangian_term!(lagrangian_terms, gₛ, γ̃ₛ)
+				_push_quasi_lagrangian_term!(
+					lagrangian_terms,
+					lower_level_complementarity,
+					ϕ,
+				)
+				_push_quasi_lagrangian_term!(
+					lagrangian_terms,
+					lower_level_preference_complementarity,
+					ϕₚ,
+				)
+				_quasi_gradient_from_terms(lagrangian_terms, vars)
+			else
+				Symbolics.gradient(L, vars), QuasiLagrangianTerm[]
+			end
+
+			F̃ = Vector{symbolic_type}(
+				filter!(
+					!isnothing,
+					[
+						∇L
+						F
+					],
+				),
+			)
+			z̃ = Vector{symbolic_type}(
+				vcat(
+					z,
+					preference_slack,
+					ψ,
+					(isnothing(f) ? [] : λ),
+				),
+			)
+			G̃ = Vector{symbolic_type}(
+				filter!(
+					!isnothing,
+					[
+						lower_level_complementarity
+						lower_level_preference_complementarity
+						G
+					],
+				),
+			)
+			ỹ = Vector{symbolic_type}(
+				filter!(
+					!isnothing,
+					[
+						isnothing(lower_level_complementarity) ? nothing : ϕ
+						isnothing(lower_level_preference_complementarity) ? nothing : ϕₚ
+						y
+					],
+				),
+			)
+			level == 1 && begin
+				G̃ = Vector{symbolic_type}(
+					filter!(
+						!isnothing,
+						[
+							G̃
+							isnothing(g) ? nothing : g
+							current_preference_constraints
+							!has_lower_preference_constraints ? nothing : lower_preference_constraints
+							isnothing(lower_level_Γ) ? nothing : zeros(length(lower_level_Γ))
+							isnothing(lower_level_Γₚ) ? nothing : zeros(length(lower_level_Γₚ))
+						],
+					),
+				)
+				ỹ = Vector{symbolic_type}(
+					filter!(
+						!isnothing,
+						[
+							ỹ # contains ϕ and ϕₚ only
+							isnothing(g) ? nothing : γ
+							γₚ
+							!has_lower_preference_constraints ? nothing : γₚₗ
+							isnothing(lower_level_Γ) ? nothing : lower_level_Γ
+							isnothing(lower_level_Γₚ) ? nothing : lower_level_Γₚ
+						],
+					),
+				)
+			end
+			return (; F = F̃, z = z̃, G = G̃, y = ỹ, π = ∇L, π_term_groups = [π_terms])
+		else
+			@assert length(h) == 1 "Expected a single preference function at the level $(level), but got $(length(h))"
+			# Current priority is a cost. 		
+
+			L =
+				h - ψ' * π - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
+				(!has_lower_preference_constraints ? 0 : γₚₗ' * lower_preference_constraints) -
+				(isnothing(lower_level_complementarity) ? 0 : ϕ' * lower_level_complementarity) -
+				(isnothing(lower_level_preference_complementarity) ? 0 : ϕₚ' * lower_level_preference_complementarity)
+
+			vars = vcat(x[Block(player)], lower_preference_slacks)
+
+
+			# TODO: Implement the above for QuasiGOOP
+			∇L, π_terms = if drop_higher_order_terms
+				lagrangian_terms = QuasiLagrangianTerm[]
+				_push_quasi_lagrangian_term!(lagrangian_terms, h)
+				_append_quasi_policy_terms!(lagrangian_terms, π_term_groups, ψ)
+				_push_quasi_lagrangian_term!(lagrangian_terms, f, λ)
+				_push_quasi_lagrangian_term!(lagrangian_terms, g, γ)
+				_push_quasi_lagrangian_term!(
+					lagrangian_terms,
+					has_lower_preference_constraints ? lower_preference_constraints : nothing,
+					γₚₗ,
+				)
+				_push_quasi_lagrangian_term!(
+					lagrangian_terms,
+					lower_level_complementarity,
+					ϕ,
+				)
+				_push_quasi_lagrangian_term!(
+					lagrangian_terms,
+					lower_level_preference_complementarity,
+					ϕₚ,
+				)
+				_quasi_gradient_from_terms(lagrangian_terms, x[Block(player)])
+			else
+				Symbolics.gradient(L, vars), QuasiLagrangianTerm[]
+			end
+			F̃ = Vector{symbolic_type}(
+				filter!(
+					!isnothing,
+					[
+						∇L
+						F
+					],
+				),
+			)
+			z̃ = Vector{symbolic_type}(
+				vcat(
+					z,
+					ψ,
+					(isnothing(f) ? [] : λ),
+				),
+			)
+			G̃ = Vector{symbolic_type}(
+				filter!(
+					!isnothing,
+					[
+						lower_level_complementarity
+						lower_level_preference_complementarity
+						G
+					],
+				),
+			)
+			ỹ = Vector{symbolic_type}(
+				filter!(
+					!isnothing,
+					[
+						isnothing(lower_level_complementarity) ? nothing : ϕ
+						isnothing(lower_level_preference_complementarity) ? nothing : ϕₚ
+						y
+					],
+				),
+			)
+			level == 1 && begin
+				G̃ = Vector{symbolic_type}(
+					filter!(
+						!isnothing,
+						[
+							G̃
+							isnothing(g) ? nothing : g
+							!has_lower_preference_constraints ? nothing : lower_preference_constraints
+							isnothing(lower_level_Γ) ? nothing : zeros(length(lower_level_Γ))
+							isnothing(lower_level_Γₚ) ? nothing : zeros(length(lower_level_Γₚ))
+						],
+					),
+				)
+				ỹ = Vector{symbolic_type}(
+					filter!(
+						!isnothing,
+						[
+							ỹ # contains only ϕ and ϕₚ
+							isnothing(g) ? nothing : γ
+							!has_lower_preference_constraints ? nothing : γₚₗ
+							isnothing(lower_level_Γ) ? nothing : lower_level_Γ
+							isnothing(lower_level_Γₚ) ? nothing : lower_level_Γₚ
+						],
+					),
+				)
+			end
+			return (; F = F̃, z = z̃, G = G̃, y = ỹ, π = vcat(∇L, π), π_term_groups = vcat([π_terms], π_term_groups))
+		end
+	end
+
+	# Recursively generate the rest of the KKT conditions for each player.
+	"""
+	F_mcp = [∇L₁; ... ; ∇Lₖ; f] = F which needs 0 rows to be appended to match the size of z_mcp
+	---------------------------------------------------------------------------------------------------------------
+	G_mcp = [ϵ - sum(complementarity),g, h + s,... h + s, 0]
+	y_mcp = [Φ; Γ; Γₚ] where (Φ, Γ, Γₚ) are inequality duals bounded by (0, ∞)
+		"""
+	stacked_kkt = let
+		kkt_per_player = map(1:(goop.num_players)) do player
+			(; F, z, G, y) = construct_player_kkt_conditions(
+				goop.preferences[player],
+				goop.is_prioritized_constraint[player];
+				player,
+			)
+			# z contains primals, equality and stationarity duals. Should be larger than F = 0.
+			# y contains all inequality duals (∈ [0, ∞)) in alignment with G ≥ 0.
+			@assert length(G) == length(y) "Mismatch between number of inequality constraints and inequality duals for player $(player): $(length(G)) vs $(length(y))"
+			num_zero_rows = length(z) - length(F)
+			@assert num_zero_rows >= 0 "F has more rows than z for player $(player): $(length(F)) vs $(length(z))"
+			F = Vector{symbolic_type}(vcat(F, zeros(num_zero_rows)))
+
+			# Construct MCP by combining F and G
+			F_mcp = Vector{symbolic_type}(vcat(F, G))
+			z_mcp = Vector{symbolic_type}(vcat(z, y))
+			z̅_mcp = vcat(fill(Inf, length(F)), fill(Inf, length(G)))
+			z̲_mcp = vcat(fill(-Inf, length(F)), fill(0.0, length(G))) # G ≥ 0 constraints	
+
+			(; F_mcp, z_mcp, z̅_mcp, z̲_mcp)
+		end
+
+		F_mcp = Vector{symbolic_type}(vcat((pair.F_mcp for pair in kkt_per_player)...))
+		z = Vector{symbolic_type}(vcat((pair.z_mcp for pair in kkt_per_player)...))
+		z̅ = vcat((pair.z̅_mcp for pair in kkt_per_player)...)
+		z̲ = vcat((pair.z̲_mcp for pair in kkt_per_player)...)
+
+		# Permute so all primal rows come first.
+		z_lengths = length.(getfield.(kkt_per_player, :z_mcp))
+		offsets = cumsum(vcat(0, z_lengths[1:(end-1)]))
+		primal_idx = mapreduce(vcat, 1:goop.num_players) do player
+			(1+offsets[player]):(goop.primal_dims[player]+offsets[player])
+		end
+
+		(;
+			F_mcp = vcat(F_mcp[primal_idx], F_mcp[Not(primal_idx)]),
+			z = vcat(z[primal_idx], z[Not(primal_idx)]),
+			z̅ = vcat(z̅[primal_idx], z̅[Not(primal_idx)]),
+			z̲ = vcat(z̲[primal_idx], z̲[Not(primal_idx)]),
+		)
+	end
+
+	# Collect MCP components from the stacked KKT conditions.
+	F_mcp = stacked_kkt.F_mcp
+	z = stacked_kkt.z
+	z̅ = stacked_kkt.z̅
+	z̲ = stacked_kkt.z̲
+
+	# Build and return ParametricMCP.
+	θ = Vector{symbolic_type}(θ)
+	@assert length(F_mcp) == length(z) "Reduced MCP is not square: length(F_mcp)=$(length(F_mcp)), length(z)=$(length(z))"
+	@assert length(z̲) == length(z) "Reduced MCP lower-bound length mismatch: length(z̲)=$(length(z̲)), length(z)=$(length(z))"
+	@assert length(z̅) == length(z) "Reduced MCP upper-bound length mismatch: length(z̅)=$(length(z̅)), length(z)=$(length(z))"
+	_reduced_kkt_debug_snapshot[] = (; F_mcp, z, θ, z̲, z̅, stacked_kkt)
+	ParametricMCP(F_mcp, z, θ, z̲, z̅; compute_sensitivities = false)
+end
+
 """[PATH Solver] Build the complete KKT system as a `ParametricMCP`.
 	- Shared constraints are not modeled separately; they are embedded in each player's constraints.
 	- No interior-point slack variables ('σ') are introduced for inequality constraints.
@@ -1164,7 +1788,7 @@ function generate_mcp_complete_kkt_system(
 				# )
 				# push!(Γ, μₛ...)
 
-				# Form partial Lagrangian at this stage.
+				# Form Lagrangian at this stage.
 				# L =
 				# 	sum(preference_slack) - γₚ' * (h .+ preference_slack) - μₛ' * preference_slack -
 				# 	(isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g)
@@ -1302,7 +1926,7 @@ function generate_mcp_complete_kkt_system(
 			# )
 			# push!(Γ, μₛ...)
 
-			# Form partial Lagrangian at this stage.
+			# Form Lagrangian at this stage.
 			L = sum(preference_slack .^ 2) - γₚ' * (h .+ preference_slack) - λ' * F - γ' * G
 			∇L = Symbolics.gradient(L, vcat(z, preference_slack))
 
@@ -1321,9 +1945,9 @@ function generate_mcp_complete_kkt_system(
 				γ
 				ϵ - γ' * G
 			])
-			level == 1 && return (; 
-				F = F̃, 
-				G = [h .+ preference_slack; G], 
+			level == 1 && return (;
+				F = F̃,
+				G = [h .+ preference_slack; G],
 				z = [z; preference_slack; λ; γₚ; γ],
 			)
 			return (; F = F̃, G = G̃, z = [z; preference_slack; λ; γₚ; γ])
@@ -1342,8 +1966,8 @@ function generate_mcp_complete_kkt_system(
 				ϵ - γ' * G
 			])
 			level == 1 && return (;
-				F = F̃, 
-				G = G, 
+				F = F̃,
+				G = G,
 				z = [z; λ; γ],
 			)
 			return (; F = F̃, G = G̃, z = [z; λ; γ])
