@@ -306,7 +306,7 @@ function solve(
 	z, status, info = ParametricMCPs.solve(
 		mcp,
 		[θ; options.ϵ₀]; # ϵ₀ relaxation parameter is embedded into θ as θ[end] or θ[sum(paramters)+1]
-		z₀,
+		initial_guess = isnothing(z₀) ? zeros(mcp.problem_size) : z₀,
 		cumulative_iteration_limit = options.cumulative_iteration_limit,
 		proximal_perturbation = options.proximal_perturbation,
 		major_iteration_limit = options.major_iteration_limit,

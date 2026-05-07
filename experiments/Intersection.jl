@@ -285,7 +285,7 @@ function demo(;
 
 	# run_id = "run_$(dynamics_model)_$(goop_version)_1_pref_$(num_instances)_instances_horizon_$(planning_horizon)_linesearch_$(linesearch)_goal_reaching_3"
 
-	run_id = "0_PATH_init_vel2_1.0"
+	run_id = "0_PATH_$(goop_version)_init_vel2_1.0"
 	# run_id = "0_PDIP_init_vel2_1.0_w_total_complementarity"
 
 	(; problem, flatten_parameters) = get_setup(

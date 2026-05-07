@@ -490,7 +490,7 @@ function generate_slacked_reduced_kkt_system(
 				F
 			]
 
-			return (; F = F̃, π = ∇L, π_term_groups = [π_terms])
+			return (; F = F̃, π = vcat(∇L, π), π_term_groups = vcat([π_terms], π_term_groups))
 		else
 			@assert length(h) == 1 "Expected a single preference function at the level $(level), but got $(length(h))"
 			# Current priority is a cost.
@@ -1529,7 +1529,8 @@ function generate_mcp_reduced_kkt_system(
 					),
 				)
 			end
-			return (; F = F̃, z = z̃, G = G̃, y = ỹ, π = ∇L, π_term_groups = [π_terms])
+			
+			return (; F = F̃, z = z̃, G = G̃, y = ỹ, π = vcat(∇L, π), π_term_groups = vcat([π_terms], π_term_groups))
 		else
 			@assert length(h) == 1 "Expected a single preference function at the level $(level), but got $(length(h))"
 			# Current priority is a cost. 		
@@ -1696,7 +1697,7 @@ function generate_mcp_reduced_kkt_system(
 	@assert length(F_mcp) == length(z) "Reduced MCP is not square: length(F_mcp)=$(length(F_mcp)), length(z)=$(length(z))"
 	@assert length(z̲) == length(z) "Reduced MCP lower-bound length mismatch: length(z̲)=$(length(z̲)), length(z)=$(length(z))"
 	@assert length(z̅) == length(z) "Reduced MCP upper-bound length mismatch: length(z̅)=$(length(z̅)), length(z)=$(length(z))"
-	_reduced_kkt_debug_snapshot[] = (; F_mcp, z, θ, z̲, z̅, stacked_kkt)
+
 	ParametricMCP(F_mcp, z, θ, z̲, z̅; compute_sensitivities = false)
 end
 
