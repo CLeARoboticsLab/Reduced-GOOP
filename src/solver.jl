@@ -303,10 +303,15 @@ function solve(
 	options::PATHOptions,
 )
 
+	initial_guess = zeros(mcp.problem_size)
+	if !isnothing(z₀)
+		initial_guess[1:length(z₀)] .= z₀
+	end
+
 	z, status, info = ParametricMCPs.solve(
 		mcp,
 		[θ; options.ϵ₀]; # ϵ₀ relaxation parameter is embedded into θ as θ[end] or θ[sum(paramters)+1]
-		initial_guess = isnothing(z₀) ? zeros(mcp.problem_size) : z₀,
+		initial_guess,
 		cumulative_iteration_limit = options.cumulative_iteration_limit,
 		proximal_perturbation = options.proximal_perturbation,
 		major_iteration_limit = options.major_iteration_limit,

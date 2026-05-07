@@ -1470,15 +1470,18 @@ function generate_mcp_reduced_kkt_system(
 					[
 						∇L
 						F
+						isnothing(f) ? nothing : f # 0507 hard code 
 					],
 				),
 			)
 			z̃ = Vector{symbolic_type}(
 				vcat(
-					z,
+					x[Block(player)],
 					preference_slack,
+					lower_preference_slacks,
 					ψ,
-					(isnothing(f) ? [] : λ),
+					isnothing(f) ? [] : λ,
+					isnothing(f) ? [] : z[(end-length(f)+1):end], # 0507 lower level λₖ
 				),
 			)
 			G̃ = Vector{symbolic_type}(
@@ -1529,7 +1532,6 @@ function generate_mcp_reduced_kkt_system(
 					),
 				)
 			end
-			
 			return (; F = F̃, z = z̃, G = G̃, y = ỹ, π = vcat(∇L, π), π_term_groups = vcat([π_terms], π_term_groups))
 		else
 			@assert length(h) == 1 "Expected a single preference function at the level $(level), but got $(length(h))"
@@ -1576,14 +1578,17 @@ function generate_mcp_reduced_kkt_system(
 					[
 						∇L
 						F
+						isnothing(f) ? nothing : f # 0507 hard code 
 					],
 				),
 			)
 			z̃ = Vector{symbolic_type}(
 				vcat(
-					z,
+					x[Block(player)],
+					lower_preference_slacks,
 					ψ,
-					(isnothing(f) ? [] : λ),
+					isnothing(f) ? [] : λ,
+					isnothing(f) ? [] : z[(end-length(f)+1):end], # 0507 lower level λₖ
 				),
 			)
 			G̃ = Vector{symbolic_type}(
@@ -1652,11 +1657,12 @@ function generate_mcp_reduced_kkt_system(
 			)
 			# z contains primals, equality and stationarity duals. Should be larger than F = 0.
 			# y contains all inequality duals (∈ [0, ∞)) in alignment with G ≥ 0.
+			# Main.@infiltrate
 			@assert length(G) == length(y) "Mismatch between number of inequality constraints and inequality duals for player $(player): $(length(G)) vs $(length(y))"
 			num_zero_rows = length(z) - length(F)
 			@assert num_zero_rows >= 0 "F has more rows than z for player $(player): $(length(F)) vs $(length(z))"
 			F = Vector{symbolic_type}(vcat(F, zeros(num_zero_rows)))
-
+			# Main.@infiltrate
 			# Construct MCP by combining F and G
 			F_mcp = Vector{symbolic_type}(vcat(F, G))
 			z_mcp = Vector{symbolic_type}(vcat(z, y))
@@ -1677,7 +1683,7 @@ function generate_mcp_reduced_kkt_system(
 		primal_idx = mapreduce(vcat, 1:goop.num_players) do player
 			(1+offsets[player]):(goop.primal_dims[player]+offsets[player])
 		end
-
+		# TODO: check that the bounds are properly assigned to primal and dual variables. 
 		(;
 			F_mcp = vcat(F_mcp[primal_idx], F_mcp[Not(primal_idx)]),
 			z = vcat(z[primal_idx], z[Not(primal_idx)]),
