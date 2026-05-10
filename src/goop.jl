@@ -1194,14 +1194,25 @@ function generate_mcp_reduced_kkt_system(
 				γₚ = SymbolicTracingUtils.make_variables(
 					backend,
 					Symbol("γₚ_$(player)_$(level)"),
-					length(h),
+					length(h), # associated with h .+ preference_slack ≥ 0	
 				)
 				push!(Γ, γₚ...)
-				Γₚ_by_player_level[player][level] = γₚ
+				# Γₚ_by_player_level[player][level] = γₚ
+
+				γₚₛ = SymbolicTracingUtils.make_variables(
+					backend,
+					Symbol("γₚₛ_$(player)_$(level)"),
+					length(h), # associated with preference_slack ≥ 0
+				)
+				push!(Γ, γₚₛ...)
+				Γₚ_by_player_level[player][level] = vcat(γₚ, γₚₛ)
+
+				current_preference_constraints = Vector{symbolic_type}([h .+ preference_slack; preference_slack])
+				preference_constraints_by_player_level[player][level] = current_preference_constraints
 
 				# Form Lagrangian at this stage.
 				L =
-					sum(preference_slack .^ 2) - γₚ' * (h .+ preference_slack) -
+					sum(preference_slack) - γₚ' * (h .+ preference_slack) - γₚₛ' * preference_slack -
 					(isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g)
 
 				vars = vcat(x[Block(player)], preference_slack)
@@ -1234,20 +1245,16 @@ function generate_mcp_reduced_kkt_system(
 					),
 				)
 
-				current_preference_constraints = Vector{symbolic_type}(h .+ preference_slack)
-				preference_constraints_by_player_level[player][level] = current_preference_constraints
-				Γₚ_by_player_level[player][level] = γₚ
-
 				G, y = if level == 1
 					if isnothing(g)
-						current_preference_constraints, Vector{symbolic_type}(γₚ)
+						current_preference_constraints, Vector{symbolic_type}([γₚ; γₚₛ])
 					else
-						Vector{symbolic_type}([current_preference_constraints; g]), Vector{symbolic_type}([γₚ; γ])
+						Vector{symbolic_type}([current_preference_constraints; g]), Vector{symbolic_type}([γₚ; γₚₛ; γ])
 					end
 				else
 					nothing, nothing
 				end
-				return (; F, z, G, y, π = ∇L, π_term_groups = [π_terms])
+				return (; F, z, G, y, π = ∇L, π_term_groups = [π_terms], state_dim = length(vars))
 			else
 				@assert length(h) == 1 "Expected a single preference function at the base level, but got $(length(h))"
 				# Highest priority is a cost.
@@ -1290,12 +1297,12 @@ function generate_mcp_reduced_kkt_system(
 				else
 					nothing, nothing
 				end
-				return (; F, z, G, y, π = ∇L, π_term_groups = [π_terms])
+				return (; F, z, G, y, π = ∇L, π_term_groups = [π_terms], state_dim = length(x[Block(player)]))
 			end
 		end
 
 		# Handle higher levels via tail recursion.
-		(; F, z, G, y, π, π_term_groups) = construct_player_kkt_conditions(
+		(; F, z, G, y, π, π_term_groups, state_dim) = construct_player_kkt_conditions(
 			preferences[2:end],
 			is_prioritized_constraint[2:end];
 			player,
@@ -1393,6 +1400,10 @@ function generate_mcp_reduced_kkt_system(
 				for lower_level in lower_prioritized_levels
 			])
 
+		lower_state_dim = state_dim
+		lower_equality_rows = Vector{symbolic_type}(F[(lower_state_dim+1):end])
+		lower_equality_duals = Vector{symbolic_type}(z[(lower_state_dim+1):end])
+
 
 		if first(is_prioritized_constraint)
 			# Highest priority is a constraint.
@@ -1412,18 +1423,25 @@ function generate_mcp_reduced_kkt_system(
 			)
 			push!(Γ, γₚ...)
 
-			current_preference_constraints = Vector{symbolic_type}(h .+ preference_slack)
+			γₚₛ = SymbolicTracingUtils.make_variables(
+				backend,
+				Symbol("γₚₛ_$(player)_$(level)"),
+				length(h), # associated with preference_slack ≥ 0
+			)
+			push!(Γ, γₚₛ...)
+			Γₚ_by_player_level[player][level] = Vector{symbolic_type}(
+				vcat(γₚ, γₚₛ, γₚₗ),
+			)
+
+			current_preference_constraints = Vector{symbolic_type}([h .+ preference_slack; preference_slack])
 			preference_constraints_by_player_level[player][level] = Vector{symbolic_type}(
 				vcat(current_preference_constraints, lower_preference_constraints),
-			)
-			Γₚ_by_player_level[player][level] = Vector{symbolic_type}(
-				vcat(γₚ, γₚₗ),
 			)
 
 			# Form reduced Lagrangian at this stage.
 			L =
-				sum(preference_slack .^ 2) - ψ' * π - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
-				γₚ' * current_preference_constraints -
+				sum(preference_slack) - ψ' * π - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
+				vcat(γₚ, γₚₛ)' * current_preference_constraints - 
 				(!has_lower_preference_constraints ? 0 : γₚₗ' * lower_preference_constraints) -
 				(isnothing(lower_level_complementarity) ? 0 : ϕ' * lower_level_complementarity) -
 				(isnothing(lower_level_preference_complementarity) ? 0 : ϕₚ' * lower_level_preference_complementarity)
@@ -1469,19 +1487,18 @@ function generate_mcp_reduced_kkt_system(
 					!isnothing,
 					[
 						∇L
-						F
-						isnothing(f) ? nothing : f # 0507 hard code 
+						π
+						isnothing(f) ? nothing : f
+						lower_equality_rows
 					],
 				),
 			)
 			z̃ = Vector{symbolic_type}(
 				vcat(
-					x[Block(player)],
-					preference_slack,
-					lower_preference_slacks,
+					vars,
 					ψ,
 					isnothing(f) ? [] : λ,
-					isnothing(f) ? [] : z[(end-length(f)+1):end], # 0507 lower level λₖ
+					lower_equality_duals, 
 				),
 			)
 			G̃ = Vector{symbolic_type}(
@@ -1525,6 +1542,7 @@ function generate_mcp_reduced_kkt_system(
 							ỹ # contains ϕ and ϕₚ only
 							isnothing(g) ? nothing : γ
 							γₚ
+							γₚₛ
 							!has_lower_preference_constraints ? nothing : γₚₗ
 							isnothing(lower_level_Γ) ? nothing : lower_level_Γ
 							isnothing(lower_level_Γₚ) ? nothing : lower_level_Γₚ
@@ -1532,7 +1550,7 @@ function generate_mcp_reduced_kkt_system(
 					),
 				)
 			end
-			return (; F = F̃, z = z̃, G = G̃, y = ỹ, π = vcat(∇L, π), π_term_groups = vcat([π_terms], π_term_groups))
+			return (; F = F̃, z = z̃, G = G̃, y = ỹ, π = vcat(∇L, π), π_term_groups = vcat([π_terms], π_term_groups), state_dim = length(vars))
 		else
 			@assert length(h) == 1 "Expected a single preference function at the level $(level), but got $(length(h))"
 			# Current priority is a cost. 		
@@ -1577,18 +1595,18 @@ function generate_mcp_reduced_kkt_system(
 					!isnothing,
 					[
 						∇L
-						F
-						isnothing(f) ? nothing : f # 0507 hard code 
+						π
+						isnothing(f) ? nothing : f
+						lower_equality_rows
 					],
 				),
 			)
 			z̃ = Vector{symbolic_type}(
 				vcat(
-					x[Block(player)],
-					lower_preference_slacks,
+					vars,
 					ψ,
 					isnothing(f) ? [] : λ,
-					isnothing(f) ? [] : z[(end-length(f)+1):end], # 0507 lower level λₖ
+					lower_equality_duals,
 				),
 			)
 			G̃ = Vector{symbolic_type}(
@@ -1637,7 +1655,7 @@ function generate_mcp_reduced_kkt_system(
 					),
 				)
 			end
-			return (; F = F̃, z = z̃, G = G̃, y = ỹ, π = vcat(∇L, π), π_term_groups = vcat([π_terms], π_term_groups))
+			return (; F = F̃, z = z̃, G = G̃, y = ỹ, π = vcat(∇L, π), π_term_groups = vcat([π_terms], π_term_groups), state_dim = length(vars))
 		end
 	end
 
@@ -1646,7 +1664,7 @@ function generate_mcp_reduced_kkt_system(
 	F_mcp = [∇L₁; ... ; ∇Lₖ; f] = F which needs 0 rows to be appended to match the size of z_mcp
 	---------------------------------------------------------------------------------------------------------------
 	G_mcp = [ϵ - sum(complementarity),g, h + s,... h + s, 0]
-	y_mcp = [Φ; Γ; Γₚ] where (Φ, Γ, Γₚ) are inequality duals bounded by (0, ∞)
+	y_mcp = [Φ; Γ; Γₚ] where (Φ, Γ, Γₚ) are inequality duals bounded by [0, ∞)
 		"""
 	stacked_kkt = let
 		kkt_per_player = map(1:(goop.num_players)) do player
