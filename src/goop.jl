@@ -1680,7 +1680,11 @@ function generate_mcp_reduced_kkt_system(
 			num_zero_rows = length(z) - length(F)
 			@assert num_zero_rows >= 0 "F has more rows than z for player $(player): $(length(F)) vs $(length(z))"
 			F = Vector{symbolic_type}(vcat(F, zeros(num_zero_rows)))
-			# Main.@infiltrate
+			
+			# Interim check
+			# println("goop.jl: Player $(player) KKT sizes: length(F) = $(length(F)), length(z) = $(length(z)), length(G) = $(length(G)), length(y) = $(length(y))")
+			# println("goop.jl: Player $(player) num_zero_rows in F = $(num_zero_rows)")
+
 			# Construct MCP by combining F and G
 			F_mcp = Vector{symbolic_type}(vcat(F, G))
 			z_mcp = Vector{symbolic_type}(vcat(z, y))
