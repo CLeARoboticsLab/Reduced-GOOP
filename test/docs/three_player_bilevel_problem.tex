@@ -1,0 +1,185 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{array}
+
+\title{Three-Player Bilevel Generalized Nash Benchmark}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section*{Problem Statement}
+
+This document writes the three-player bilevel benchmark used in the test suite.
+There are three players, indexed by \(i \in \{1,2,3\}\). Player \(i\)'s
+decision vector is
+\[
+  x_i = (x_{i,1},x_{i,2},x_{i,3},x_{i,4},x_{i,5}) \in \mathbb{R}^5,
+\]
+where \(x_{i,j}\) denotes the \(j\)-th decision variable of player \(i\). In the
+code this is `x[Block(i)][j]`.
+
+The bilevel preference order is:
+\[
+  \text{upper level controls coordinates } \{4,5\}, \qquad
+  \text{lower level controls coordinates } \{1,2,3\}.
+\]
+
+\section*{Raw Objective Targets}
+
+The raw objective target is the point each player's objective would choose if
+there were no constraints. The constraints then force the final equilibrium away
+from this raw target.
+
+The known equilibrium is
+\[
+\begin{aligned}
+  x_1^\star &= (0.40,\;0.90,\;0.55,\;1.20,\;0.80),\\
+  x_2^\star &= (0.45,\;1.00,\;0.60,\;1.30,\;0.90),\\
+  x_3^\star &= (0.50,\;1.10,\;0.65,\;1.40,\;1.00).
+\end{aligned}
+\]
+
+The raw target for player \(i\) is
+\[
+  t_i = x_i^\star + (0.6,0,-0.4,0,0).
+\]
+Thus
+\[
+\begin{aligned}
+  t_1 &= (1.00,\;0.90,\;0.15,\;1.20,\;0.80),\\
+  t_2 &= (1.05,\;1.00,\;0.20,\;1.30,\;0.90),\\
+  t_3 &= (1.10,\;1.10,\;0.25,\;1.40,\;1.00).
+\end{aligned}
+\]
+
+\section*{Quadratic Bilevel Problem}
+
+For each player \(i\), define the upper-level and lower-level objectives
+\[
+  J_i^{\mathrm{up}}(x_i)
+  =
+  \sum_{j \in \{4,5\}} (x_{i,j}-t_{i,j})^2,
+\]
+and
+\[
+  J_i^{\mathrm{low}}(y_i)
+  =
+  \sum_{j \in \{1,2,3\}} (y_{i,j}-t_{i,j})^2.
+\]
+
+The bilevel problem for player \(i\) is
+\[
+\begin{aligned}
+  \min_{x_i \in \mathbb{R}^5}
+  \quad & J_i^{\mathrm{up}}(x_i)\\
+  \text{subject to}
+  \quad &
+  x_i \in
+  \operatorname*{arg\,min}_{y_i \in \mathbb{R}^5}
+  \left\{
+    J_i^{\mathrm{low}}(y_i)
+    \;:\;
+    g_i(y_i,x_{-i}) \ge 0
+  \right\},
+\end{aligned}
+\]
+where \(x_{-i}\) denotes the decision vectors of the other two players.
+
+\section*{Coupled Generalized Nash Constraints}
+
+Let
+\[
+  \rho = 0.25
+\]
+and define the coupled resource usage
+\[
+  c_{i,j}(x)
+  =
+  x_{i,j} + \rho \sum_{k \ne i} x_{k,j}.
+\]
+Here \(c_{i,j}(x)\) is a function of the current players' decisions. The
+uppercase constants below are fixed capacities or floors.
+
+Each player has four coupled inequalities:
+\[
+  g_i(x) =
+  \begin{bmatrix}
+    C_{i,1} - c_{i,1}(x)\\
+    C_{i,2} - c_{i,2}(x)\\
+    c_{i,3}(x) - F_{i,3}\\
+    c_{i,4}(x) - F_{i,4}
+  \end{bmatrix}
+  \ge 0.
+\]
+
+The constants are chosen from the known solution \(x^\star\):
+\[
+\begin{aligned}
+  C_{i,1} &= c_{i,1}(x^\star),\\
+  C_{i,2} &= c_{i,2}(x^\star) + 1,\\
+  F_{i,3} &= c_{i,3}(x^\star),\\
+  F_{i,4} &= c_{i,4}(x^\star) - 1.
+\end{aligned}
+\]
+
+Numerically,
+\[
+\begin{array}{c|cccc}
+  i & C_{i,1} & C_{i,2} & F_{i,3} & F_{i,4}\\
+  \hline
+  1 & 0.6375 & 2.4250 & 0.8625 & 0.8750\\
+  2 & 0.6750 & 2.5000 & 0.9000 & 0.9500\\
+  3 & 0.7125 & 2.5750 & 0.9375 & 1.0250
+\end{array}
+\]
+
+\section*{Expected Solution and Active Set}
+
+At the expected equilibrium \(x^\star\),
+\[
+  C_{i,1} - c_{i,1}(x^\star) = 0,
+  \qquad
+  c_{i,3}(x^\star) - F_{i,3} = 0.
+\]
+Thus the active constraints for each player are:
+\[
+  C_{i,1} - c_{i,1}(x) \ge 0,
+  \qquad
+  c_{i,3}(x) - F_{i,3} \ge 0.
+\]
+
+The inactive constraints have slack equal to \(1\):
+\[
+  C_{i,2} - c_{i,2}(x^\star) = 1,
+  \qquad
+  c_{i,4}(x^\star) - F_{i,4} = 1.
+\]
+
+The constraints are genuinely coupled because every \(c_{i,j}(x)\) depends on
+all three players' decision variables. The active coordinate-1 and coordinate-3
+resource equations are player-specific, so they pin the distribution across
+players rather than only aggregate totals.
+
+\section*{Nonlinear Variant Used in Tests}
+
+The nonlinear test case keeps the same known solution and active set. It replaces
+the squared-distance objective by
+\[
+  \sum_{j \in S} \left(\cosh(x_{i,j}-t_{i,j}) - 1\right),
+\]
+and replaces each linear inequality residual \(r(x) \ge 0\) by
+\[
+  \exp(r(x)) - 1 \ge 0.
+\]
+This preserves the feasible set and active set because
+\[
+  \exp(r)-1 = 0 \iff r=0,
+  \qquad
+  \exp(r)-1 > 0 \iff r>0.
+\]
+
+\end{document}

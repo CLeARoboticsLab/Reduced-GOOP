@@ -1,5 +1,44 @@
+using LinearAlgebra
+
 abstract type SolverType end
 struct InteriorPoint <: SolverType end
+struct PATHSolver <: SolverType end
+
+Base.@kwdef struct InteriorPointOptions
+	tol::Float64
+	η₀::Float64
+	ϵ₀::Union{Float64, Symbol}
+	max_inner_iters::Int
+	max_outer_iters::Int
+	tightening_rate::Float64
+	loosening_rate::Float64
+	min_stepsize::Float64
+	linesearch::Symbol
+	linear_solve_algorithm::LinearSolve.SciMLLinearSolveAlgorithm
+	use_linsolve::Bool
+	record_convergence::Bool
+	verbose::Bool
+end
+
+Base.@kwdef struct PATHOptions
+	convergence_tolerance::Float64
+	ϵ₀::Union{Float64, Symbol}
+	cumulative_iteration_limit::Int
+	proximal_perturbation::Float64
+	major_iteration_limit::Int
+	minor_iteration_limit::Int
+	nms_initial_reference_factor::Int
+	nms_maximum_watchdogs::Int
+	nms_memory_size::Int
+	nms_mstep_frequency::Int
+	lemke_start_type::String
+	lemke_rank_deficiency_iterations::Int
+	restart_limit::Int
+	gradient_step_limit::Int
+	use_basics::Bool
+	use_start::Bool
+	verbose::Bool
+end
 
 """ Basic interior point solver, based on Nocedal & Wright, ch. 19.
 Computes step directions `δz` by solving the relaxed primal-dual system, i.e.
@@ -16,7 +55,7 @@ we typically decrease ϵ by a factor of 0.1 or 0.2, with smaller values chosen
 when the previous subproblem is solved in fewer iterations.
 
 Positional arguments:
-	- `mcp::PrimalDualMCP`: the mixed complementarity problem to solve.
+	- `mcp::GOOPKKTSystem`: the mixed complementarity problem to solve. #TODO: FIX LATER
 	- `θ::AbstractVector{<:Real}`: the parameter vector.
 
 Keyword arguments:
@@ -30,179 +69,270 @@ Keyword arguments:
 	- `tightening_rate::Real = 0.1`: the rate at which to tighten the tolerance.
 	- `loosening_rate::Real = 0.5`: the rate at which to loosen the tolerance.
 	- `min_stepsize::Real = 1e-2`: the minimum step size for the linesearch.
+	- `linesearch::Symbol = :backtracking`: linesearch mode (`:backtracking` or `:fraction_to_boundary`).
 	- `verbose::Bool = false`: whether to print debug information.
-	- `linear_solve_algorithm::LinearSolve.SciMLLinearSolveAlgorithm`: the linear solve algorithm to use. Any solver from `LinearSolve.jl` can be used.
+	- `linear_solve_algorithm::LinearSolve.SciMLLinearSolveAlgorithm`: the linear solve algorithm to use. Any solver from `LinearSolve.jl` that can handle nonsquare system can be used.
+	- `record_convergence::Bool = false`: if true, record and return `kkt_error_history`.
+	- `measure_solve_time::Bool = false`: if true, returns solve time measured with `@btime` (warmup run excludes compile) and includes `solve_time_sec`/`solve_time_ns` fields.
+	- `benchmark_samples::Int = 1`: number of @btime samples when `measure_solve_time = true`.
+	- `benchmark_evals::Int = 1`: number of evals per sample when `measure_solve_time = true`.
 """
 function solve(
-    ::InteriorPoint,
-    mcp::PrimalDualSys,
-    θ::AbstractVector{<:Real},
-    warmstart_sol;
-    x₀ = nothing,
-    y₀ = nothing,
-    s₀ = nothing,
-    tol = 1e-4,
-    ϵ₀ = :auto,
-    max_inner_iters = 20,
-    max_outer_iters = 50,
-    tightening_rate = 0.1,
-    loosening_rate = 0.5,
-    min_stepsize = 1e-4,
-    verbose = false,
-    linear_solve_algorithm = UMFPACKFactorization(),
+	::InteriorPoint,
+	mcp::GOOPKKTSystem,
+	θ::AbstractVector{<:Real};
+	z₀ = nothing,
+	options::InteriorPointOptions,
 )
+	tol = options.tol
+	η₀ = options.η₀
+	ϵ₀ = options.ϵ₀
+	max_inner_iters = options.max_inner_iters
+	max_outer_iters = options.max_outer_iters
+	tightening_rate = options.tightening_rate
+	loosening_rate = options.loosening_rate
+	min_stepsize = options.min_stepsize
+	linesearch = options.linesearch
+	linear_solve_algorithm = options.linear_solve_algorithm
+	use_linsolve = options.use_linsolve
+	record_convergence = options.record_convergence
+	verbose = options.verbose
 
-    # slack_dims = [
-    # 	43:46,
-    # 	47:110,
-    # 	203:209,
-    # 	210:223,
-    # 	440:467,
-    # 	468:523,
-    # 	########
-    # 	951:957,
-    # 	958:1027,
-    # 	1126:1153,
-    # 	1154:1209,
-    # 	1483:1486,
-    # 	1487:1494,
-    # ]
-    # slack_dims = mapreduce(vcat, slack_dims) do dim
-    # 	collect(dim)
-    # end
+	# z = @something(z₀, begin
+	# 	z = zeros(mcp.variable_dimension)
+	# 	z[mcp.preference_slack_dims] .= 1.0
+	# 	z[mcp.interior_point_slack_dims] .= 1.0
+	# 	z[mcp.inequality_constraint_dual_dims] .= 1.0
+	# 	z
+	# end)
+	z = zeros(mcp.variable_dimension)
+	z[mcp.preference_slack_dims] .= 1.0
+	z[mcp.interior_point_slack_dims] .= 1.0
+	z[mcp.inequality_constraint_dual_dims] .= 1.0
 
-    slack_dims = mcp.dims.slack_dims
+	if !isnothing(z₀)
+		z[mcp.primal_dims] .= z₀
+	end
 
-    # Set up common memory.
-    ∇F = mcp.∇F_z!.result_buffer
-    F = zeros(mcp.unconstrained_dimension + 2mcp.constrained_dimension)
-    δz = zeros(mcp.unconstrained_dimension + 2mcp.constrained_dimension)
-    δx = @view δz[1:(mcp.unconstrained_dimension)]
-    δy =
-        @view δz[(mcp.unconstrained_dimension + 1):(mcp.unconstrained_dimension + mcp.constrained_dimension)]
-    δs = @view δz[(mcp.unconstrained_dimension + mcp.constrained_dimension + 1):end]
-    δs_slack = @view δz[slack_dims]
+	x = @view z[Not(vcat(mcp.preference_slack_dims, mcp.interior_point_slack_dims, mcp.inequality_constraint_dual_dims))]
+	s = @view z[mcp.preference_slack_dims]
+	σ = @view z[mcp.interior_point_slack_dims]
+	γ = @view z[mcp.inequality_constraint_dual_dims]
 
-    linsolve = init(LinearProblem(∇F, δz), linear_solve_algorithm)
+	# Set up common memory.
+	∇F = mcp.∇F_z!.result_buffer
+	F = zeros(mcp.kkt_dimension)
+	δz = zeros(mcp.variable_dimension)
+	δx = @view δz[Not(vcat(mcp.preference_slack_dims, mcp.interior_point_slack_dims, mcp.inequality_constraint_dual_dims))]
+	δs = @view δz[mcp.preference_slack_dims]
+	δσ = @view δz[mcp.interior_point_slack_dims]
+	δγ = @view δz[mcp.inequality_constraint_dual_dims]
 
-    # Main solver loop.
-    if isnothing(warmstart_sol)
-        x = @something(x₀, ones(mcp.unconstrained_dimension)) # zeros(mcp.unconstrained_dimension) #how is the size 3391?
-        y = @something(y₀, ones(mcp.constrained_dimension))
-        s = @something(s₀, ones(mcp.constrained_dimension))
-    else
-        x = warmstart_sol.x
-        y = warmstart_sol.y
-        s = warmstart_sol.s
-    end
+	use_linsolve && (linsolve = init(LinearProblem(∇F, δz), linear_solve_algorithm, maxiters = 100000))
 
-    if ϵ₀ === :auto
-        is_warmstarted = !isnothing(x₀) && !isnothing(y₀) && !isnothing(s₀)
-        if is_warmstarted
-            ϵ = tol
-        else
-            ϵ = one(tol)
-        end
-    else
-        ϵ = ϵ₀
-    end
+	# Main solver loop.
+	if ϵ₀ === :auto
+		is_warmstarted = !isnothing(z₀)
+		if is_warmstarted
+			ϵ = tol
+		else
+			ϵ = one(tol)
+		end
+	else
+		ϵ = ϵ₀
+	end
 
-    status = :solved
-    total_iters = 0
-    inner_iters = 1
-    outer_iters = 1
-    kkt_error = Inf
-    while outer_iters < max_outer_iters || iszero(total_iters)
-        inner_iters = 1
-        status = :solved
+	# Initialize regularization parameter.
+	η = η₀
 
-        verbose && @info "Outer iteration $(outer_iters): ϵ = $ϵ, kkt_error = $kkt_error"
-        # Main.@infiltrate
-        while kkt_error > ϵ && inner_iters < max_inner_iters
-            total_iters += 1
-            # Compute the Newton step.
-            # TODO: Can add some adaptive regularization.
-            # TODO: use a linear operator with a lazy gradient computation here.
-            mcp.F!(F, x, y, s; θ, ϵ)
-            mcp.∇F_z!(∇F, x, y, s; θ, ϵ)
-            @assert all(.!isnan.(F)) "Found NaN in F - aborting!"
-            @assert all(.!isnan.(∇F)) "Found NaN in ∇F - aborting!"
-            println("condition number of ∇F = $(cond(collect(∇F),2))")
-            linsolve.A = ∇F + tol * I
-            linsolve.b = -F
-            solution = solve!(linsolve)
-            if !SciMLBase.successful_retcode(solution) &&
-               (solution.retcode !== SciMLBase.ReturnCode.Default)
-                verbose &&
-                    @warn "Linear solve failed. Exiting prematurely. Return code: $(solution.retcode)"
-                status = :failed
-                break
-            end
+	status = :solved
+	linesearch ∈ (:backtracking, :fraction_to_boundary) ||
+		throw(ArgumentError("Unsupported linesearch $(linesearch). Use :backtracking or :fraction_to_boundary."))
+	total_iters = 0
+	inner_iters = 1
+	outer_iters = 1
+	kkt_error = Inf
+	is_fraction_to_boundary_linesearch = (linesearch == :fraction_to_boundary)
+	kkt_error_history = Float64[]
+	while outer_iters < max_outer_iters || iszero(total_iters)
+		inner_iters = 1
+		status = :solved
 
-            δz .= solution.u
+		verbose && @info "Outer iteration $(outer_iters): ϵ = $ϵ, kkt_error = $kkt_error"
 
-            # Fraction to the boundary linesearch.
-            augmented_s = vcat(x[slack_dims], s) # augment s with inner level barrier/preference slacks
-            augmented_δs = vcat(δs_slack, δs)
-            α_s = fraction_to_the_boundary_linesearch(
-                augmented_s,
-                augmented_δs;
-                tol = min_stepsize,
-            )
-            α_y = fraction_to_the_boundary_linesearch(y, δy; tol = min_stepsize)
+		while inner_iters < max_inner_iters && (kkt_error > tol) # (!is_fraction_to_boundary_linesearch || kkt_error > tol)
+			total_iters += 1
+			# Compute the Newton step.
+			# TODO: Can add some adaptive regularization.
+			# TODO: use a linear operator with a lazy gradient computation here.
+			mcp.F!(F, z; θ, ϵ, η = 0.0)
+			mcp.∇F_z!(∇F, z; θ, ϵ, η)
+			# @assert all(.!isnan.(F)) "Found NaN in F - aborting!"
+			# @assert all(.!isnan.(∇F)) "Found NaN in ∇F - aborting!"
+			# verbose && println("inner iter $inner_iters, condition number of ∇F = $(cond(collect(∇F),2))")
+			verbose && println("inner iter $inner_iters")
+			# Check the primals
+			# verbose && println("current primal x: ", round.(z[mcp.primal_dims]; digits = 4))
 
-            println("α_s = $α_s, α_y = $α_y")
+			# # Solve δz using the specified linear solver.
+			# linsolve.A = ∇F
+			# linsolve.b = -F
+			# solution = solve!(linsolve)
+			# if !SciMLBase.successful_retcode(solution) &&
+			#    (solution.retcode !== SciMLBase.ReturnCode.Default)
+			# 	verbose &&
+			# 		@warn "Linear solve failed. Exiting prematurely. Return code: $(solution.retcode)"
+			# 	status = :failed
+			# 	break
+			# end
+			# δz .= solution.u
 
-            if isnan(α_s) || isnan(α_y)
-                verbose && @warn "Linesearch failed. Exiting prematurely."
-                status = :failed
-                break
-            end
+			# Solve δz 
+			δz .= ∇F \ (-F)
+			# δz .= pinv(Matrix(∇F)) * (-F) # minimum-norm sol
 
-            # Update variables accordingly.
-            @. x += α_s * δx
-            @. s += α_s * δs
-            @. y += α_y * δy
+			# verbose && println("current δx: ", round.(δz[mcp.primal_dims]; digits = 4))
 
-            kkt_error = norm(F, Inf)
+			if linesearch == :fraction_to_boundary
+				α_σ = fraction_to_the_boundary_linesearch(σ, δσ; tol = min_stepsize)
+				α_γ = fraction_to_the_boundary_linesearch(γ, δγ; tol = min_stepsize)
+				verbose && println("fraction_to_boundary linesearch α_σ = $α_σ, α_γ = $α_γ")
+				if isnan(α_σ) || isnan(α_γ)
+					verbose && @warn "Fraction-to-boundary linesearch failed. Exiting prematurely."
+					status = :failed
+					break
+				end
 
-            println("KKT error = $kkt_error")
+				# Update regularization parameter.
+				if min(α_σ, α_γ) == 1.0
+					verbose && printstyled("Full step taken... Decreasing η. ($η -> $(η * (1 - exp(-tightening_rate * inner_iters))))\n"; color = :blue)
+					η *= 1 - exp(-tightening_rate)
+				else
+					verbose && printstyled("Partial step (<1.0) taken... Increasing η. ($η -> $(η * (1 + exp(-loosening_rate * inner_iters))))\n"; color = :red)
+					η *= 1 + exp(-loosening_rate)
+				end
+			else
+				# backtracking linesearch
+				α = 1.0
+				F_z = norm(F, 2)
+				z_trial = similar(z)
+				@. z_trial = z + α * δz
+				mcp.F!(F, z_trial; θ, ϵ, η)
+				F_z_next = norm(F, 2)
+				while (F_z_next >= 1.0 * F_z) || (any(@. σ + α * δσ < 0) || any(@. γ + α * δγ < 0))
+					if α < min_stepsize
+						verbose && @warn "Backtracking linesearch failed. Exiting prematurely."
+						status = :failed
+						break
+					end
 
-            inner_iters += 1
-        end
+					α *= 0.5 # decay
+					@. z_trial = z + α * δz
+					mcp.F!(F, z_trial; θ, ϵ, η)
+					F_z_next = norm(F, 2)
+				end
+				if status === :failed
+					break
+				end
+				verbose && println("backtracking linesearch α = $α")
+				α_σ = α
+				α_γ = α
+			end
 
-        if kkt_error <= ϵ <= tol
-            break
-        end
+			# Update variables accordingly.
+			@. x += α_σ * δx
+			@. s += α_σ * δs
+			@. σ += α_σ * δσ
+			@. γ += α_γ * δγ
 
-        ϵ *= if status === :solved
-            1 - exp(-tightening_rate * inner_iters)
-        else
-            1 + exp(-loosening_rate * inner_iters)
-        end
-        ϵ = min(ϵ, one(ϵ))
-        outer_iters += 1
-    end
+			kkt_error = norm(F, 2)
+			if record_convergence
+				push!(kkt_error_history, kkt_error)
+			end
 
-    if outer_iters == max_outer_iters
-        status = :failed
-    end
+			verbose && println("KKT error = $kkt_error")
 
-    (; status, x, y, s, kkt_error, ϵ, outer_iters, total_iters)
+			inner_iters += 1
+		end
+
+		if linesearch == :fraction_to_boundary
+			if kkt_error <= ϵ <= tol
+				break
+			end
+			ϵ *= if status === :solved
+				1 - exp(-tightening_rate)
+			else
+				1 + exp(-loosening_rate)
+			end
+			ϵ = min(ϵ, one(ϵ))
+		end
+
+		outer_iters += 1
+	end
+
+	if outer_iters == max_outer_iters
+		status = (kkt_error <= tol) ? :solved : :failed
+		# (kkt_error <= tol) && Main.@infiltrate
+	end
+
+	(; status, z, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters, kkt_error_history)
 end
 
 """Helper function to compute the step size `α` which solves:
 				   α* = max(α ∈ [0, 1] : v + α δ ≥ (1 - τ) v).
 """
-function fraction_to_the_boundary_linesearch(v, δ; τ = 0.995, decay = 0.5, tol = 1e-4)
-    α = 1.0
-    while any(@. v + α * δ < (1 - τ) * v)
-        if α < tol
-            return NaN
-        end
+function fraction_to_the_boundary_linesearch(v, δ; max_stepsize = 1.0, τ = 0.995, decay = 0.5, tol = 1e-4)
+	α = max_stepsize
+	while any(@. v + α * δ < (1 - τ) * v)
+		if α < tol
+			return NaN
+		end
 
-        α *= decay
-    end
+		α *= decay
+	end
 
-    α
+	α
+end
+
+
+function solve(
+	::PATHSolver,
+	mcp::ParametricMCP,
+	θ::AbstractVector{<:Real};
+	z₀ = nothing,
+	options::PATHOptions,
+)
+
+	initial_guess = zeros(mcp.problem_size)
+	if !isnothing(z₀)
+		initial_guess[1:length(z₀)] .= z₀
+	end
+
+	z, status, info = ParametricMCPs.solve(
+		mcp,
+		[θ; options.ϵ₀]; # ϵ₀ relaxation parameter is embedded into θ as θ[end] or θ[sum(paramters)+1]
+		initial_guess,
+		# output_options = "yes",
+		# output_warnings = "yes",
+		cumulative_iteration_limit = options.cumulative_iteration_limit,
+		proximal_perturbation = options.proximal_perturbation,
+		major_iteration_limit = options.major_iteration_limit,
+		minor_iteration_limit = options.minor_iteration_limit,
+		convergence_tolerance = options.convergence_tolerance, #1e-1
+		nms_initial_reference_factor = options.nms_initial_reference_factor,
+		nms_maximum_watchdogs = options.nms_maximum_watchdogs,
+		nms_memory_size = options.nms_memory_size,
+		nms_mstep_frequency = options.nms_mstep_frequency,
+		lemke_start_type = options.lemke_start_type,
+		lemke_rank_deficiency_iterations = options.lemke_rank_deficiency_iterations,
+		restart_limit = options.restart_limit,
+		gradient_step_limit = options.gradient_step_limit,
+		use_basics = options.use_basics,
+		use_start = options.use_start,
+		verbose = options.verbose,
+		crash_iteration_limit = 100,
+		crash_nbchange_limit = 100,
+	)
+
+	(; status, z, ϵ = options.ϵ₀, info)
 end
