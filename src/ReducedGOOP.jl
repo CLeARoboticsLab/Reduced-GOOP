@@ -1,4 +1,4 @@
-module QuasiGOOP
+module ReducedGOOP
 
 using TrajectoryGamesBase: to_blockvector
 using SymbolicTracingUtils: SymbolicTracingUtils
@@ -17,6 +17,4 @@ include("goop_kkt_system.jl")
 include("goop.jl")
 include("solver.jl")
 
-include("parametric_optimization_problem.jl")
-
-end # module QuasiGOOP
+end # module ReducedGOOP

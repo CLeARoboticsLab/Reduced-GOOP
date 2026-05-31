@@ -485,6 +485,7 @@ function generate_slacked_reduced_kkt_system(
 				σₚ .* γₚ .- ϵ
 				# preference_slack .- σₚₛ
 				# σₚₛ .* μₛ .- ϵ
+				(isnothing(g) ? nothing : g .- σ)
 				(isnothing(g) ? nothing : σ .* γ .- ϵ)
 				(isnothing(gₛ) ? nothing : σₛ .* γ̃ₛ .- ϵ) # Note: same slacks (not duals) for all levels
 				F
@@ -1383,6 +1384,7 @@ function generate_mcp_reduced_kkt_system(
 			isnothing(g) ? nothing :
 			Vector{symbolic_type}([
 				ϵ - sum(g .* Γ_by_player_level[player][lower_level])
+				# sum(g .* Γ_by_player_level[player][lower_level]) - ϵ
 				for lower_level in lower_levels
 			])
 
@@ -1441,7 +1443,7 @@ function generate_mcp_reduced_kkt_system(
 			# Form reduced Lagrangian at this stage.
 			L =
 				sum(preference_slack) - ψ' * π - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
-				vcat(γₚ, γₚₛ)' * current_preference_constraints - 
+				vcat(γₚ, γₚₛ)' * current_preference_constraints -
 				(!has_lower_preference_constraints ? 0 : γₚₗ' * lower_preference_constraints) -
 				(isnothing(lower_level_complementarity) ? 0 : ϕ' * lower_level_complementarity) -
 				(isnothing(lower_level_preference_complementarity) ? 0 : ϕₚ' * lower_level_preference_complementarity)
@@ -1490,6 +1492,7 @@ function generate_mcp_reduced_kkt_system(
 						π
 						isnothing(f) ? nothing : f
 						lower_equality_rows
+						lower_level_complementarity
 					],
 				),
 			)
@@ -1498,7 +1501,8 @@ function generate_mcp_reduced_kkt_system(
 					vars,
 					ψ,
 					isnothing(f) ? [] : λ,
-					lower_equality_duals, 
+					lower_equality_duals,
+					isnothing(lower_level_complementarity) ? [] : ϕ,
 				),
 			)
 			G̃ = Vector{symbolic_type}(
@@ -1522,16 +1526,42 @@ function generate_mcp_reduced_kkt_system(
 				),
 			)
 			level == 1 && begin
+				# G̃ = Vector{symbolic_type}(
+				# 	filter!(
+				# 		!isnothing,
+				# 		[
+				# 			G̃
+				# 			isnothing(g) ? nothing : g
+				# 			current_preference_constraints
+				# 			!has_lower_preference_constraints ? nothing : lower_preference_constraints
+				# 			isnothing(lower_level_Γ) ? nothing : zeros(length(lower_level_Γ))
+				# 			isnothing(lower_level_Γₚ) ? nothing : zeros(length(lower_level_Γₚ))
+				# 		],
+				# 	),
+				# )
+				# ỹ = Vector{symbolic_type}(
+				# 	filter!(
+				# 		!isnothing,
+				# 		[
+				# 			ỹ # contains ϕ and ϕₚ only
+				# 			isnothing(g) ? nothing : γ
+				# 			γₚ
+				# 			γₚₛ
+				# 			!has_lower_preference_constraints ? nothing : γₚₗ
+				# 			isnothing(lower_level_Γ) ? nothing : lower_level_Γ
+				# 			isnothing(lower_level_Γₚ) ? nothing : lower_level_Γₚ
+				# 		],
+				# 	),
+				# )
 				G̃ = Vector{symbolic_type}(
 					filter!(
 						!isnothing,
 						[
-							G̃
 							isnothing(g) ? nothing : g
 							current_preference_constraints
 							!has_lower_preference_constraints ? nothing : lower_preference_constraints
-							isnothing(lower_level_Γ) ? nothing : zeros(length(lower_level_Γ))
-							isnothing(lower_level_Γₚ) ? nothing : zeros(length(lower_level_Γₚ))
+							isnothing(lower_level_Γ) ? nothing : repeat(g, length(lower_levels)) # zeros(length(lower_level_Γ)) # replace with inequality constraints
+							isnothing(lower_level_Γₚ) ? nothing : zeros(length(lower_level_Γₚ)) #TODO
 						],
 					),
 				)
@@ -1539,7 +1569,6 @@ function generate_mcp_reduced_kkt_system(
 					filter!(
 						!isnothing,
 						[
-							ỹ # contains ϕ and ϕₚ only
 							isnothing(g) ? nothing : γ
 							γₚ
 							γₚₛ
@@ -1598,6 +1627,7 @@ function generate_mcp_reduced_kkt_system(
 						π
 						isnothing(f) ? nothing : f
 						lower_equality_rows
+						lower_level_complementarity
 					],
 				),
 			)
@@ -1607,6 +1637,7 @@ function generate_mcp_reduced_kkt_system(
 					ψ,
 					isnothing(f) ? [] : λ,
 					lower_equality_duals,
+					isnothing(lower_level_complementarity) ? [] : ϕ,
 				),
 			)
 			G̃ = Vector{symbolic_type}(
@@ -1629,16 +1660,41 @@ function generate_mcp_reduced_kkt_system(
 					],
 				),
 			)
+			# level == 1 && begin
+			# 	G̃ = Vector{symbolic_type}(
+			# 		filter!(
+			# 			!isnothing,
+			# 			[
+			# 				G̃
+			# 				isnothing(g) ? nothing : g
+			# 				!has_lower_preference_constraints ? nothing : lower_preference_constraints
+			# 				isnothing(lower_level_Γ) ? nothing : zeros(length(lower_level_Γ))
+			# 				isnothing(lower_level_Γₚ) ? nothing : zeros(length(lower_level_Γₚ))
+			# 			],
+			# 		),
+			# 	)
+			# 	ỹ = Vector{symbolic_type}(
+			# 		filter!(
+			# 			!isnothing,
+			# 			[
+			# 				ỹ # contains only ϕ and ϕₚ
+			# 				isnothing(g) ? nothing : γ
+			# 				!has_lower_preference_constraints ? nothing : γₚₗ
+			# 				isnothing(lower_level_Γ) ? nothing : lower_level_Γ
+			# 				isnothing(lower_level_Γₚ) ? nothing : lower_level_Γₚ
+			# 			],
+			# 		),
+			# 	)
 			level == 1 && begin
 				G̃ = Vector{symbolic_type}(
 					filter!(
 						!isnothing,
 						[
-							G̃
+							# G̃
 							isnothing(g) ? nothing : g
 							!has_lower_preference_constraints ? nothing : lower_preference_constraints
-							isnothing(lower_level_Γ) ? nothing : zeros(length(lower_level_Γ))
-							isnothing(lower_level_Γₚ) ? nothing : zeros(length(lower_level_Γₚ))
+							isnothing(lower_level_Γ) ? nothing : repeat(g, length(lower_levels)) # zeros(length(lower_level_Γ))
+							isnothing(lower_level_Γₚ) ? nothing : zeros(length(lower_level_Γₚ)) # TODO
 						],
 					),
 				)
@@ -1646,7 +1702,7 @@ function generate_mcp_reduced_kkt_system(
 					filter!(
 						!isnothing,
 						[
-							ỹ # contains only ϕ and ϕₚ
+							# ỹ # contains only ϕ and ϕₚ
 							isnothing(g) ? nothing : γ
 							!has_lower_preference_constraints ? nothing : γₚₗ
 							isnothing(lower_level_Γ) ? nothing : lower_level_Γ
@@ -1675,12 +1731,11 @@ function generate_mcp_reduced_kkt_system(
 			)
 			# z contains primals, equality and stationarity duals. Should be larger than F = 0.
 			# y contains all inequality duals (∈ [0, ∞)) in alignment with G ≥ 0.
-			# Main.@infiltrate
 			@assert length(G) == length(y) "Mismatch between number of inequality constraints and inequality duals for player $(player): $(length(G)) vs $(length(y))"
 			num_zero_rows = length(z) - length(F)
 			@assert num_zero_rows >= 0 "F has more rows than z for player $(player): $(length(F)) vs $(length(z))"
 			F = Vector{symbolic_type}(vcat(F, zeros(num_zero_rows)))
-			
+
 			# Interim check
 			# println("goop.jl: Player $(player) KKT sizes: length(F) = $(length(F)), length(z) = $(length(z)), length(G) = $(length(G)), length(y) = $(length(y))")
 			# println("goop.jl: Player $(player) num_zero_rows in F = $(num_zero_rows)")
@@ -1690,6 +1745,9 @@ function generate_mcp_reduced_kkt_system(
 			z_mcp = Vector{symbolic_type}(vcat(z, y))
 			z̅_mcp = vcat(fill(Inf, length(F)), fill(Inf, length(G)))
 			z̲_mcp = vcat(fill(-Inf, length(F)), fill(0.0, length(G))) # G ≥ 0 constraints	
+			
+			
+			# Main.@infiltrate
 
 			(; F_mcp, z_mcp, z̅_mcp, z̲_mcp)
 		end
@@ -1727,6 +1785,18 @@ function generate_mcp_reduced_kkt_system(
 	@assert length(z̅) == length(z) "Reduced MCP upper-bound length mismatch: length(z̅)=$(length(z̅)), length(z)=$(length(z))"
 
 	ParametricMCP(F_mcp, z, θ, z̲, z̅; compute_sensitivities = false)
+end
+
+"Construct the Reduced Quasi-system corresponding to a ParametricGOOP."
+function generate_mcp_quasi_kkt_system(
+	goop::ParametricGOOP;
+	backend = SymbolicTracingUtils.SymbolicsBackend(),
+)
+	generate_mcp_reduced_kkt_system(
+		goop;
+		backend,
+		drop_higher_order_terms = true,
+	)
 end
 
 """[PATH Solver] Build the complete KKT system as a `ParametricMCP`.

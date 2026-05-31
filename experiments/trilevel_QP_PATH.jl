@@ -7,7 +7,7 @@ using BlockArrays: Block, BlockArray
 using NonlinearSolve
 using QuasiGOOP
 
-const NUM_TRIALS = 100
+const NUM_TRIALS = 1
 const PATH_ATOL = 1e-3
 const PATH_CONVERGENCE_TOL = 2e-5
 
@@ -20,21 +20,21 @@ function default_path_options(; verbose = false)
 	return QuasiGOOP.PATHOptions(;
 		convergence_tolerance = PATH_CONVERGENCE_TOL,
 		ϵ₀ = 0.0,
-		cumulative_iteration_limit = 100000,
+		cumulative_iteration_limit = 1000000,
 		proximal_perturbation = 1e-2,
-		major_iteration_limit = 3000,
-		minor_iteration_limit = 3000,
-		nms_initial_reference_factor = 100,
-		nms_maximum_watchdogs = 100,
-		nms_memory_size = 100,
-		nms_mstep_frequency = 100,
+		major_iteration_limit = 10000,
+		minor_iteration_limit = 15000,
+		nms_initial_reference_factor = 50000,
+		nms_maximum_watchdogs = 8000,
+		nms_memory_size = 16000,
+		nms_mstep_frequency = 5000,
 		lemke_start_type = "advanced",
 		lemke_rank_deficiency_iterations = 50,
-		restart_limit = 500,
-		gradient_step_limit = 500,
+		restart_limit = 120,
+		gradient_step_limit = 1200,
 		use_basics = true,
 		use_start = true,
-		verbose,
+		verbose = true,
 	)
 end
 
@@ -51,26 +51,24 @@ function build_trilevel_qp_problem(; seed = nothing)
 
 	x = BlockArray(zeros(n), [n])
 	θ = BlockArray([0.0], [1])
-	initial_guess = [2.0, 0.0, 0.0, 0.0]
+	initial_guess = fill(0.5, n)
 
 	J₁(x, θ) = 0.5 * x[Block(1)]' * Q₁ * x[Block(1)] + c₁' * x[Block(1)]
 	J₂(x, θ) = 0.5 * x[Block(1)]' * Q₂ * x[Block(1)] + c₂' * x[Block(1)]
 	J₃(x, θ) = 0.5 * x[Block(1)]' * Q₃ * x[Block(1)] + c₃' * x[Block(1)]
 
-	# Equality-only bounded, non-singleton feasible set:
-	# {x in R^4 : sum(x) = 2, ||x||^2 = 4}.
-	g_eq(x, θ) = [
-		sum(x[Block(1)]) - 2.0,
-		sum(abs2, x[Block(1)]) - 4.0,
-	]
+	# Bounded, non-singleton feasible set:
+	# {x in R^4 : sum(x) = 2, x >= 0}.
+	g_eq(x, θ) = [sum(x[Block(1)]) - 2.0]
+	g_ineq(x, θ) = x[Block(1)]
 
 	problem = QuasiGOOP.ParametricGOOP(
 		x,
 		θ;
-		preferences = [[J₁, J₂, J₃]],
-		is_prioritized_constraint = [[false, false, false]],
+		preferences = [[J₁, J₂]],
+		is_prioritized_constraint = [[false, false]],
 		equality_constraints = [g_eq],
-		inequality_constraints = [nothing],
+		inequality_constraints = [g_ineq],
 		shared_equality_constraint = nothing,
 		shared_inequality_constraint = nothing,
 	)
@@ -281,6 +279,9 @@ function run_trials(num_trials = NUM_TRIALS)
 	reduced_residuals = Float64[]
 	primal_errors = Float64[]
 	dual_check_residuals = Float64[]
+	complete_only_seeds = Int[]
+	reduced_only_seeds = Int[]
+	neither_solved_seeds = Int[]
 	mismatches = []
 	first_both_solved = nothing
 
@@ -295,7 +296,7 @@ function run_trials(num_trials = NUM_TRIALS)
 		)
 		reduced = solve_with_path(
 			problem,
-			initial_guess;
+			complete.primals; # initial_guess;
 			mcp_system = QuasiGOOP.generate_mcp_reduced_kkt_system,
 		)
 
@@ -309,6 +310,13 @@ function run_trials(num_trials = NUM_TRIALS)
 
 		status_key = (string(complete.output.status), string(reduced.output.status))
 		status_pairs[status_key] = get(status_pairs, status_key, 0) + 1
+		if complete_ok && !reduced_ok
+			push!(complete_only_seeds, seed)
+		elseif !complete_ok && reduced_ok
+			push!(reduced_only_seeds, seed)
+		elseif !complete_ok && !reduced_ok
+			push!(neither_solved_seeds, seed)
+		end
 
 		if complete_ok && reduced_ok
 			both_solved += 1
@@ -330,38 +338,38 @@ function run_trials(num_trials = NUM_TRIALS)
 				)
 			end
 
-				if primal_error > PATH_ATOL
-					mismatches_path_tol += 1
-					dual_check = complete_dual_check_for_primal(complete, reduced.primals, parameter_value)
-					push!(dual_check_residuals, dual_check.residual_norm)
-					dual_check.valid_at_path_atol && (mismatches_valid_at_path_atol += 1)
-					dual_check.valid_at_convergence_tol && (mismatches_valid_at_convergence_tol += 1)
+			if primal_error > PATH_ATOL
+				mismatches_path_tol += 1
+				dual_check = complete_dual_check_for_primal(complete, reduced.primals, parameter_value)
+				push!(dual_check_residuals, dual_check.residual_norm)
+				dual_check.valid_at_path_atol && (mismatches_valid_at_path_atol += 1)
+				dual_check.valid_at_convergence_tol && (mismatches_valid_at_convergence_tol += 1)
 
-					push!(
-						mismatches,
-						(;
+				push!(
+					mismatches,
+					(;
 						seed,
 						primal_error,
 						complete_residual = complete.output.info.residual,
-							reduced_residual = reduced.output.info.residual,
-							complete_primals = complete.primals,
-							reduced_primals = reduced.primals,
-							dual_check_residual = dual_check.residual_norm,
-							dual_check_valid_at_path_atol = dual_check.valid_at_path_atol,
-							dual_check_valid_at_convergence_tol = dual_check.valid_at_convergence_tol,
-							dual_check_retcode = dual_check.sol.retcode,
-							dual_check_message = dual_check.message,
-						),
-					)
-				end
+						reduced_residual = reduced.output.info.residual,
+						complete_primals = complete.primals,
+						reduced_primals = reduced.primals,
+						dual_check_residual = dual_check.residual_norm,
+						dual_check_valid_at_path_atol = dual_check.valid_at_path_atol,
+						dual_check_valid_at_convergence_tol = dual_check.valid_at_convergence_tol,
+						dual_check_retcode = dual_check.sol.retcode,
+						dual_check_message = dual_check.message,
+					),
+				)
 			end
+		end
 
 		seed % 10 == 0 && println("completed ", seed, "/", num_trials)
 	end
 
-	println("\nSummary: equality-only trilevel QP, same initial guess for complete and reduced")
-	println("constraints: sum(x) = 2, sum(abs2, x) = 4, no inequalities")
-	println("initial guess: [2.0, 0.0, 0.0, 0.0]")
+	println("\nSummary: bounded linear-constraint trilevel QP, same initial guess for complete and reduced")
+	println("constraints: sum(x) = 2, x >= 0")
+	println("initial guess: [0.5, 0.5, 0.5, 0.5]")
 	println("total runs: ", num_trials)
 	println("complete PATH solved: ", complete_solved)
 	println("reduced PATH solved: ", reduced_solved)
@@ -371,6 +379,9 @@ function run_trials(num_trials = NUM_TRIALS)
 	println("mismatches with complete duals found <= ", PATH_ATOL, ": ", mismatches_valid_at_path_atol)
 	println("mismatches with complete duals found <= ", PATH_CONVERGENCE_TOL, ": ", mismatches_valid_at_convergence_tol)
 	println("status pairs: ", status_pairs)
+	println("complete solved but reduced did not seeds: ", complete_only_seeds)
+	println("reduced solved but complete did not seeds: ", reduced_only_seeds)
+	println("neither solved seeds: ", neither_solved_seeds)
 	println("complete residual min/median/max: ", residual_summary(complete_residuals))
 	println("reduced residual min/median/max: ", residual_summary(reduced_residuals))
 
@@ -397,17 +408,17 @@ function run_trials(num_trials = NUM_TRIALS)
 			println(
 				"seed=", item.seed,
 				" primal_error=", item.primal_error,
-					" complete_res=", item.complete_residual,
-					" reduced_res=", item.reduced_residual,
-					" dual_check_res=", item.dual_check_residual,
-					" dual_valid_path_atol=", item.dual_check_valid_at_path_atol,
-					" dual_valid_convergence_tol=", item.dual_check_valid_at_convergence_tol,
-					" dual_retcode=", item.dual_check_retcode,
-					" complete_primals=", item.complete_primals,
-					" reduced_primals=", item.reduced_primals,
-					isempty(item.dual_check_message) ? "" : " dual_message=$(item.dual_check_message)",
-				)
-			end
+				" complete_res=", item.complete_residual,
+				" reduced_res=", item.reduced_residual,
+				" dual_check_res=", item.dual_check_residual,
+				" dual_valid_path_atol=", item.dual_check_valid_at_path_atol,
+				" dual_valid_convergence_tol=", item.dual_check_valid_at_convergence_tol,
+				" dual_retcode=", item.dual_check_retcode,
+				" complete_primals=", item.complete_primals,
+				" reduced_primals=", item.reduced_primals,
+				isempty(item.dual_check_message) ? "" : " dual_message=$(item.dual_check_message)",
+			)
+		end
 	end
 end
 

@@ -312,6 +312,8 @@ function solve(
 		mcp,
 		[θ; options.ϵ₀]; # ϵ₀ relaxation parameter is embedded into θ as θ[end] or θ[sum(paramters)+1]
 		initial_guess,
+		# output_options = "yes",
+		# output_warnings = "yes",
 		cumulative_iteration_limit = options.cumulative_iteration_limit,
 		proximal_perturbation = options.proximal_perturbation,
 		major_iteration_limit = options.major_iteration_limit,
@@ -328,6 +330,8 @@ function solve(
 		use_basics = options.use_basics,
 		use_start = options.use_start,
 		verbose = options.verbose,
+		crash_iteration_limit = 100,
+		crash_nbchange_limit = 100,
 	)
 
 	(; status, z, ϵ = options.ϵ₀, info)

@@ -73,6 +73,7 @@ function default_path_options(; verbose = false)
 	)
 end
 
+# Generate KKT systems 
 complete_mcp_system(problem) = QuasiGOOP.generate_mcp_complete_kkt_system(problem)
 reduced_mcp_system(problem) = QuasiGOOP.generate_mcp_reduced_kkt_system(problem)
 
