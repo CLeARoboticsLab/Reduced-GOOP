@@ -1,5 +1,5 @@
 module ExamplesQP
-using QuasiGOOP
+using ReducedGOOP
 
 using ParametricMCPs
 using LinearAlgebra: I, norm, pinv

@@ -1,4 +1,4 @@
-name = "QuasiGOOP"
+name = "ReducedGOOP"
 uuid = "48e8ddca-bd20-452f-8ba0-e6bfbdc6f25c"
 authors = ["Dong Ho Lee <leedh0124@utexas.edu>"]
 version = "0.1.0"

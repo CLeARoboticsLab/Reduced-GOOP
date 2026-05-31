@@ -5,7 +5,7 @@ using Statistics
 
 using BlockArrays: Block, BlockArray
 using NonlinearSolve
-using QuasiGOOP
+using ReducedGOOP
 
 const NUM_TRIALS = 1
 const PATH_ATOL = 1e-3
@@ -17,7 +17,7 @@ function rand_psd(n, r)
 end
 
 function default_path_options(; verbose = false)
-	return QuasiGOOP.PATHOptions(;
+	return ReducedGOOP.PATHOptions(;
 		convergence_tolerance = PATH_CONVERGENCE_TOL,
 		ϵ₀ = 0.0,
 		cumulative_iteration_limit = 1000000,
@@ -34,7 +34,7 @@ function default_path_options(; verbose = false)
 		gradient_step_limit = 1200,
 		use_basics = true,
 		use_start = true,
-		verbose = true,
+		verbose = verbose,
 	)
 end
 
@@ -62,7 +62,7 @@ function build_trilevel_qp_problem(; seed = nothing)
 	g_eq(x, θ) = [sum(x[Block(1)]) - 2.0]
 	g_ineq(x, θ) = x[Block(1)]
 
-	problem = QuasiGOOP.ParametricGOOP(
+	problem = ReducedGOOP.ParametricGOOP(
 		x,
 		θ;
 		preferences = [[J₁, J₂]],
@@ -82,8 +82,8 @@ function solve_with_path(problem, primal_initial_guess; mcp_system)
 	initial_guess[1:length(primal_initial_guess)] .= primal_initial_guess
 
 	output = with_logger(NullLogger()) do
-		QuasiGOOP.solve(
-			QuasiGOOP.PATHSolver(),
+		ReducedGOOP.solve(
+			ReducedGOOP.PATHSolver(),
 			mcp,
 			zeros(sum(problem.parameter_dims));
 			z₀ = initial_guess,
@@ -292,12 +292,12 @@ function run_trials(num_trials = NUM_TRIALS)
 		complete = solve_with_path(
 			problem,
 			initial_guess;
-			mcp_system = QuasiGOOP.generate_mcp_complete_kkt_system,
+			mcp_system = ReducedGOOP.generate_mcp_complete_kkt_system,
 		)
 		reduced = solve_with_path(
 			problem,
 			complete.primals; # initial_guess;
-			mcp_system = QuasiGOOP.generate_mcp_reduced_kkt_system,
+			mcp_system = ReducedGOOP.generate_mcp_reduced_kkt_system,
 		)
 
 		complete_ok = path_solved(complete.output)

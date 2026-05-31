@@ -9,7 +9,7 @@ using BlockArrays
 using JLD2, Distributions, Random
 using Symbolics, NonlinearSolve, LinearAlgebra
 using ParametricMCPs
-using QuasiGOOP
+using ReducedGOOP
 
 include(joinpath(@__DIR__, "Plotting.jl"))
 
@@ -244,7 +244,7 @@ function get_setup(
 	# preferences = [prioritized_preferences[player] for player in 1:num_players]
 
 
-	problem = QuasiGOOP.ParametricGOOP(
+	problem = ReducedGOOP.ParametricGOOP(
 		dummy_primals, # x
 		dummy_parameters; # θ
 		preferences,
@@ -280,7 +280,7 @@ function demo(;
 	perturbation_scale = 0.3
 	dynamics_model = :planar_double_integrator # :unicycle, :planar_double_integrator
 	goop_version = :reduced # :complete, :reduced, :quasi 
-	solver = QuasiGOOP.PATHSolver() # QuasiGOOP.InteriorPoint(), QuasiGOOP.PATHSolver()
+	solver = ReducedGOOP.PATHSolver() # ReducedGOOP.InteriorPoint(), ReducedGOOP.PATHSolver()
 	dynamics = build_intersection_dynamics(dynamics_model; dt = 0.5, control_bounds)
 
 	# run_id = "run_$(dynamics_model)_$(goop_version)_1_pref_$(num_instances)_instances_horizon_$(planning_horizon)_linesearch_$(linesearch)_goal_reaching_3"
@@ -299,17 +299,17 @@ function demo(;
 		lane_width,
 	)
 
-	kkt_generators = if solver isa QuasiGOOP.InteriorPoint
+	kkt_generators = if solver isa ReducedGOOP.InteriorPoint
 		Dict(
-			:complete => QuasiGOOP.generate_slacked_complete_kkt_system,
-			:reduced => QuasiGOOP.generate_slacked_reduced_kkt_system,
-			:quasi => QuasiGOOP.generate_slacked_quasi_kkt_system,
+			:complete => ReducedGOOP.generate_slacked_complete_kkt_system,
+			:reduced => ReducedGOOP.generate_slacked_reduced_kkt_system,
+			:quasi => ReducedGOOP.generate_slacked_quasi_kkt_system,
 		)
 	else
 		Dict(
-			:complete => QuasiGOOP.generate_mcp_complete_kkt_system,
-			:reduced => QuasiGOOP.generate_mcp_reduced_kkt_system,
-			# :quasi => QuasiGOOP.generate_mcp_quasi_kkt_system,
+			:complete => ReducedGOOP.generate_mcp_complete_kkt_system,
+			:reduced => ReducedGOOP.generate_mcp_reduced_kkt_system,
+			# :quasi => ReducedGOOP.generate_mcp_quasi_kkt_system,
 		)
 	end
 
@@ -317,7 +317,7 @@ function demo(;
 	isnothing(GOOP_kkt_system) && error("Unknown GOOP version: $(goop_version)")
 	GOOP_kkt_system = GOOP_kkt_system(problem)
 
-	if solver isa QuasiGOOP.InteriorPoint
+	if solver isa ReducedGOOP.InteriorPoint
 		println("[Primal-Dual] KKT Dimension: ", GOOP_kkt_system.kkt_dimension)
 		println("[Primal-Dual] variable Dimension: ", GOOP_kkt_system.variable_dimension)
 	else
@@ -326,8 +326,8 @@ function demo(;
 	end
 
 	function solve_game_instance(θ; z₀, ϵ₀, max_inner_iters)
-		options = if solver isa QuasiGOOP.InteriorPoint
-			QuasiGOOP.InteriorPointOptions(;
+		options = if solver isa ReducedGOOP.InteriorPoint
+			ReducedGOOP.InteriorPointOptions(;
 				tol = 1e-5,
 				η₀ = 0.0,
 				ϵ₀,
@@ -337,13 +337,13 @@ function demo(;
 				loosening_rate = 0.05,
 				min_stepsize = 1e-20,
 				linesearch = :backtracking, # :backtracking, :fraction_to_boundary
-				linear_solve_algorithm = QuasiGOOP.LinearSolve.KrylovJL_LSMR(),
+				linear_solve_algorithm = ReducedGOOP.LinearSolve.KrylovJL_LSMR(),
 				use_linsolve = false,
 				record_convergence = true,
 				verbose,
 			)
 		else
-			QuasiGOOP.PATHOptions(;
+			ReducedGOOP.PATHOptions(;
 				convergence_tolerance = 1e-4, #1e-1
 				ϵ₀,
 				cumulative_iteration_limit = 1000000,
@@ -364,14 +364,14 @@ function demo(;
 			)
 		end
 		elapsed_time = @elapsed begin
-			output = QuasiGOOP.solve(
-				solver, # QuasiGOOP.InteriorPoint(), QuasiGOOP.PATHSolver()
+			output = ReducedGOOP.solve(
+				solver, # ReducedGOOP.InteriorPoint(), ReducedGOOP.PATHSolver()
 				GOOP_kkt_system,
 				θ;
 				z₀,
 				options,
 			)
-			if solver isa QuasiGOOP.InteriorPoint
+			if solver isa ReducedGOOP.InteriorPoint
 				(; status, z, x, s, σ, γ, kkt_error, ϵ, total_iters, kkt_error_history) = output
 				status == :failed && return nothing
 			else
@@ -797,15 +797,15 @@ function recover_complete_kkt_duals_for_fixed_primal(
 	for (sym, val) in zip(z_symbolic[primal_indices], fixed_primal)
 		substitution_dict[sym] = val
 	end
-	backend = QuasiGOOP.SymbolicTracingUtils.SymbolicsBackend()
+	backend = ReducedGOOP.SymbolicTracingUtils.SymbolicsBackend()
 	θ_symbols =
-		QuasiGOOP.SymbolicTracingUtils.make_variables(backend, :θ, length(θ))
+		ReducedGOOP.SymbolicTracingUtils.make_variables(backend, :θ, length(θ))
 	for (sym, val) in zip(θ_symbols, θ)
 		substitution_dict[sym] = val
 	end
 	let
-		ϵ_sym = only(QuasiGOOP.SymbolicTracingUtils.make_variables(backend, :ϵ, 1))
-		η_sym = only(QuasiGOOP.SymbolicTracingUtils.make_variables(backend, :η, 1))
+		ϵ_sym = only(ReducedGOOP.SymbolicTracingUtils.make_variables(backend, :ϵ, 1))
+		η_sym = only(ReducedGOOP.SymbolicTracingUtils.make_variables(backend, :η, 1))
 		substitution_dict[ϵ_sym] = ϵ₀
 		substitution_dict[η_sym] = η₀
 	end

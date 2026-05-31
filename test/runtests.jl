@@ -1,7 +1,7 @@
 using Test
 
 using BlockArrays: Block, BlockArray
-using QuasiGOOP
+using ReducedGOOP
 
 const PATH_ATOL = 1e-7
 const PRIMAL_DIM = 5
@@ -52,13 +52,13 @@ set as g(x) >= 0 because exp(r) - 1 = 0 iff r = 0, and exp(r) - 1 > 0 iff r > 0.
 =#
 
 function default_path_options(; verbose = false)
-	return QuasiGOOP.PATHOptions(;
+	return ReducedGOOP.PATHOptions(;
 		convergence_tolerance = 1e-8,
 		ϵ₀ = 0.0,
-		cumulative_iteration_limit = 10000,
+		cumulative_iteration_limit = 50000,
 		proximal_perturbation = 1e-2,
-		major_iteration_limit = 1000,
-		minor_iteration_limit = 1000,
+		major_iteration_limit = 5000,
+		minor_iteration_limit = 5000,
 		nms_initial_reference_factor = 100,
 		nms_maximum_watchdogs = 100,
 		nms_memory_size = 100,
@@ -74,8 +74,8 @@ function default_path_options(; verbose = false)
 end
 
 # Generate KKT systems 
-complete_mcp_system(problem) = QuasiGOOP.generate_mcp_complete_kkt_system(problem)
-reduced_mcp_system(problem) = QuasiGOOP.generate_mcp_reduced_kkt_system(problem)
+complete_mcp_system(problem) = ReducedGOOP.generate_mcp_complete_kkt_system(problem)
+reduced_mcp_system(problem) = ReducedGOOP.generate_mcp_reduced_kkt_system(problem)
 
 function solve_with_path(
 	problem,
@@ -92,8 +92,8 @@ function solve_with_path(
 		z₀
 	end
 
-	output = QuasiGOOP.solve(
-		QuasiGOOP.PATHSolver(),
+	output = ReducedGOOP.solve(
+		ReducedGOOP.PATHSolver(),
 		mcp,
 		zeros(sum(problem.parameter_dims));
 		z₀ = initial_guess,
@@ -373,7 +373,7 @@ function build_benchmark_problem(; num_players::Int, levels::Int, kind::Symbol)
 		]
 	end
 
-	problem = QuasiGOOP.ParametricGOOP(
+	problem = ReducedGOOP.ParametricGOOP(
 		x_template,
 		θ_template;
 		preferences,
@@ -416,7 +416,7 @@ function build_baseline_nonnegative_problem()
 	zero_objective(x, θ) = 0.0 * sum(x[Block(1)])
 	nonnegative_constraint(x, θ) = x[Block(1)]
 
-	problem = QuasiGOOP.ParametricGOOP(
+	problem = ReducedGOOP.ParametricGOOP(
 		x_template,
 		θ_template;
 		preferences = [[zero_objective]],
@@ -442,7 +442,7 @@ function build_baseline_bilevel_psd_problem()
 	lower_zero_objective(x, θ) = 0.0 * sum(x[Block(1)])
 	nonnegative_constraint(x, θ) = x[Block(1)]
 
-	problem = QuasiGOOP.ParametricGOOP(
+	problem = ReducedGOOP.ParametricGOOP(
 		x_template,
 		θ_template;
 		preferences = [[upper_objective, lower_zero_objective]],
@@ -498,7 +498,7 @@ end
 			zero_objective(x, θ) = 0.0 * sum(x[Block(1)])
 			nonnegative_constraint(x, θ) = x[Block(1)]
 
-			problem = QuasiGOOP.ParametricGOOP(
+			problem = ReducedGOOP.ParametricGOOP(
 				x_template,
 				θ_template;
 				preferences = [[zero_objective]],
@@ -557,7 +557,7 @@ end
 			lower_zero_objective(x, θ) = 0.0 * sum(x[Block(1)])
 			nonnegative_constraint(x, θ) = x[Block(1)]
 
-			problem = QuasiGOOP.ParametricGOOP(
+			problem = ReducedGOOP.ParametricGOOP(
 				x_template,
 				θ_template;
 				preferences = [[upper_objective, lower_zero_objective]],
