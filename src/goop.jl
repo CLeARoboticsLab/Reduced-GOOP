@@ -134,6 +134,15 @@ function _quasi_gradient_from_terms(
 	return ∇L, new_terms
 end
 
+"This is a new preference objective that avoids slack reformulation"
+function smooth_piecewise_preference_objective(
+	preference,
+	level;
+	ϵ = 1e-3
+)
+	ifelse(preference >= ϵ, 0.0, (ϵ - preference)^(level + 2))
+end
+
 "Construct the Reduced KKT system corresponding to a ParametricGOOP."
 function generate_slacked_reduced_kkt_system(
 	goop::ParametricGOOP;
@@ -236,19 +245,19 @@ function generate_slacked_reduced_kkt_system(
 
 			if only(is_prioritized_constraint)
 				# Highest priority is a constraint.
-				preference_slack = SymbolicTracingUtils.make_variables(
-					backend,
-					Symbol("s_$(player)_$(level)"),
-					length(h), # get the right dimension
-				)
-				push!(s, preference_slack...)
+				# preference_slack = SymbolicTracingUtils.make_variables(
+				# 	backend,
+				# 	Symbol("s_$(player)_$(level)"),
+				# 	length(h), # get the right dimension
+				# )
+				# push!(s, preference_slack...)
 
-				σₚ = SymbolicTracingUtils.make_variables(
-					backend,
-					Symbol("σₚ_$(player)_$(level)"),
-					length(h),
-				)
-				push!(Σ, σₚ...)
+				# σₚ = SymbolicTracingUtils.make_variables(
+				# 	backend,
+				# 	Symbol("σₚ_$(player)_$(level)"),
+				# 	length(h),
+				# )
+				# push!(Σ, σₚ...)
 
 				# σₚₛ = SymbolicTracingUtils.make_variables(
 				# 	backend,
@@ -257,12 +266,12 @@ function generate_slacked_reduced_kkt_system(
 				# )
 				# push!(Σ, σₚₛ...)
 
-				γₚ = SymbolicTracingUtils.make_variables(
-					backend,
-					Symbol("γₚ_$(player)_$(level)"),
-					length(h),
-				)
-				push!(Γ, γₚ...)
+				# γₚ = SymbolicTracingUtils.make_variables(
+				# 	backend,
+				# 	Symbol("γₚ_$(player)_$(level)"),
+				# 	length(h),
+				# )
+				# push!(Γ, γₚ...)
 
 				# μₛ = SymbolicTracingUtils.make_variables(
 				# 	backend,
@@ -277,11 +286,14 @@ function generate_slacked_reduced_kkt_system(
 				# 	(isnothing(fₛ) ? 0 : λₛ' * fₛ) - (isnothing(gₛ) ? 0 : γₛ' * gₛ)
 
 				L =
-					sum(preference_slack .^ 2) - γₚ' * (h .+ preference_slack) -
+					sum(smooth_piecewise_preference_objective.(h, level)) -
+					# γₚ' * (h .+ preference_slack) -
 					(isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
 					(isnothing(fₛ) ? 0 : λₛ' * fₛ) - (isnothing(gₛ) ? 0 : γₛ' * gₛ)
 
-				vars = vcat(x[Block(player)], preference_slack)
+				# vars = vcat(x[Block(player)], preference_slack)
+				vars = x[Block(player)]
+
 				∇L, π_terms = if drop_higher_order_terms
 					lagrangian_terms = QuasiLagrangianTerm[]
 					_push_quasi_lagrangian_term!(lagrangian_terms, sum(preference_slack .^ 2))
@@ -305,8 +317,8 @@ function generate_slacked_reduced_kkt_system(
 						[
 							∇L .+ η * vars
 							f
-							h .+ preference_slack .- σₚ
-							σₚ .* γₚ .- ϵ
+							# h .+ preference_slack .- σₚ
+							# σₚ .* γₚ .- ϵ
 							# preference_slack .- σₚₛ
 							# σₚₛ .* μₛ .- ϵ
 							(isnothing(g) ? nothing : g .- σ)
@@ -396,19 +408,19 @@ function generate_slacked_reduced_kkt_system(
 
 		if first(is_prioritized_constraint)
 			# Highest priority is a constraint.
-			preference_slack = SymbolicTracingUtils.make_variables(
-				backend,
-				Symbol("s_$(player)_$(level)"),
-				length(h),
-			)
-			push!(s, preference_slack...)
+			# preference_slack = SymbolicTracingUtils.make_variables(
+			# 	backend,
+			# 	Symbol("s_$(player)_$(level)"),
+			# 	length(h),
+			# )
+			# push!(s, preference_slack...)
 
-			σₚ = SymbolicTracingUtils.make_variables(
-				backend,
-				Symbol("σₚ_$(player)_$(level)"),
-				length(h),
-			)
-			push!(Σ, σₚ...)
+			# σₚ = SymbolicTracingUtils.make_variables(
+			# 	backend,
+			# 	Symbol("σₚ_$(player)_$(level)"),
+			# 	length(h),
+			# )
+			# push!(Σ, σₚ...)
 
 			# σₚₛ = SymbolicTracingUtils.make_variables(
 			# 	backend,
@@ -417,12 +429,12 @@ function generate_slacked_reduced_kkt_system(
 			# )
 			# push!(Σ, σₚₛ...)
 
-			γₚ = SymbolicTracingUtils.make_variables(
-				backend,
-				Symbol("γₚ_$(player)_$(level)"),
-				length(h),
-			)
-			push!(Γ, γₚ...)
+			# γₚ = SymbolicTracingUtils.make_variables(
+			# 	backend,
+			# 	Symbol("γₚ_$(player)_$(level)"),
+			# 	length(h),
+			# )
+			# push!(Γ, γₚ...)
 
 			# μₛ = SymbolicTracingUtils.make_variables(
 			# 	backend,
@@ -442,13 +454,16 @@ function generate_slacked_reduced_kkt_system(
 			# 	(isnothing(gₛ) ? 0 : ϕₛ' * (repeat(gₛ, num_levels - level) .* blocked_Γ_cs_shared[Block(level+1):Block(num_levels)]))
 
 			L =
-				sum(preference_slack .^ 2) - γₚ' * (h .+ (preference_slack)) -
+				sum(smooth_piecewise_preference_objective.(h, level)) - 
+				# γₚ' * (h .+ (preference_slack)) -
 				ψ' * π - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
 				(isnothing(fₛ) ? 0 : λ̃ₛ' * fₛ) - (isnothing(gₛ) ? 0 : γ̃ₛ' * gₛ) -
 				(isnothing(g) ? 0 : ϕ' * (repeat(g, num_levels - level) .* blocked_Γ_cs[Block(level+1):Block(num_levels)])) -
 				(isnothing(gₛ) ? 0 : ϕₛ' * (repeat(gₛ, num_levels - level) .* blocked_Γ_cs_shared[Block(level+1):Block(num_levels)]))
 
-			vars = vcat(x[Block(player)], preference_slack)
+			# vars = vcat(x[Block(player)], preference_slack)
+			vars = x[Block(player)]
+
 			∇L, π_terms = if drop_higher_order_terms
 				lagrangian_terms = QuasiLagrangianTerm[]
 				_push_quasi_lagrangian_term!(lagrangian_terms, sum(preference_slack .^ 2))
@@ -481,11 +496,11 @@ function generate_slacked_reduced_kkt_system(
 
 			F̃ = [
 				∇L .+ η * vars
-				h .+ preference_slack .- σₚ
-				σₚ .* γₚ .- ϵ
+				# h .+ preference_slack .- σₚ
+				# σₚ .* γₚ .- ϵ
 				# preference_slack .- σₚₛ
 				# σₚₛ .* μₛ .- ϵ
-				(isnothing(g) ? nothing : g .- σ)
+				# (isnothing(g) ? nothing : g .- σ)
 				(isnothing(g) ? nothing : σ .* γ .- ϵ)
 				(isnothing(gₛ) ? nothing : σₛ .* γ̃ₛ .- ϵ) # Note: same slacks (not duals) for all levels
 				F
@@ -571,7 +586,7 @@ function generate_slacked_reduced_kkt_system(
 	F = Vector{symbolic_type}(
 		filter!(!isnothing,
 			vcat(
-				filter!(!iszero, flattened_F),
+				drop_higher_order_terms ? filter!(!iszero, flattened_F) : flattened_F,
 				fₛ,
 				(isnothing(gₛ) ? nothing : gₛ .- σₛ),
 				(isnothing(gₛ) ? nothing : σₛ .* γₛ .- ϵ),

@@ -18,7 +18,7 @@ end
 
 # include("Intersection.jl")
 # include("goop_comparison_QP.jl")
-# include("trilevel_QP.jl")
+include("trilevel_QP.jl")
 include("trilevel_QP_PATH.jl")
 # include("nonlinear_goop_test.jl")
 

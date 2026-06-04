@@ -250,7 +250,7 @@ function get_setup(
 		preferences,
 		is_prioritized_constraint,
 		equality_constraints,
-		inequality_constraints, # = [nothing, nothing],
+		inequality_constraints = [nothing, nothing],
 		shared_equality_constraint = nothing, # keep these under individual constraints
 		shared_inequality_constraint = nothing,
 	)
@@ -280,7 +280,7 @@ function demo(;
 	perturbation_scale = 0.3
 	dynamics_model = :planar_double_integrator # :unicycle, :planar_double_integrator
 	goop_version = :reduced # :complete, :reduced, :quasi 
-	solver = ReducedGOOP.PATHSolver() # ReducedGOOP.InteriorPoint(), ReducedGOOP.PATHSolver()
+	solver = ReducedGOOP.InteriorPoint() # ReducedGOOP.InteriorPoint(), ReducedGOOP.PATHSolver()
 	dynamics = build_intersection_dynamics(dynamics_model; dt = 0.5, control_bounds)
 
 	# run_id = "run_$(dynamics_model)_$(goop_version)_1_pref_$(num_instances)_instances_horizon_$(planning_horizon)_linesearch_$(linesearch)_goal_reaching_3"
