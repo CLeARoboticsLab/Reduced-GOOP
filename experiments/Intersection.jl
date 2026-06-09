@@ -191,6 +191,8 @@ function get_setup(
 				sum(goal_deviation .^ 2) #+ 0.1sum(sum(u .^ 2) for u in us)
 				# sum(sum(u .^ 2) for u in us)
 			end,
+
+			inequality_constraints[1],
 		],
 		[
 			# reach the goal.
@@ -222,6 +224,8 @@ function get_setup(
 					velocity_limit_constraints(xs[k], dynamics_model; velocity_limit)
 				end
 			end,
+
+			inequality_constraints[2],
 		],
 	]
 
@@ -236,7 +240,7 @@ function get_setup(
 	# is_prioritized_constraint = [[false, true, false], [false, false, true]]
 	# preferences = [vcat(objectives[player], prioritized_preferences[player]) for player in 1:num_players]
 
-	is_prioritized_constraint = [[true, false], [false, true]]
+	is_prioritized_constraint = [[true, false, true], [false, true, true]]
 	preferences = prioritized_preferences
 
 	# is_prioritized_constraint = [[false], [false]]
@@ -285,7 +289,7 @@ function demo(;
 
 	# run_id = "run_$(dynamics_model)_$(goop_version)_1_pref_$(num_instances)_instances_horizon_$(planning_horizon)_linesearch_$(linesearch)_goal_reaching_3"
 
-	run_id = "0_PATH_$(goop_version)_init_vel2_1.0"
+	run_id = "0_PATH_$(goop_version)_init_vel2_1.0_control_bounds_as_add_pref"
 	# run_id = "0_PDIP_init_vel2_1.0_w_total_complementarity"
 
 	(; problem, flatten_parameters) = get_setup(
