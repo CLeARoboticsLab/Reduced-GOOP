@@ -17,6 +17,7 @@ Base.@kwdef struct InteriorPointOptions
 	linear_solve_algorithm::LinearSolve.SciMLLinearSolveAlgorithm
 	use_linsolve::Bool
 	record_convergence::Bool
+	record_condition_number::Bool = false
 	verbose::Bool
 end
 
@@ -73,6 +74,7 @@ Keyword arguments:
 	- `verbose::Bool = false`: whether to print debug information.
 	- `linear_solve_algorithm::LinearSolve.SciMLLinearSolveAlgorithm`: the linear solve algorithm to use. Any solver from `LinearSolve.jl` that can handle nonsquare system can be used.
 	- `record_convergence::Bool = false`: if true, record and return `kkt_error_history`.
+	- `record_condition_number::Bool = false`: if true, record and return `condition_number_history`.
 	- `measure_solve_time::Bool = false`: if true, returns solve time measured with `@btime` (warmup run excludes compile) and includes `solve_time_sec`/`solve_time_ns` fields.
 	- `benchmark_samples::Int = 1`: number of @btime samples when `measure_solve_time = true`.
 	- `benchmark_evals::Int = 1`: number of evals per sample when `measure_solve_time = true`.
@@ -96,6 +98,7 @@ function solve(
 	linear_solve_algorithm = options.linear_solve_algorithm
 	use_linsolve = options.use_linsolve
 	record_convergence = options.record_convergence
+	record_condition_number = options.record_condition_number
 	verbose = options.verbose
 
 	# z = @something(z₀, begin
@@ -152,8 +155,11 @@ function solve(
 	inner_iters = 1
 	outer_iters = 1
 	kkt_error = Inf
+	best_kkt_error = Inf
+	iters_since_improvement = 0
 	is_fraction_to_boundary_linesearch = (linesearch == :fraction_to_boundary)
 	kkt_error_history = Float64[]
+	condition_number_history = Float64[]
 	while outer_iters < max_outer_iters || iszero(total_iters)
 		inner_iters = 1
 		status = :solved
@@ -169,7 +175,7 @@ function solve(
 			mcp.∇F_z!(∇F, z; θ, ϵ, η)
 			# @assert all(.!isnan.(F)) "Found NaN in F - aborting!"
 			# @assert all(.!isnan.(∇F)) "Found NaN in ∇F - aborting!"
-			# verbose && println("inner iter $inner_iters, condition number of ∇F = $(cond(collect(∇F),2))")
+			condition_number = record_condition_number ? cond(collect(∇F), 2) : NaN
 			verbose && println("inner iter $inner_iters")
 			# Check the primals
 			# verbose && println("current primal x: ", round.(z[mcp.primal_dims]; digits = 4))
@@ -248,6 +254,9 @@ function solve(
 			kkt_error = norm(F, 2)
 			if record_convergence
 				push!(kkt_error_history, kkt_error)
+			end	
+			if record_condition_number
+				push!(condition_number_history, condition_number)
 			end
 
 			verbose && println("KKT error = $kkt_error")
@@ -270,12 +279,12 @@ function solve(
 		outer_iters += 1
 	end
 
-	if outer_iters == max_outer_iters
-		status = (kkt_error <= tol) ? :solved : :failed
-		# (kkt_error <= tol) && Main.@infiltrate
-	end
+	# Evaluate final convergence unconditionally — the outer_iters == max_outer_iters
+	# check was unreachable when max_outer_iters=1 because the loop increments
+	# outer_iters to 2 before the check.
+	status = (kkt_error <= tol) ? :solved : :failed
 
-	(; status, z, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters, kkt_error_history)
+	(; status, z, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters, kkt_error_history, condition_number_history)
 end
 
 """Helper function to compute the step size `α` which solves:

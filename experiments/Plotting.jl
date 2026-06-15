@@ -547,6 +547,35 @@ function plot_convergence_plot(;
 	return figure, ax
 end
 
+function plot_condition_number_plot(;
+	condition_number_history,
+	total_iters = nothing,
+	show_ylabel = true,
+)
+	axis_label_fontsize = 30
+	tick_label_fontsize = 22
+	ylabel_text = show_ylabel ? L"$\log(\kappa(\nabla F))$" : ""
+	figure = serif_figure()
+	ax = CairoMakie.Axis(
+		figure[1, 1];
+		xlabel = "Newton iteration",
+		ylabel = ylabel_text,
+		xlabelsize = axis_label_fontsize,
+		ylabelsize = axis_label_fontsize,
+		xticklabelsize = tick_label_fontsize,
+		yticklabelsize = tick_label_fontsize,
+	)
+
+	iteration_axis = collect(1:length(condition_number_history))
+	if !isnothing(total_iters) && total_iters > 0 && total_iters < length(iteration_axis)
+		iteration_axis = iteration_axis[1:total_iters]
+		condition_number_history = condition_number_history[1:total_iters]
+	end
+	CairoMakie.lines!(ax, iteration_axis, condition_number_history, color = :darkorange, linewidth = 4)
+
+	return figure, ax
+end
+
 function plot_convergence_plot_aggregate(; kkt_error_histories, show_ylabel = true)
 	if isempty(kkt_error_histories)
 		error("kkt_error_histories must be non-empty.")
