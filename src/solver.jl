@@ -177,6 +177,7 @@ function solve(
 			# @assert all(.!isnan.(∇F)) "Found NaN in ∇F - aborting!"
 			condition_number = record_condition_number ? cond(collect(∇F), 2) : NaN
 			verbose && println("inner iter $inner_iters")
+			verbose && record_condition_number && println("condition number of ∇F: ", condition_number)
 			# Check the primals
 			# verbose && println("current primal x: ", round.(z[mcp.primal_dims]; digits = 4))
 

@@ -96,16 +96,16 @@ function get_setup(
 				mapreduce(vcat, us) do u
 					vcat(u[lb_mask] - lb[lb_mask], ub[ub_mask] - u[ub_mask])
 				end,
-				mapreduce(vcat, 1:length(xs)) do k
-					px = xs[k][1]
-					py = xs[k][2]
-					vcat(
-						px + map_end,
-						-px + map_end,
-						py + lane_width,
-						-py + lane_width,
-					) # -7 ≤ pₓ ≤ 7, -2 ≤ py ≤ 2
-				end,
+				# mapreduce(vcat, 1:length(xs)) do k
+				# 	px = xs[k][1]
+				# 	py = xs[k][2]
+				# 	vcat(
+				# 		px + map_end,
+				# 		-px + map_end,
+				# 		py + lane_width,
+				# 		-py + lane_width,
+				# 	) # -7 ≤ pₓ ≤ 7, -2 ≤ py ≤ 2
+				# end,
 				shared_inequality_constraint(z, θ),
 			)
 		end,
@@ -119,16 +119,16 @@ function get_setup(
 				mapreduce(vcat, us) do u
 					vcat(u[lb_mask] - lb[lb_mask], ub[ub_mask] - u[ub_mask])
 				end,
-				mapreduce(vcat, 1:length(xs)) do k
-					px = xs[k][1]
-					py = xs[k][2]
-					vcat(
-						px + lane_width,
-						-px + lane_width,
-						py + map_end,
-						-py + map_end,
-					) # -2 ≤ pₓ ≤ 2, -7 ≤ py ≤ 7
-				end,
+				# mapreduce(vcat, 1:length(xs)) do k
+				# 	px = xs[k][1]
+				# 	py = xs[k][2]
+				# 	vcat(
+				# 		px + lane_width,
+				# 		-px + lane_width,
+				# 		py + map_end,
+				# 		-py + map_end,
+				# 	) # -2 ≤ pₓ ≤ 2, -7 ≤ py ≤ 7
+				# end,
 				shared_inequality_constraint(z, θ),
 			)
 		end,
@@ -136,8 +136,8 @@ function get_setup(
 
 	preferences = [
 		[
-			# # Minimize control effort 
-			# control_objectives[1],
+			# Minimize control effort 
+			control_objectives[1],
 
 			# Drive under speed limit
 			function (z, _)
@@ -164,11 +164,11 @@ function get_setup(
 			end, 
 			
 			# Lane bounds + collision avoidance (constraint, both players)
-			# inequality_constraints[1],
+			inequality_constraints[1],
 		],
 		[
-			# # Minimize control effort
-			# control_objectives[2],
+			# Minimize control effort
+			control_objectives[2],
 
 			# Reach the goal
 			function (z, θ)
@@ -195,12 +195,12 @@ function get_setup(
 			end,
 			
 			# Lane bounds + collision avoidance (constraint, both players)
-			# inequality_constraints[2],
+			inequality_constraints[2],
 		],
 	]
 
 	# Preference hierarchy: [lowest priority, ..., highest priority]
-	is_prioritized_constraint = [[true, false], [false, true]]
+	is_prioritized_constraint = [[false, true, false, true], [false, false, true, true]]
 
 	problem = ReducedGOOP.ParametricGOOP(
 		dummy_primals,
@@ -229,7 +229,7 @@ function demo(;
 	Random.seed!(rng_seed)
 
 	# ── Settings ───────────────────────────────────────────────────────────────
-	run_id         = "0_IP_reduced_two_levels"
+	run_id         = "0_IP_reduced_four_levels_with_collision_avoidance_control_bounds"
 	dynamics_model = :planar_double_integrator   # :planar_double_integrator | :unicycle
 	goop_version   = :reduced                    # :complete | :reduced | :quasi
 	solver         = ReducedGOOP.InteriorPoint()    # ReducedGOOP.InteriorPoint() | ReducedGOOP.PATHSolver()
@@ -466,6 +466,8 @@ function demo(;
 			initial_state1,
 			initial_state2,
 		)
+
+		# Warmstart with previous rollout?
 
 		save_warmstart_visualizations(
 			warmstart_solution,
