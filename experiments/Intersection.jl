@@ -200,7 +200,7 @@ function get_setup(
 	]
 
 	# Preference hierarchy: [lowest priority, ..., highest priority]
-	is_prioritized_constraint = [[true, true], [false, true]]
+	is_prioritized_constraint = [[true, false], [false, true]]
 
 	problem = ReducedGOOP.ParametricGOOP(
 		dummy_primals,
@@ -236,7 +236,7 @@ function demo(;
 
 	# ── Problem parameters ─────────────────────────────────────────────────────
 	num_players           = 2
-	planning_horizon      = 4
+	planning_horizon      = 8
 	collision_avoidance   = 1.3
 	speed_component_limit = 1.5
 	control_bounds        = (; lb = [-2.0, -2.0], ub = [2.0, 2.0])
