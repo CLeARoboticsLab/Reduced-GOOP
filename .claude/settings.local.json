@@ -20,7 +20,20 @@
       "Bash(tee /tmp/intersection_T15_minnorm.log)",
       "Bash(tee /tmp/intersection_T15_tikhonov.log)",
       "Bash(awk 'NR%5000==0 {print NR\": \"$0}')",
-      "Bash(awk 'NR%500==0 {print NR\": \"$0}')"
+      "Bash(awk 'NR%500==0 {print NR\": \"$0}')",
+      "Bash(timeout 180 julia --project=experiments experiments/trilevel_QP.jl)",
+      "Bash(julia --project=experiments experiments/trilevel_QP.jl)",
+      "Bash(julia --project=. /tmp/smoke_ip.jl)",
+      "Bash(git stash *)",
+      "Bash(git show *)",
+      "Read(//tmp/**)",
+      "Bash(cp /tmp/solver_from_stash.jl src/solver.jl && git diff --stat src/solver.jl && grep -n \"max_eta_retries\\\\|eta_retry_growth\\\\|η_min\\\\|η_max\" src/solver.jl)",
+      "Bash(julia --project=. -e 'import Pkg; Pkg.test\\(\\)')",
+      "Bash(echo \"EXIT CODE: $?\")",
+      "Bash(jobs -l)"
+    ],
+    "additionalDirectories": [
+      "/private/tmp"
     ]
   }
 }

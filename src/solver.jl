@@ -18,7 +18,12 @@ Base.@kwdef struct InteriorPointOptions
 	use_linsolve::Bool
 	record_convergence::Bool
 	record_condition_number::Bool = false
+	max_eta_retries::Int = 5
+	eta_retry_growth::Float64 = 2.0
+	η_min::Float64 = 0.0
+	η_max::Float64 = 0.1
 	verbose::Bool
+
 end
 
 Base.@kwdef struct PATHOptions
@@ -100,6 +105,10 @@ function solve(
 	record_convergence = options.record_convergence
 	record_condition_number = options.record_condition_number
 	verbose = options.verbose
+	max_eta_retries = options.max_eta_retries
+	eta_retry_growth = options.eta_retry_growth
+	η_min = options.η_min
+	η_max = options.η_max
 
 	# z = @something(z₀, begin
 	# 	z = zeros(mcp.variable_dimension)
@@ -125,6 +134,9 @@ function solve(
 	# Set up common memory.
 	∇F = mcp.∇F_z!.result_buffer
 	F = zeros(mcp.kkt_dimension)
+	F_trial = zeros(mcp.kkt_dimension)
+	Jδz = zeros(mcp.kkt_dimension)
+	z_trial = similar(z)
 	δz = zeros(mcp.variable_dimension)
 	δx = @view δz[Not(vcat(mcp.preference_slack_dims, mcp.interior_point_slack_dims, mcp.inequality_constraint_dual_dims))]
 	δs = @view δz[mcp.preference_slack_dims]
@@ -168,39 +180,19 @@ function solve(
 
 		while inner_iters < max_inner_iters && (kkt_error > tol) # (!is_fraction_to_boundary_linesearch || kkt_error > tol)
 			total_iters += 1
-			# Compute the Newton step.
-			# TODO: Can add some adaptive regularization.
-			# TODO: use a linear operator with a lazy gradient computation here.
+			# Compute the residual at the current iterate (η does not enter F, only ∇F).
 			mcp.F!(F, z; θ, ϵ, η = 0.0)
-			mcp.∇F_z!(∇F, z; θ, ϵ, η)
 			# @assert all(.!isnan.(F)) "Found NaN in F - aborting!"
-			# @assert all(.!isnan.(∇F)) "Found NaN in ∇F - aborting!"
-			condition_number = record_condition_number ? cond(collect(∇F), 2) : NaN
 			verbose && println("inner iter $inner_iters")
-			verbose && record_condition_number && println("condition number of ∇F: ", condition_number)
-			# Check the primals
-			# verbose && println("current primal x: ", round.(z[mcp.primal_dims]; digits = 4))
-
-			# # Solve δz using the specified linear solver.
-			# linsolve.A = ∇F
-			# linsolve.b = -F
-			# solution = solve!(linsolve)
-			# if !SciMLBase.successful_retcode(solution) &&
-			#    (solution.retcode !== SciMLBase.ReturnCode.Default)
-			# 	verbose &&
-			# 		@warn "Linear solve failed. Exiting prematurely. Return code: $(solution.retcode)"
-			# 	status = :failed
-			# 	break
-			# end
-			# δz .= solution.u
-
-			# Solve δz 
-			δz .= ∇F \ (-F)
-			# δz .= pinv(Matrix(∇F)) * (-F) # minimum-norm sol
-
-			# verbose && println("current δx: ", round.(δz[mcp.primal_dims]; digits = 4))
+			condition_number = NaN
 
 			if linesearch == :fraction_to_boundary
+				mcp.∇F_z!(∇F, z; θ, ϵ, η)
+				# @assert all(.!isnan.(∇F)) "Found NaN in ∇F - aborting!"
+				condition_number = record_condition_number ? cond(collect(∇F), 2) : NaN
+				verbose && record_condition_number && println("condition number of ∇F: ", condition_number)
+				δz .= pinv(Matrix(∇F)) * (-F) # minimum-norm sol
+
 				α_σ = fraction_to_the_boundary_linesearch(σ, δσ; tol = min_stepsize)
 				α_γ = fraction_to_the_boundary_linesearch(γ, δγ; tol = min_stepsize)
 				verbose && println("fraction_to_boundary linesearch α_σ = $α_σ, α_γ = $α_γ")
@@ -219,29 +211,69 @@ function solve(
 					η *= 1 + exp(-loosening_rate)
 				end
 			else
-				# backtracking linesearch
-				α = 1.0
+				# Backtracking linesearch: if the line search exhausts at the current η,
+				# grow η and re-solve the Newton step rather than failing outright.
 				F_z = norm(F, 2)
-				z_trial = similar(z)
-				@. z_trial = z + α * δz
-				mcp.F!(F, z_trial; θ, ϵ, η)
-				F_z_next = norm(F, 2)
-				while (F_z_next >= 1.0 * F_z) || (any(@. σ + α * δσ < 0) || any(@. γ + α * δγ < 0))
-					if α < min_stepsize
-						verbose && @warn "Backtracking linesearch failed. Exiting prematurely."
-						status = :failed
+				eta_retries = 0
+				local α, pred_reduction, actual_reduction
+				while true
+					mcp.∇F_z!(∇F, z; θ, ϵ, η)
+					condition_number = record_condition_number ? cond(collect(∇F), 2) : NaN
+					verbose && record_condition_number && println("condition number of ∇F: ", condition_number)
+					δz .= pinv(Matrix(∇F)) * (-F) # minimum-norm sol
+
+					α = 1.0
+					@. z_trial = z + α * δz
+					mcp.F!(F_trial, z_trial; θ, ϵ, η)
+					F_z_next = norm(F_trial, 2)
+					while (F_z_next >= 1.0 * F_z) || (any(@. σ + α * δσ < 0) || any(@. γ + α * δγ < 0))
+						if α < min_stepsize
+							break # exhausted at this η — escalate below
+						end
+
+						α *= 0.5 # decay
+						@. z_trial = z + α * δz
+						mcp.F!(F_trial, z_trial; θ, ϵ, η)
+						F_z_next = norm(F_trial, 2)
+					end
+
+					if α >= min_stepsize
+						mul!(Jδz, ∇F, δz)
+						pred_reduction = F_z^2 - norm(F .+ α .* Jδz, 2)^2
+						actual_reduction = F_z^2 - F_z_next^2
 						break
 					end
 
-					α *= 0.5 # decay
-					@. z_trial = z + α * δz
-					mcp.F!(F, z_trial; θ, ϵ, η)
-					F_z_next = norm(F, 2)
+					eta_retries += 1
+					if eta_retries > max_eta_retries
+						verbose && @warn "Backtracking linesearch failed after $max_eta_retries η-retries. Exiting prematurely."
+						status = :failed
+						break
+					end
+					verbose && printstyled(
+						"Backtracking exhausted at η=$η. Retrying with $(eta_retry_growth >= 1 ? "larger" : "smaller") η ($η -> $(η * eta_retry_growth)), attempt $eta_retries/$max_eta_retries\n";
+						color = :yellow,
+					)
+					η = min(η * eta_retry_growth, η_max)
 				end
 				if status === :failed
 					break
 				end
-				verbose && println("backtracking linesearch α = $α")
+
+				F .= F_trial # commit the accepted trial residual to compute kkt error at the end of this iteration
+
+				# Levenberg-Marquardt gain-ratio update for the next Newton iteration's η.
+				ρ_low = 0.25
+				ρ_high = 0.75
+				ρ = pred_reduction > 0 ? actual_reduction / pred_reduction : -Inf
+				if ρ < ρ_low
+					verbose && printstyled("Poor gain ratio (ρ = $ρ)... Increasing η. ($η -> $(η * (1 + exp(-loosening_rate))))\n"; color = :red)
+					η = min(η * (1 + exp(-loosening_rate)), η_max)
+				elseif ρ > ρ_high
+					verbose && printstyled("Good gain ratio (ρ = $ρ)... Decreasing η. ($η -> $(η * (1 - exp(-tightening_rate))))\n"; color = :blue)
+					η = max(η * (1 - exp(-tightening_rate)), η_min)
+				end
+				verbose && println("backtracking linesearch α = $α, gain ratio ρ = $ρ")
 				α_σ = α
 				α_γ = α
 			end
@@ -255,7 +287,7 @@ function solve(
 			kkt_error = norm(F, 2)
 			if record_convergence
 				push!(kkt_error_history, kkt_error)
-			end	
+			end
 			if record_condition_number
 				push!(condition_number_history, condition_number)
 			end

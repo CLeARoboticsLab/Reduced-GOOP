@@ -46,6 +46,11 @@ function get_setup(
 		vcat(initial_state, goal_position, obstacle_position)
 	end
 
+	function squared_violation(h)
+		"h(x) ≥ 0	<=> (min(h(x), 0))^2 = 0"
+		return (min(h, 0))^4
+	end
+
 	control_objectives = [
 		function (z, _)
 			(; us) =
@@ -59,19 +64,6 @@ function get_setup(
 		end,
 	]
 
-	equality_constraints = [
-		function (z, θ)
-			(; xs, us) =
-				unflatten_trajectory(z[Block(i)], state_dimension, control_dimension)
-			(; initial_state) = unflatten_parameters(θ[Block(i)])
-			initial_state_constraint = xs[1] - initial_state
-			dynamics_constraints = mapreduce(vcat, 2:length(xs)) do k
-				xs[k] - dynamics(xs[k-1], us[k-1], k)
-			end
-			vcat(initial_state_constraint, dynamics_constraints)
-		end for i in 1:num_players
-	]
-
 	function shared_inequality_constraint(z, _)
 		trajectories = map(
 			i ->
@@ -83,6 +75,7 @@ function get_setup(
 		mapreduce(vcat, 2:length(xs[1])) do k
 			[sum((xs[1][k][1:2] - xs[2][k][1:2]) .^ 2) - collision_avoidance^2]
 		end
+		# xs[1][end][1]^2 + xs[2][end][1]^2 - 1000 # xs[1][T] + xs[2][T] ≥ 0 for testing
 	end
 
 	inequality_constraints = [
@@ -96,20 +89,19 @@ function get_setup(
 				mapreduce(vcat, us) do u
 					vcat(u[lb_mask] - lb[lb_mask], ub[ub_mask] - u[ub_mask])
 				end,
-				# mapreduce(vcat, 1:length(xs)) do k
-				# 	px = xs[k][1]
-				# 	py = xs[k][2]
-				# 	vcat(
-				# 		px + map_end,
-				# 		-px + map_end,
-				# 		py + lane_width,
-				# 		-py + lane_width,
-				# 	) # -7 ≤ pₓ ≤ 7, -2 ≤ py ≤ 2
-				# end,
+				mapreduce(vcat, 1:length(xs)) do k
+					px = xs[k][1]
+					py = xs[k][2]
+					vcat(
+						px + map_end,
+						-px + map_end,
+						py + lane_width,
+						-py + lane_width,
+					) # -7 ≤ pₓ ≤ 7, -2 ≤ py ≤ 2
+				end,
 				shared_inequality_constraint(z, θ),
 			)
-		end,
-		function (z, θ)
+		end, function (z, θ)
 			(; lb, ub) = control_bounds(dynamics)
 			lb_mask = findall(!isinf, lb)
 			ub_mask = findall(!isinf, ub)
@@ -119,19 +111,60 @@ function get_setup(
 				mapreduce(vcat, us) do u
 					vcat(u[lb_mask] - lb[lb_mask], ub[ub_mask] - u[ub_mask])
 				end,
-				# mapreduce(vcat, 1:length(xs)) do k
-				# 	px = xs[k][1]
-				# 	py = xs[k][2]
-				# 	vcat(
-				# 		px + lane_width,
-				# 		-px + lane_width,
-				# 		py + map_end,
-				# 		-py + map_end,
-				# 	) # -2 ≤ pₓ ≤ 2, -7 ≤ py ≤ 7
-				# end,
+				mapreduce(vcat, 1:length(xs)) do k
+					px = xs[k][1]
+					py = xs[k][2]
+					vcat(
+						px + lane_width,
+						-px + lane_width,
+						py + map_end,
+						-py + map_end,
+					) # -2 ≤ pₓ ≤ 2, -7 ≤ py ≤ 7
+				end,
 				shared_inequality_constraint(z, θ),
 			)
 		end,
+	]
+
+	equality_constraints = [
+		function (z, θ)
+			(; lb, ub) = control_bounds(dynamics)
+			lb_mask = findall(!isinf, lb)
+			ub_mask = findall(!isinf, ub)
+			(; xs, us) =
+				unflatten_trajectory(z[Block(i)], state_dimension, control_dimension)
+			(; initial_state) = unflatten_parameters(θ[Block(i)])
+			initial_state_constraint = xs[1] - initial_state
+			dynamics_constraints = mapreduce(vcat, 2:length(xs)) do k
+				xs[k] - dynamics(xs[k-1], us[k-1], k)
+			end
+			vcat(
+				initial_state_constraint,
+				dynamics_constraints,
+				# squared_violation.(
+				# 	mapreduce(vcat, us) do u
+				# 		vcat(u[lb_mask] - lb[lb_mask], ub[ub_mask] - u[ub_mask])
+				# 	end,
+				# ),
+				# squared_violation.(
+				# 	mapreduce(vcat, 1:length(xs)) do k
+				# 		px = xs[k][1]
+				# 		py = xs[k][2]
+				# 		i == 1 ? vcat(
+				# 			px + map_end,
+				# 			-px + map_end,
+				# 			py + lane_width,
+				# 			-py + lane_width,
+				# 		) : vcat(
+				# 			px + lane_width,
+				# 			-px + lane_width,
+				# 			py + map_end,
+				# 			-py + map_end,
+				# 		)
+				# 	end),
+				# squared_violation.(shared_inequality_constraint(z, θ)),
+			)
+		end for i in 1:num_players
 	]
 
 	preferences = [
@@ -161,8 +194,8 @@ function get_setup(
 				(; goal_position) = unflatten_parameters(θ[Block(1)])
 				goal_deviation = xs[end][1:2] .- goal_position
 				sum(goal_deviation .^ 2)
-			end, 
-			
+			end,
+
 			# Lane bounds + collision avoidance (constraint, both players)
 			inequality_constraints[1],
 		],
@@ -193,11 +226,12 @@ function get_setup(
 					velocity_limit_constraints(xs[k], dynamics_model; velocity_limit)
 				end
 			end,
-			
+
 			# Lane bounds + collision avoidance (constraint, both players)
 			inequality_constraints[2],
 		],
 	]
+
 
 	# Preference hierarchy: [lowest priority, ..., highest priority]
 	is_prioritized_constraint = [[false, true, false, true], [false, false, true, true]]
@@ -229,10 +263,12 @@ function demo(;
 	Random.seed!(rng_seed)
 
 	# ── Settings ───────────────────────────────────────────────────────────────
-	run_id         = "0_IP_reduced_four_levels_with_collision_avoidance_control_bounds"
+	run_id = "0_IP_reduced_four_levels_extra_level_ca_eta"
 	dynamics_model = :planar_double_integrator   # :planar_double_integrator | :unicycle
-	goop_version   = :reduced                    # :complete | :reduced | :quasi
-	solver         = ReducedGOOP.InteriorPoint()    # ReducedGOOP.InteriorPoint() | ReducedGOOP.PATHSolver()
+	goop_version = :reduced                    # :complete | :reduced | :quasi
+	solver = ReducedGOOP.InteriorPoint() # ReducedGOOP.InteriorPoint() | ReducedGOOP.PATHSolver()
+	linesearch = :backtracking          # :backtracking | :fraction_to_boundary
+	compute_warmstart = true # Whether to compute a warmstart trajectory via rollout (true) or load from file (false)
 
 	# ── Problem parameters ─────────────────────────────────────────────────────
 	num_players           = 2
@@ -307,19 +343,20 @@ function demo(;
 	function solve_game_instance(θ; z₀, ϵ₀, max_inner_iters)
 		options = if solver isa ReducedGOOP.InteriorPoint
 			ReducedGOOP.InteriorPointOptions(;
-				tol = 1e-5,
-				η₀ = 0.0,
+				tol = 1e-4,
+				η₀ = 1e-7,
 				ϵ₀,
 				max_inner_iters,
 				max_outer_iters = 1,
-				tightening_rate = 0.001,
-				loosening_rate = 0.05,
+				tightening_rate = 1.0,
+				loosening_rate = 0.3,
 				min_stepsize = 1e-20,
-				linesearch = :backtracking,
+				linesearch,
 				linear_solve_algorithm = ReducedGOOP.LinearSolve.KrylovJL_LSMR(),
 				use_linsolve = false,
 				record_convergence = true,
 				record_condition_number = true,
+				eta_retry_growth = 0.3,
 				verbose,
 			)
 		else
@@ -390,14 +427,14 @@ function demo(;
 		)
 
 		solution_dict = Dict(
-			"strategies"     => strategies,
-			"z"              => z,
-			"x"              => x,
+			"strategies" => strategies,
+			"z" => z,
+			"x" => x,
 			"solve_time_sec" => elapsed_time,
-			"kkt_error"      => kkt_error,
-			"ϵ"             => ϵ,
-			"status"         => solver_status,
-			"total_iters"    => total_iters,
+			"kkt_error" => kkt_error,
+			"ϵ" => ϵ,
+			"status" => solver_status,
+			"total_iters" => total_iters,
 			"kkt_error_history" => kkt_error_history,
 			"condition_number_history" => condition_number_history,
 		)
@@ -460,14 +497,18 @@ function demo(;
 			obstacle_position,
 		)
 
-		(; warmstart_solution) = build_default_warmstart(
-			planning_horizon,
-			dynamics,
-			initial_state1,
-			initial_state2,
-		)
-
-		# Warmstart with previous rollout?
+		(; warmstart_solution) = if compute_warmstart
+			build_default_warmstart(
+				planning_horizon,
+				dynamics,
+				initial_state1,
+				initial_state2,
+			)
+		else
+			(;
+				warmstart_solution = load("experiments/solution_dict_instance_1_eps0.1.jld2")["single_stored_object"]["x"][1:96],
+			)
+		end
 
 		save_warmstart_visualizations(
 			warmstart_solution,
