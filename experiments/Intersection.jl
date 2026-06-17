@@ -50,6 +50,7 @@ function get_setup(
 		"h(x) ≥ 0	<=> (min(h(x), 0))^2 = 0"
 		return (min(h, 0))^2
 	end
+
 	function smooth_piecewise_preference_objective(
 		preference,
 		level;
@@ -60,12 +61,12 @@ function get_setup(
 
 	control_objectives = [
 		function (z, _)
-			(; us) =
+			(; xs, us) =
 				unflatten_trajectory(z[Block(1)], state_dimension, control_dimension)
 			sum(sum(u .^ 2) for u in us)
 		end,
 		function (z, _)
-			(; us) =
+			(; xs, us) =
 				unflatten_trajectory(z[Block(2)], state_dimension, control_dimension)
 			sum(sum(u .^ 2) for u in us)
 		end,
@@ -200,7 +201,7 @@ function get_setup(
 				)
 				(; goal_position) = unflatten_parameters(θ[Block(1)])
 				goal_deviation = xs[end][1:2] .- goal_position
-				sum(goal_deviation .^ 2) + sum(sum(u .^ 2) for u in us)
+				sum(goal_deviation .^ 2)
 			end,
 
 			# Lane bounds + collision avoidance (constraint, both players)
@@ -237,13 +238,13 @@ function get_setup(
 			# Lane bounds + collision avoidance (constraint, both players)
 			# inequality_constraints[2],
 		],
-	]	
+	]
 
 	# Preference hierarchy: [lowest priority, ..., highest priority]
 	is_prioritized_constraint = [[false, true, false], [false, false, true]]
 
 	# Scalarized baseline
-	use_scalarized_baseline = true
+	use_scalarized_baseline = false
 	scalarized_preferences = map(
 		preferences,
 		is_prioritized_constraint,
@@ -317,7 +318,7 @@ function demo(;
 	# ── Scenario ───────────────────────────────────────────────────────────────
 	# Planar double integrator: state = [px, py, vx, vy]
 	base_initial_state1 = [-4.0, -1.0, 3.0, 0.0]
-	base_initial_state2 = [1.2, -5.0, 0.0, 1.5]
+	base_initial_state2 = [1.0, -5.0, 0.0, 1.5]
 	# Unicycle: state = [px, py, speed, heading] — uncomment to switch
 	# base_initial_state1 = [-6.0, -1.0, 0.0, 0.0]
 	# base_initial_state2 = [1.0, -6.0, 1.3, π/2]
@@ -953,15 +954,22 @@ function build_default_warmstart(
 		[0.0, 0.0],
 	)
 
-	player2_vx_profile = fill(0.0, planning_horizon)
-	player2_vy_profile = vcat(1.0, fill(speed_component_limit, planning_horizon - 1))
-	player2_warmstart = build_planar_di_velocity_profile_warmstart(
+	player2_warmstart = build_constant_control_warmstart(
 		planning_horizon,
 		dynamics,
-		initial_state2;
-		vx_profile = player2_vx_profile,
-		vy_profile = player2_vy_profile,
+		initial_state2,
+		[0.0, 0.0],
 	)
+
+	# player2_vx_profile = fill(0.0, planning_horizon)
+	# player2_vy_profile = vcat(1.0, fill(speed_component_limit, planning_horizon - 1))
+	# player2_warmstart = build_planar_di_velocity_profile_warmstart(
+	# 	planning_horizon,
+	# 	dynamics,
+	# 	initial_state2;
+	# 	vx_profile = player2_vx_profile,
+	# 	vy_profile = player2_vy_profile,
+	# )
 
 	warmstart_solution = flatten_warmstart_solution(
 		planning_horizon,

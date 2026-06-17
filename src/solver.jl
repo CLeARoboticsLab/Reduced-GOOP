@@ -220,7 +220,8 @@ function solve(
 					mcp.∇F_z!(∇F, z; θ, ϵ, η)
 					condition_number = record_condition_number ? cond(collect(∇F), 2) : NaN
 					verbose && record_condition_number && println("condition number of ∇F: ", condition_number)
-					δz .= pinv(Matrix(∇F)) * (-F) # minimum-norm sol
+					# δz .= pinv(Matrix(∇F)) * (-F) # minimum-norm sol
+					δz .= -∇F \ F
 
 					α = 1.0
 					@. z_trial = z + α * δz
