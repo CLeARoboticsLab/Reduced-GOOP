@@ -30,7 +30,8 @@
       "Bash(cp /tmp/solver_from_stash.jl src/solver.jl && git diff --stat src/solver.jl && grep -n \"max_eta_retries\\\\|eta_retry_growth\\\\|η_min\\\\|η_max\" src/solver.jl)",
       "Bash(julia --project=. -e 'import Pkg; Pkg.test\\(\\)')",
       "Bash(echo \"EXIT CODE: $?\")",
-      "Bash(jobs -l)"
+      "Bash(jobs -l)",
+      "Bash(echo \"exit: $?\")"
     ],
     "additionalDirectories": [
       "/private/tmp"

@@ -48,7 +48,14 @@ function get_setup(
 
 	function squared_violation(h)
 		"h(x) ≥ 0	<=> (min(h(x), 0))^2 = 0"
-		return (min(h, 0))^4
+		return (min(h, 0))^2
+	end
+	function smooth_piecewise_preference_objective(
+		preference,
+		level;
+		ϵ = 1e-3,
+	)
+		ifelse(preference ≥ ϵ, 0.0, (ϵ - preference)^(level + 2))
 	end
 
 	control_objectives = [
@@ -86,9 +93,9 @@ function get_setup(
 			(; xs, us) =
 				unflatten_trajectory(z[Block(1)], state_dimension, control_dimension)
 			vcat(
-				mapreduce(vcat, us) do u
-					vcat(u[lb_mask] - lb[lb_mask], ub[ub_mask] - u[ub_mask])
-				end,
+				# mapreduce(vcat, us) do u
+				# 	vcat(u[lb_mask] - lb[lb_mask], ub[ub_mask] - u[ub_mask])
+				# end,
 				mapreduce(vcat, 1:length(xs)) do k
 					px = xs[k][1]
 					py = xs[k][2]
@@ -108,9 +115,9 @@ function get_setup(
 			(; xs, us) =
 				unflatten_trajectory(z[Block(2)], state_dimension, control_dimension)
 			vcat(
-				mapreduce(vcat, us) do u
-					vcat(u[lb_mask] - lb[lb_mask], ub[ub_mask] - u[ub_mask])
-				end,
+				# mapreduce(vcat, us) do u
+				# 	vcat(u[lb_mask] - lb[lb_mask], ub[ub_mask] - u[ub_mask])
+				# end,
 				mapreduce(vcat, 1:length(xs)) do k
 					px = xs[k][1]
 					py = xs[k][2]
@@ -141,11 +148,11 @@ function get_setup(
 			vcat(
 				initial_state_constraint,
 				dynamics_constraints,
-				# squared_violation.(
-				# 	mapreduce(vcat, us) do u
-				# 		vcat(u[lb_mask] - lb[lb_mask], ub[ub_mask] - u[ub_mask])
-				# 	end,
-				# ),
+				squared_violation.(
+					mapreduce(vcat, us) do u
+						vcat(u[lb_mask] - lb[lb_mask], ub[ub_mask] - u[ub_mask])
+					end,
+				),
 				# squared_violation.(
 				# 	mapreduce(vcat, 1:length(xs)) do k
 				# 		px = xs[k][1]
@@ -162,7 +169,7 @@ function get_setup(
 				# 			-py + map_end,
 				# 		)
 				# 	end),
-				# squared_violation.(shared_inequality_constraint(z, θ)),
+				squared_violation.(shared_inequality_constraint(z, θ)),
 			)
 		end for i in 1:num_players
 	]
@@ -186,18 +193,18 @@ function get_setup(
 
 			# Reach the goal (highest priority for P1)
 			function (z, θ)
-				(; xs) = unflatten_trajectory(
+				(; xs, us) = unflatten_trajectory(
 					z[Block(1)],
 					state_dimension,
 					control_dimension,
 				)
 				(; goal_position) = unflatten_parameters(θ[Block(1)])
 				goal_deviation = xs[end][1:2] .- goal_position
-				sum(goal_deviation .^ 2)
+				sum(goal_deviation .^ 2) + sum(sum(u .^ 2) for u in us)
 			end,
 
 			# Lane bounds + collision avoidance (constraint, both players)
-			inequality_constraints[1],
+			# inequality_constraints[1],
 		],
 		[
 			# Minimize control effort
@@ -205,14 +212,14 @@ function get_setup(
 
 			# Reach the goal
 			function (z, θ)
-				(; xs) = unflatten_trajectory(
+				(; xs, us) = unflatten_trajectory(
 					z[Block(2)],
 					state_dimension,
 					control_dimension,
 				)
 				(; goal_position) = unflatten_parameters(θ[Block(2)])
 				goal_deviation = xs[end][1:2] .- goal_position
-				sum(goal_deviation .^ 2)
+				sum(goal_deviation .^ 2) + sum(sum(u .^ 2) for u in us)
 			end,
 
 			# Drive under speed limit (highest priority for P2)
@@ -228,19 +235,43 @@ function get_setup(
 			end,
 
 			# Lane bounds + collision avoidance (constraint, both players)
-			inequality_constraints[2],
+			# inequality_constraints[2],
 		],
-	]
-
+	]	
 
 	# Preference hierarchy: [lowest priority, ..., highest priority]
-	is_prioritized_constraint = [[false, true, false, true], [false, false, true, true]]
+	is_prioritized_constraint = [[false, true, false], [false, false, true]]
+
+	# Scalarized baseline
+	use_scalarized_baseline = true
+	scalarized_preferences = map(
+		preferences,
+		is_prioritized_constraint,
+	) do player_preferences, player_is_prioritized_constraint
+		@assert length(player_preferences) == length(player_is_prioritized_constraint)
+
+		scalarized_preference = function (z, θ)
+			accumulated_preference = 0
+			for (level, (preference, is_constraint)) in
+				enumerate(zip(player_preferences, player_is_prioritized_constraint))
+				preference_value = preference(z, θ)
+				accumulated_preference += if is_constraint
+					sum(smooth_piecewise_preference_objective.(preference_value, level))
+				else
+					preference_value
+				end
+			end
+			accumulated_preference
+		end
+		[scalarized_preference]
+	end
+	scalarized_is_prioritized_constraint = [[false] for _ in scalarized_preferences]
 
 	problem = ReducedGOOP.ParametricGOOP(
 		dummy_primals,
 		dummy_parameters;
-		preferences,
-		is_prioritized_constraint,
+		preferences = use_scalarized_baseline ? scalarized_preferences : preferences,
+		is_prioritized_constraint = use_scalarized_baseline ? scalarized_is_prioritized_constraint : is_prioritized_constraint,
 		equality_constraints,
 		inequality_constraints = [nothing, nothing],
 		shared_equality_constraint = nothing,
@@ -263,7 +294,7 @@ function demo(;
 	Random.seed!(rng_seed)
 
 	# ── Settings ───────────────────────────────────────────────────────────────
-	run_id = "0_IP_reduced_four_levels_extra_level_ca_eta"
+	run_id = "0_IP_test"
 	dynamics_model = :planar_double_integrator   # :planar_double_integrator | :unicycle
 	goop_version = :reduced                    # :complete | :reduced | :quasi
 	solver = ReducedGOOP.InteriorPoint() # ReducedGOOP.InteriorPoint() | ReducedGOOP.PATHSolver()
@@ -272,21 +303,21 @@ function demo(;
 
 	# ── Problem parameters ─────────────────────────────────────────────────────
 	num_players           = 2
-	planning_horizon      = 8
-	collision_avoidance   = 1.3
-	speed_component_limit = 1.5
-	control_bounds        = (; lb = [-2.0, -2.0], ub = [2.0, 2.0])
+	planning_horizon      = 10
+	collision_avoidance   = 1.5
+	speed_component_limit = 2.0
+	control_bounds        = (; lb = [-10.0, -10.0], ub = [10.0, 10.0])
 	num_instances         = 1
 	perturbation_scale    = 0.3
 
 	# ── Solver schedule ────────────────────────────────────────────────────────
 	epsilon_schedule         = [0.1]
-	max_inner_iters_schedule = fill(100_000, length(epsilon_schedule))
+	max_inner_iters_schedule = fill(10000, length(epsilon_schedule))
 
 	# ── Scenario ───────────────────────────────────────────────────────────────
 	# Planar double integrator: state = [px, py, vx, vy]
-	base_initial_state1 = [-6.0, -1.0, 2.5, 0.0]
-	base_initial_state2 = [1.0, -6.0, 0.0, 1.0]
+	base_initial_state1 = [-4.0, -1.0, 3.0, 0.0]
+	base_initial_state2 = [1.2, -5.0, 0.0, 1.5]
 	# Unicycle: state = [px, py, speed, heading] — uncomment to switch
 	# base_initial_state1 = [-6.0, -1.0, 0.0, 0.0]
 	# base_initial_state2 = [1.0, -6.0, 1.3, π/2]
@@ -296,7 +327,7 @@ function demo(;
 	obstacle_position = [0.25, 0.15]   # placeholder
 
 	# ── Build dynamics and problem ─────────────────────────────────────────────
-	dynamics = build_intersection_dynamics(dynamics_model; dt = 0.5, control_bounds)
+	dynamics = build_intersection_dynamics(dynamics_model; dt = 0.2, control_bounds)
 
 	(; problem, flatten_parameters) = get_setup(
 		num_players;
@@ -344,7 +375,7 @@ function demo(;
 		options = if solver isa ReducedGOOP.InteriorPoint
 			ReducedGOOP.InteriorPointOptions(;
 				tol = 1e-4,
-				η₀ = 1e-7,
+				η₀ = 1e-10,
 				ϵ₀,
 				max_inner_iters,
 				max_outer_iters = 1,
@@ -502,7 +533,8 @@ function demo(;
 				planning_horizon,
 				dynamics,
 				initial_state1,
-				initial_state2,
+				initial_state2;
+				speed_component_limit,
 			)
 		else
 			(;
@@ -911,7 +943,8 @@ function build_default_warmstart(
 	planning_horizon,
 	dynamics,
 	initial_state1,
-	initial_state2,
+	initial_state2;
+	speed_component_limit = 1.5,
 )
 	player1_warmstart = build_constant_control_warmstart(
 		planning_horizon,
@@ -921,7 +954,7 @@ function build_default_warmstart(
 	)
 
 	player2_vx_profile = fill(0.0, planning_horizon)
-	player2_vy_profile = vcat(1.0, fill(1.5, planning_horizon - 1))
+	player2_vy_profile = vcat(1.0, fill(speed_component_limit, planning_horizon - 1))
 	player2_warmstart = build_planar_di_velocity_profile_warmstart(
 		planning_horizon,
 		dynamics,

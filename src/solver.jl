@@ -263,6 +263,7 @@ function solve(
 				F .= F_trial # commit the accepted trial residual to compute kkt error at the end of this iteration
 
 				# Levenberg-Marquardt gain-ratio update for the next Newton iteration's η.
+				# https://www.cs.cornell.edu/courses/cs4220/2023sp/lec/2023-04-19.pdf
 				ρ_low = 0.25
 				ρ_high = 0.75
 				ρ = pred_reduction > 0 ? actual_reduction / pred_reduction : -Inf
