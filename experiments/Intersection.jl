@@ -72,6 +72,18 @@ function get_setup(
 		end,
 	]
 
+	control_bound_inequality = function (z, i)
+		(; lb, ub) = control_bounds(dynamics)
+		lb_mask = findall(!isinf, lb)
+		ub_mask = findall(!isinf, ub)
+		(; xs, us) =
+			unflatten_trajectory(z[Block(i)], state_dimension, control_dimension)
+		mapreduce(vcat, us) do u
+			vcat(u[lb_mask] - lb[lb_mask], ub[ub_mask] - u[ub_mask])
+		end
+	end
+
+
 	function shared_inequality_constraint(z, _)
 		trajectories = map(
 			i ->
@@ -149,11 +161,11 @@ function get_setup(
 			vcat(
 				initial_state_constraint,
 				dynamics_constraints,
-				squared_violation.(
-					mapreduce(vcat, us) do u
-						vcat(u[lb_mask] - lb[lb_mask], ub[ub_mask] - u[ub_mask])
-					end,
-				),
+				# squared_violation.(
+				# mapreduce(vcat, us) do u
+				# 	vcat(u[lb_mask] - lb[lb_mask], ub[ub_mask] - u[ub_mask])
+				# end,
+				# ),
 				# squared_violation.(
 				# 	mapreduce(vcat, 1:length(xs)) do k
 				# 		px = xs[k][1]
@@ -181,16 +193,16 @@ function get_setup(
 			control_objectives[1],
 
 			# Drive under speed limit
-			function (z, _)
-				(; xs) = unflatten_trajectory(
-					z[Block(1)],
-					state_dimension,
-					control_dimension,
-				)
-				mapreduce(vcat, 1:length(xs)) do k
-					velocity_limit_constraints(xs[k], dynamics_model; velocity_limit)
-				end
-			end,
+			# function (z, _)
+			# 	(; xs) = unflatten_trajectory(
+			# 		z[Block(1)],
+			# 		state_dimension,
+			# 		control_dimension,
+			# 	)
+			# 	mapreduce(vcat, 1:length(xs)) do k
+			# 		velocity_limit_constraints(xs[k], dynamics_model; velocity_limit)
+			# 	end
+			# end,
 
 			# Reach the goal (highest priority for P1)
 			function (z, θ)
@@ -201,7 +213,7 @@ function get_setup(
 				)
 				(; goal_position) = unflatten_parameters(θ[Block(1)])
 				goal_deviation = xs[end][1:2] .- goal_position
-				sum(goal_deviation .^ 2)
+				sum(goal_deviation .^ 2) #+ sum(smooth_piecewise_preference_objective.(control_bound_inequality(z, 1), 1))
 			end,
 
 			# Lane bounds + collision avoidance (constraint, both players)
@@ -220,7 +232,7 @@ function get_setup(
 				)
 				(; goal_position) = unflatten_parameters(θ[Block(2)])
 				goal_deviation = xs[end][1:2] .- goal_position
-				sum(goal_deviation .^ 2) + sum(sum(u .^ 2) for u in us)
+				sum(goal_deviation .^ 2) #+ sum(smooth_piecewise_preference_objective.(control_bound_inequality(z, 2), 2))
 			end,
 
 			# Drive under speed limit (highest priority for P2)
@@ -241,9 +253,9 @@ function get_setup(
 	]
 
 	# Preference hierarchy: [lowest priority, ..., highest priority]
-	is_prioritized_constraint = [[false, true, false], [false, false, true]]
+	is_prioritized_constraint = [[false, false], [false, false, true]]
 
-	# Scalarized baseline
+	# Scalarized baseline: flattens hierarchical preferences into a single objective per player
 	use_scalarized_baseline = false
 	scalarized_preferences = map(
 		preferences,
@@ -376,7 +388,7 @@ function demo(;
 		options = if solver isa ReducedGOOP.InteriorPoint
 			ReducedGOOP.InteriorPointOptions(;
 				tol = 1e-4,
-				η₀ = 1e-10,
+				η₀ = 0.0,
 				ϵ₀,
 				max_inner_iters,
 				max_outer_iters = 1,
