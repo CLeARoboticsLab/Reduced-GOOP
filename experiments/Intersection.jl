@@ -200,16 +200,16 @@ function get_setup(
 			control_objectives[1],
 
 			# Drive under speed limit
-			# function (z, _)
-			# 	(; xs) = unflatten_trajectory(
-			# 		z[Block(1)],
-			# 		state_dimension,
-			# 		control_dimension,
-			# 	)
-			# 	mapreduce(vcat, 1:length(xs)) do k
-			# 		velocity_limit_constraints(xs[k], dynamics_model; velocity_limit)
-			# 	end
-			# end,
+			function (z, _)
+				(; xs) = unflatten_trajectory(
+					z[Block(1)],
+					state_dimension,
+					control_dimension,
+				)
+				mapreduce(vcat, 1:length(xs)) do k
+					velocity_limit_constraints(xs[k], dynamics_model; velocity_limit)
+				end
+			end,
 
 			# Reach the goal (highest priority for P1)
 			function (z, θ)
@@ -260,7 +260,7 @@ function get_setup(
 	]
 
 	# Preference hierarchy: [lowest priority, ..., highest priority]
-	is_prioritized_constraint = [[false, false], [false, false, true]]
+	is_prioritized_constraint = [[false, true, false], [false, false, true]]
 
 	" Scalarized baseline (Nash / no hierarchy): flattens hierarchical preferences into a single objective per player"
 	use_scalarized_baseline = false
@@ -445,8 +445,8 @@ function demo(;
 	function solve_game_instance(θ; z₀, ϵ₀, max_inner_iters)
 		options = if solver isa ReducedGOOP.InteriorPoint
 			ReducedGOOP.InteriorPointOptions(;
-				tol = 5e-3, #1e-4
-				η₀ = 5e-5, # 5e-5, less than 1e-4
+				tol = 1e-3, #1e-4
+				η₀ = 0.0, # 5e-5, less than 1e-4
 				ϵ₀,
 				max_inner_iters,
 				max_outer_iters = 1,
@@ -459,9 +459,10 @@ function demo(;
 				record_convergence = true,
 				record_condition_number = true,
 				eta_retry_growth = 0.3,
-				perturbation_enabled = true,
+				perturbation_enabled = false,
 				stagnation_rtol = 1e-1,
 				perturbation_scale = 1e-6,
+				tsvd_threshold = 1e-8, # 0.0: turn off TSVD, 1e-8 and η = 0: pure TSVD
 				verbose,
 			)
 		else

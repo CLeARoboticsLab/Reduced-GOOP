@@ -27,6 +27,7 @@ Base.@kwdef struct InteriorPointOptions
 	stagnation_rtol::Float64 = 1e-3
 	perturbation_scale::Float64 = 1e-4
 	max_perturbations::Int = 20
+	tsvd_threshold::Float64 = 0.0
 	verbose::Bool
 
 end
@@ -124,6 +125,7 @@ function solve(
 	stagnation_rtol = options.stagnation_rtol
 	perturbation_scale = options.perturbation_scale
 	max_perturbations = options.max_perturbations
+	tsvd_threshold = options.tsvd_threshold
 
 	# z = @something(z₀, begin
 	# 	z = zeros(mcp.variable_dimension)
@@ -209,10 +211,11 @@ function solve(
 				Jsvd = svd(Jmat)
 				condition_number = record_condition_number ? Jsvd.S[1] / Jsvd.S[end] : NaN
 				verbose && record_condition_number && println("condition number of ∇F: ", condition_number)
-				# Tikhonov-damped minimum-norm step: δz = -V * diag(σᵢ/(σᵢ²+η)) * Uᵀ * F
-				# suppresses ill-conditioned directions while preserving a descent guarantee.
-				tikhonov_filters = Jsvd.S ./ (Jsvd.S .^ 2 .+ η)
-				δz .= -Jsvd.V * (tikhonov_filters .* (Jsvd.U' * F))
+				# Unified TSVD+Tikhonov step: modes below tsvd_threshold*σ₁ are zeroed (hard cutoff),
+				# remaining modes use the Tikhonov filter σ/(σ²+η). tsvd_threshold=0 → pure Tikhonov.
+				threshold_abs = tsvd_threshold * Jsvd.S[1]
+				filters = @. ifelse(Jsvd.S >= threshold_abs, Jsvd.S / (Jsvd.S^2 + η), zero(eltype(Jsvd.S)))
+				δz .= -Jsvd.V * (filters .* (Jsvd.U' * F))
 
 				α_σ = fraction_to_the_boundary_linesearch(σ, δσ; tol = min_stepsize)
 				α_γ = fraction_to_the_boundary_linesearch(γ, δγ; tol = min_stepsize)
@@ -244,9 +247,11 @@ function solve(
 				verbose && record_condition_number && println("condition number of ∇F: ", condition_number)
 				local α, pred_reduction, actual_reduction
 				while true
-					# Tikhonov-damped minimum-norm step: δz = -V * diag(σᵢ/(σᵢ²+η)) * Uᵀ * F
-					tikhonov_filters = Jsvd.S ./ (Jsvd.S .^ 2 .+ max(η, 6e-5)) # Do not take 1e-4
-					δz .= -Jsvd.V * (tikhonov_filters .* (Jsvd.U' * F))
+					# Unified TSVD+Tikhonov step: modes below tsvd_threshold*σ₁ are zeroed (hard cutoff),
+					# remaining modes use the Tikhonov filter σ/(σ²+η). tsvd_threshold=0 → pure Tikhonov.
+					threshold_abs = tsvd_threshold * Jsvd.S[1]
+					filters = @. ifelse(Jsvd.S >= threshold_abs, Jsvd.S / (Jsvd.S^2 + max(η, 6e-5)), zero(eltype(Jsvd.S)))
+					δz .= -Jsvd.V * (filters .* (Jsvd.U' * F))
 
 					α = 1.0
 					@. z_trial = z + α * δz
