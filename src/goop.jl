@@ -142,10 +142,9 @@ Equivalently, we consider min_x ifelse(h(x) ≥ 0, 0, (-h(x))^(level+2)), where 
 function smooth_piecewise_preference_objective(
 	preference,
 	level;
-	ϵ = 1e-3,
+	ϵ = 0.0,
 )
 	ifelse(preference ≥ ϵ, 0.0, (ϵ - preference)^(level + 2))
-	# (min(h, 0))^2 = 0 # h(x) >= 0
 end
 
 "Construct the Reduced KKT system corresponding to a ParametricGOOP."

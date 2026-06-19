@@ -27,8 +27,8 @@ function get_setup(
 )
 	state_dimension = state_dim(dynamics)
 	control_dimension = control_dim(dynamics)
-	primals_per_agent = (state_dimension + control_dimension) * planning_horizon
-	primal_dimensions = fill(primals_per_agent, num_players)
+	primals_per_player = (state_dimension + control_dimension) * planning_horizon
+	primal_dimensions = fill(primals_per_player, num_players)
 	parameter_dimensions = fill(state_dimension + 4, num_players) # (state, goal, obstacle)
 
 	dummy_primals = BlockArray(zeros(sum(primal_dimensions)), primal_dimensions)
@@ -54,7 +54,7 @@ function get_setup(
 	function smooth_piecewise_preference_objective(
 		preference,
 		level;
-		ϵ = 1e-3,
+		ϵ = 0.0,
 	)
 		ifelse(preference ≥ ϵ, 0.0, (ϵ - preference)^(level + 2))
 	end
@@ -83,8 +83,7 @@ function get_setup(
 		end
 	end
 
-
-	function shared_inequality_constraint(z, _)
+	function shared_collision_avoidance(z, _)
 		trajectories = map(
 			i ->
 				unflatten_trajectory(z[Block(i)], state_dimension, control_dimension),
@@ -95,7 +94,6 @@ function get_setup(
 		mapreduce(vcat, 2:length(xs[1])) do k
 			[sum((xs[1][k][1:2] - xs[2][k][1:2]) .^ 2) - collision_avoidance^2]
 		end
-		# xs[1][end][1]^2 + xs[2][end][1]^2 - 1000 # xs[1][T] + xs[2][T] ≥ 0 for testing
 	end
 
 	inequality_constraints = [
@@ -119,7 +117,7 @@ function get_setup(
 						-py + lane_width,
 					) # -7 ≤ pₓ ≤ 7, -2 ≤ py ≤ 2
 				end,
-				shared_inequality_constraint(z, θ),
+				shared_collision_avoidance(z, θ),
 			)
 		end, function (z, θ)
 			(; lb, ub) = control_bounds(dynamics)
@@ -141,23 +139,24 @@ function get_setup(
 						-py + map_end,
 					) # -2 ≤ pₓ ≤ 2, -7 ≤ py ≤ 7
 				end,
-				shared_inequality_constraint(z, θ),
+				shared_collision_avoidance(z, θ),
 			)
 		end,
 	]
 
-	equality_constraints = [
+	player_equality_constraints = [
 		function (z, θ)
 			(; lb, ub) = control_bounds(dynamics)
 			lb_mask = findall(!isinf, lb)
 			ub_mask = findall(!isinf, ub)
-			(; xs, us) =
-				unflatten_trajectory(z[Block(i)], state_dimension, control_dimension)
+			(; xs, us) = unflatten_trajectory(z[Block(i)], state_dimension, control_dimension)
 			(; initial_state) = unflatten_parameters(θ[Block(i)])
+
 			initial_state_constraint = xs[1] - initial_state
 			dynamics_constraints = mapreduce(vcat, 2:length(xs)) do k
 				xs[k] - dynamics(xs[k-1], us[k-1], k)
 			end
+
 			vcat(
 				initial_state_constraint,
 				dynamics_constraints,
@@ -182,9 +181,17 @@ function get_setup(
 				# 			-py + map_end,
 				# 		)
 				# 	end),
-				squared_violation.(shared_inequality_constraint(z, θ)),
 			)
 		end for i in 1:num_players
+	]
+
+	shared_equality_constraint = function (z, θ)
+		squared_violation.(shared_collision_avoidance(z, θ))
+	end
+
+	equality_constraints = [
+		(z, θ) -> vcat(player_equality_constraints[i](z, θ), shared_equality_constraint(z, θ))
+		for i in 1:num_players
 	]
 
 	preferences = [
@@ -255,7 +262,7 @@ function get_setup(
 	# Preference hierarchy: [lowest priority, ..., highest priority]
 	is_prioritized_constraint = [[false, false], [false, false, true]]
 
-	# Scalarized baseline: flattens hierarchical preferences into a single objective per player
+	" Scalarized baseline (Nash / no hierarchy): flattens hierarchical preferences into a single objective per player"
 	use_scalarized_baseline = false
 	scalarized_preferences = map(
 		preferences,
@@ -280,16 +287,63 @@ function get_setup(
 	end
 	scalarized_is_prioritized_constraint = [[false] for _ in scalarized_preferences]
 
-	problem = ReducedGOOP.ParametricGOOP(
-		dummy_primals,
-		dummy_parameters;
-		preferences = use_scalarized_baseline ? scalarized_preferences : preferences,
-		is_prioritized_constraint = use_scalarized_baseline ? scalarized_is_prioritized_constraint : is_prioritized_constraint,
-		equality_constraints,
-		inequality_constraints = [nothing, nothing],
-		shared_equality_constraint = nothing,
-		shared_inequality_constraint = nothing,
-	)
+	" Social equilibrium (no Nash / no hierarchy) baseline: sum of all players' preferences, single optimization problem"
+	use_social_equilibrium_baseline = false
+	objective = function (z, θ)
+		accumulated_objective = 0
+		for (player_preferences, player_is_prioritized_constraint) in
+			zip(preferences, is_prioritized_constraint)
+			@assert length(player_preferences) == length(player_is_prioritized_constraint)
+
+			for (level, (preference, is_constraint)) in
+				enumerate(zip(player_preferences, player_is_prioritized_constraint))
+				preference_value = preference(z, θ)
+				accumulated_objective += if is_constraint
+					sum(smooth_piecewise_preference_objective.(preference_value, level))
+				else
+					preference_value
+				end
+			end
+		end
+		accumulated_objective
+	end
+	equality_constraint = function (z, θ)
+		vcat(
+			mapreduce(f -> f(z, θ), vcat, player_equality_constraints),
+			shared_equality_constraint(z, θ),
+		)
+	end
+	inequality_constraint = nothing
+	primal_dimension = sum(primal_dimensions)
+	parameter_dimension = sum(parameter_dimensions)
+	equality_dimension = length(equality_constraint(dummy_primals, dummy_parameters))
+	inequality_dimension = 0
+
+
+	# Build problem
+	problem = if !use_social_equilibrium_baseline
+		ReducedGOOP.ParametricGOOP(
+			dummy_primals,
+			dummy_parameters;
+			preferences = use_scalarized_baseline ? scalarized_preferences : preferences,
+			is_prioritized_constraint = use_scalarized_baseline ? scalarized_is_prioritized_constraint : is_prioritized_constraint,
+			equality_constraints,
+			inequality_constraints = [nothing, nothing],
+			shared_equality_constraint = nothing,
+			shared_inequality_constraint = nothing,
+		)
+	else
+		ReducedGOOP.ParametricOptimizationProblem(;
+			objective,
+			equality_constraint,
+			inequality_constraint,
+			parameter_dimension,
+			primal_dimension,
+			equality_dimension,
+			inequality_dimension,
+			num_players,
+		)
+	end
 
 	(; problem, flatten_parameters)
 end
@@ -316,7 +370,7 @@ function demo(;
 
 	# ── Problem parameters ─────────────────────────────────────────────────────
 	num_players           = 2
-	planning_horizon      = 10
+	planning_horizon      = 12
 	collision_avoidance   = 1.5
 	speed_component_limit = 2.0
 	control_bounds        = (; lb = [-10.0, -10.0], ub = [10.0, 10.0])
@@ -352,7 +406,6 @@ function demo(;
 		map_end,
 		lane_width,
 	)
-
 	kkt_generators = if solver isa ReducedGOOP.InteriorPoint
 		Dict(
 			:complete => ReducedGOOP.generate_slacked_complete_kkt_system,
@@ -370,7 +423,12 @@ function demo(;
 	isnothing(GOOP_kkt_system) && error("Unknown GOOP version: $(goop_version)")
 
 	@info "Building KKT system for $(goop_version) GOOP formulation and $(solver) solver..."
-	GOOP_kkt_system = GOOP_kkt_system(problem)
+	# Check if problem is not an instance of GOOPKKTSystem. Otherwise, build GOOPKKTSystem.
+	if problem isa ReducedGOOP.GOOPKKTSystem
+		GOOP_kkt_system = problem
+	else
+		GOOP_kkt_system = GOOP_kkt_system(problem)
+	end
 
 	if solver isa ReducedGOOP.InteriorPoint
 		println("[Primal-Dual] KKT Dimension: ", GOOP_kkt_system.kkt_dimension)
@@ -387,8 +445,8 @@ function demo(;
 	function solve_game_instance(θ; z₀, ϵ₀, max_inner_iters)
 		options = if solver isa ReducedGOOP.InteriorPoint
 			ReducedGOOP.InteriorPointOptions(;
-				tol = 1e-4,
-				η₀ = 0.0,
+				tol = 5e-3, #1e-4
+				η₀ = 5e-5, # 5e-5, less than 1e-4
 				ϵ₀,
 				max_inner_iters,
 				max_outer_iters = 1,
@@ -401,6 +459,9 @@ function demo(;
 				record_convergence = true,
 				record_condition_number = true,
 				eta_retry_growth = 0.3,
+				perturbation_enabled = true,
+				stagnation_rtol = 1e-1,
+				perturbation_scale = 1e-6,
 				verbose,
 			)
 		else
@@ -551,10 +612,9 @@ function demo(;
 			)
 		else
 			(;
-				warmstart_solution = load("experiments/solution_dict_instance_1_eps0.1.jld2")["single_stored_object"]["x"][1:96],
+				warmstart_solution = load("experiments/solution_dict_instance_1_eps0.1.jld2")["single_stored_object"]["x"][1:(num_players*primal_dimension)],
 			)
 		end
-
 		save_warmstart_visualizations(
 			warmstart_solution,
 			warmstart_plots_dir,
@@ -655,17 +715,17 @@ function demo(;
 
 		for (ϵ₀, result) in epsilon_results
 			solution_dict = result.solution_dict
-			preference_values = evaluate_preferences_at_solution(
-				problem,
-				solution_dict["x"][1:(num_players*primal_dimension)],
-				θ,
-			)
-			solution_dict["preference_values"] = preference_values
-			println("  ϵ₀ = $(round(ϵ₀; digits = 5)):")
-			println("  kkt_error = $(solution_dict["kkt_error"])")
-			for (player_idx, player_preferences) in enumerate(preference_values)
-				println("    player $(player_idx): $(_fmt5(player_preferences))")
-			end
+			# preference_values = evaluate_preferences_at_solution(
+			# 	problem,
+			# 	solution_dict["x"][1:(num_players*primal_dimension)],
+			# 	θ,
+			# )
+			# solution_dict["preference_values"] = preference_values
+			# println("  ϵ₀ = $(round(ϵ₀; digits = 5)):")
+			# println("  kkt_error = $(solution_dict["kkt_error"])")
+			# for (player_idx, player_preferences) in enumerate(preference_values)
+			# 	println("    player $(player_idx): $(_fmt5(player_preferences))")
+			# end
 
 			JLD2.save_object(
 				joinpath(

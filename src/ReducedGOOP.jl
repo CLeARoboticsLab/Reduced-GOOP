@@ -16,5 +16,6 @@ using ParametricMCPs
 include("goop_kkt_system.jl")
 include("goop.jl")
 include("solver.jl")
+include("parametric_optimization_problem.jl")
 
 end # module ReducedGOOP

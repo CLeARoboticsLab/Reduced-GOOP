@@ -69,14 +69,8 @@ function ParametricOptimizationProblem(;
 
     # Build symbolic expressions for objective and constraints.
     f = objective(x, θ)
-    g = equality_constraint(x, θ)
-    if isempty(g)
-        g = Symbolics.Num[]
-    end
-    h = inequality_constraint(x, θ)
-    if isempty(h)
-        h = Symbolics.Num[]
-    end
+    g = isnothing(g) ? Symbolics.Num[] : equality_constraint(x, θ)
+    h = isnothing(h) ? Symbolics.Num[] : inequality_constraint(x, θ)
     
     # Build Lagrangian.
     L = f - λ' * g - μ' * h

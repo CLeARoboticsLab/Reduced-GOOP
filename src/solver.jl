@@ -22,6 +22,11 @@ Base.@kwdef struct InteriorPointOptions
 	eta_retry_growth::Float64 = 2.0
 	η_min::Float64 = 0.0
 	η_max::Float64 = 0.1
+	perturbation_enabled::Bool = false
+	stagnation_iters::Int = 50
+	stagnation_rtol::Float64 = 1e-3
+	perturbation_scale::Float64 = 1e-4
+	max_perturbations::Int = 20
 	verbose::Bool
 
 end
@@ -80,6 +85,11 @@ Keyword arguments:
 	- `linear_solve_algorithm::LinearSolve.SciMLLinearSolveAlgorithm`: the linear solve algorithm to use. Any solver from `LinearSolve.jl` that can handle nonsquare system can be used.
 	- `record_convergence::Bool = false`: if true, record and return `kkt_error_history`.
 	- `record_condition_number::Bool = false`: if true, record and return `condition_number_history`.
+	- `perturbation_enabled::Bool = false`: if true, perturb `x` after repeated KKT residual stagnation.
+	- `stagnation_iters::Int = 5`: accepted iterations without relative KKT improvement before perturbing.
+	- `stagnation_rtol::Real = 1e-3`: relative KKT improvement threshold used to reset the stagnation counter.
+	- `perturbation_scale::Real = 1e-4`: fixed standard deviation for random perturbations.
+	- `max_perturbations::Int = 2`: maximum number of perturbation attempts per solve.
 	- `measure_solve_time::Bool = false`: if true, returns solve time measured with `@btime` (warmup run excludes compile) and includes `solve_time_sec`/`solve_time_ns` fields.
 	- `benchmark_samples::Int = 1`: number of @btime samples when `measure_solve_time = true`.
 	- `benchmark_evals::Int = 1`: number of evals per sample when `measure_solve_time = true`.
@@ -109,6 +119,11 @@ function solve(
 	eta_retry_growth = options.eta_retry_growth
 	η_min = options.η_min
 	η_max = options.η_max
+	perturbation_enabled = options.perturbation_enabled
+	stagnation_iters = options.stagnation_iters
+	stagnation_rtol = options.stagnation_rtol
+	perturbation_scale = options.perturbation_scale
+	max_perturbations = options.max_perturbations
 
 	# z = @something(z₀, begin
 	# 	z = zeros(mcp.variable_dimension)
@@ -126,7 +141,8 @@ function solve(
 		z[mcp.primal_dims] .= z₀
 	end
 
-	x = @view z[Not(vcat(mcp.preference_slack_dims, mcp.interior_point_slack_dims, mcp.inequality_constraint_dual_dims))]
+	x_dims = Not(vcat(mcp.preference_slack_dims, mcp.interior_point_slack_dims, mcp.inequality_constraint_dual_dims))
+	x = @view z[x_dims]
 	s = @view z[mcp.preference_slack_dims]
 	σ = @view z[mcp.interior_point_slack_dims]
 	γ = @view z[mcp.inequality_constraint_dual_dims]
@@ -138,7 +154,7 @@ function solve(
 	Jδz = zeros(mcp.kkt_dimension)
 	z_trial = similar(z)
 	δz = zeros(mcp.variable_dimension)
-	δx = @view δz[Not(vcat(mcp.preference_slack_dims, mcp.interior_point_slack_dims, mcp.inequality_constraint_dual_dims))]
+	δx = @view δz[x_dims]
 	δs = @view δz[mcp.preference_slack_dims]
 	δσ = @view δz[mcp.interior_point_slack_dims]
 	δγ = @view δz[mcp.inequality_constraint_dual_dims]
@@ -169,6 +185,7 @@ function solve(
 	kkt_error = Inf
 	best_kkt_error = Inf
 	iters_since_improvement = 0
+	num_perturbations = 0
 	is_fraction_to_boundary_linesearch = (linesearch == :fraction_to_boundary)
 	kkt_error_history = Float64[]
 	condition_number_history = Float64[]
@@ -187,11 +204,15 @@ function solve(
 			condition_number = NaN
 
 			if linesearch == :fraction_to_boundary
-				mcp.∇F_z!(∇F, z; θ, ϵ, η)
-				# @assert all(.!isnan.(∇F)) "Found NaN in ∇F - aborting!"
-				condition_number = record_condition_number ? cond(collect(∇F), 2) : NaN
+				mcp.∇F_z!(∇F, z; θ, ϵ, η = 0.0)
+				Jmat = Matrix(∇F)
+				Jsvd = svd(Jmat)
+				condition_number = record_condition_number ? Jsvd.S[1] / Jsvd.S[end] : NaN
 				verbose && record_condition_number && println("condition number of ∇F: ", condition_number)
-				δz .= pinv(Matrix(∇F)) * (-F) # minimum-norm sol
+				# Tikhonov-damped minimum-norm step: δz = -V * diag(σᵢ/(σᵢ²+η)) * Uᵀ * F
+				# suppresses ill-conditioned directions while preserving a descent guarantee.
+				tikhonov_filters = Jsvd.S ./ (Jsvd.S .^ 2 .+ η)
+				δz .= -Jsvd.V * (tikhonov_filters .* (Jsvd.U' * F))
 
 				α_σ = fraction_to_the_boundary_linesearch(σ, δσ; tol = min_stepsize)
 				α_γ = fraction_to_the_boundary_linesearch(γ, δγ; tol = min_stepsize)
@@ -215,13 +236,17 @@ function solve(
 				# grow η and re-solve the Newton step rather than failing outright.
 				F_z = norm(F, 2)
 				eta_retries = 0
+				# J is fixed at this iterate; only η changes between retries, so compute SVD once.
+				mcp.∇F_z!(∇F, z; θ, ϵ, η = 0.0)
+				Jmat = Matrix(∇F)
+				Jsvd = svd(Jmat)
+				condition_number = record_condition_number ? Jsvd.S[1] / Jsvd.S[end] : NaN
+				verbose && record_condition_number && println("condition number of ∇F: ", condition_number)
 				local α, pred_reduction, actual_reduction
 				while true
-					mcp.∇F_z!(∇F, z; θ, ϵ, η)
-					condition_number = record_condition_number ? cond(collect(∇F), 2) : NaN
-					verbose && record_condition_number && println("condition number of ∇F: ", condition_number)
-					# δz .= pinv(Matrix(∇F)) * (-F) # minimum-norm sol
-					δz .= -∇F \ F
+					# Tikhonov-damped minimum-norm step: δz = -V * diag(σᵢ/(σᵢ²+η)) * Uᵀ * F
+					tikhonov_filters = Jsvd.S ./ (Jsvd.S .^ 2 .+ max(η, 6e-5)) # Do not take 1e-4
+					δz .= -Jsvd.V * (tikhonov_filters .* (Jsvd.U' * F))
 
 					α = 1.0
 					@. z_trial = z + α * δz
@@ -265,10 +290,10 @@ function solve(
 
 				# Levenberg-Marquardt gain-ratio update for the next Newton iteration's η.
 				# https://www.cs.cornell.edu/courses/cs4220/2023sp/lec/2023-04-19.pdf
-				ρ_low = 0.25
+				ρ_low = 0.40
 				ρ_high = 0.75
 				ρ = pred_reduction > 0 ? actual_reduction / pred_reduction : -Inf
-				if ρ < ρ_low
+				if ρ ≤ ρ_low
 					verbose && printstyled("Poor gain ratio (ρ = $ρ)... Increasing η. ($η -> $(η * (1 + exp(-loosening_rate))))\n"; color = :red)
 					η = min(η * (1 + exp(-loosening_rate)), η_max)
 				elseif ρ > ρ_high
@@ -287,6 +312,42 @@ function solve(
 			@. γ += α_γ * δγ
 
 			kkt_error = norm(F, 2)
+			if kkt_error < best_kkt_error * (1 - stagnation_rtol)
+				best_kkt_error = kkt_error
+				iters_since_improvement = 0
+			else
+				iters_since_improvement += 1
+				verbose && println("No significant improvement in KKT error for $iters_since_improvement iterations (best_kkt_error = $best_kkt_error, current kkt_error = $kkt_error).")
+			end
+
+			if perturbation_enabled && kkt_error > tol &&
+			   iters_since_improvement >= stagnation_iters &&
+			#    num_perturbations < max_perturbations && 
+			   kkt_error < 1.0
+
+			   verbose && println("Stagnation detected: perturbing x to escape local minimum (num_perturbations = $num_perturbations).")
+
+
+				z_trial .= z
+				z_trial[x_dims] .+= perturbation_scale .* randn(length(x))
+				mcp.F!(F_trial, z_trial; θ, ϵ, η)
+				trial_kkt_error = norm(F_trial, 2)
+				num_perturbations += 1
+
+				if isfinite(trial_kkt_error) && all(isfinite, F_trial) &&
+				   trial_kkt_error <= 1.05 * kkt_error 
+
+					z .= z_trial
+					F .= F_trial
+					kkt_error = trial_kkt_error
+					best_kkt_error = min(best_kkt_error, kkt_error)
+					iters_since_improvement = 0
+					verbose && printstyled("...Applied perturbation to x; KKT error = $kkt_error\n", color = :green)
+				else
+					verbose && println("...Rejected perturbation; trial KKT error = $trial_kkt_error")
+				end
+			end
+
 			if record_convergence
 				push!(kkt_error_history, kkt_error)
 			end
