@@ -341,10 +341,10 @@ function solve(
 				ρ = pred_reduction > 0 ? actual_reduction / pred_reduction : -Inf
 				if ρ ≤ ρ_low
 					verbose && printstyled("Poor gain ratio (ρ = $ρ)... Increasing η. ($η -> $(η * (1 + exp(-loosening_rate))))\n"; color = :red)
-					η = min(η * (1 + exp(-loosening_rate)), η_max)
+					η = min(η * (1 + exp(-loosening_rate)), η_max) # 1 < (1 + e⁻ʳ) ≤ 2
 				elseif ρ > ρ_high
 					verbose && printstyled("Good gain ratio (ρ = $ρ)... Decreasing η. ($η -> $(η * (1 - exp(-tightening_rate))))\n"; color = :blue)
-					η = max(η * (1 - exp(-tightening_rate)), η_min)
+					η = max(η * (1 - exp(-tightening_rate)), η_min) # 0 ≤ (1 - e⁻ʳ) < 1
 				end
 				verbose && println("backtracking linesearch α = $α, gain ratio ρ = $ρ")
 				α_σ = α
