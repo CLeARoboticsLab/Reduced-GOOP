@@ -362,7 +362,7 @@ function demo(;
 	Random.seed!(rng_seed)
 
 	# ── Settings ───────────────────────────────────────────────────────────────
-	run_id = "0_IP_test_pure_TSVD_1e-2"
+	run_id = "0_IP_test_Marquardt_scaling"
 	dynamics_model = :planar_double_integrator   # :planar_double_integrator | :unicycle
 	goop_version = :reduced                    # :complete | :reduced | :quasi
 	solver = ReducedGOOP.InteriorPoint() # ReducedGOOP.InteriorPoint() | ReducedGOOP.PATHSolver()
@@ -465,7 +465,8 @@ function demo(;
 				perturbation_enabled = false,
 				stagnation_rtol = 1e-1,
 				perturbation_scale = 1e-6,
-				tsvd_threshold = 1e-2, # 0.0: pure Tikhonov, > 0 and η = 0: pure TSVD
+				tsvd_threshold = 0.0, # 0.0: pure Tikhonov, > 0 and η = 0: pure TSVD
+				use_marquardt_scaling = true,
 				verbose,
 			)
 		else

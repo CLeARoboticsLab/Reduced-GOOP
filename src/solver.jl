@@ -30,6 +30,7 @@ Base.@kwdef struct InteriorPointOptions
 	perturbation_scale::Float64 = 1e-4
 	max_perturbations::Int = 20
 	tsvd_threshold::Float64 = 0.0
+	use_marquardt_scaling::Bool = false
 	verbose::Bool
 
 end
@@ -132,7 +133,7 @@ function solve(
 	perturbation_scale = options.perturbation_scale
 	max_perturbations = options.max_perturbations
 	tsvd_threshold = options.tsvd_threshold
-
+	use_marquardt_scaling = options.use_marquardt_scaling
 	# z = @something(z₀, begin
 	# 	z = zeros(mcp.variable_dimension)
 	# 	z[mcp.preference_slack_dims] .= 1.0
@@ -259,20 +260,31 @@ function solve(
 				# J is fixed at this iterate; only η changes between retries, so compute SVD once.
 				mcp.∇F_z!(∇F, z; θ, ϵ, η = 0.0)
 				Jmat = Matrix(∇F)
-				Jsvd = svd(Jmat)
+				Jsvd = if use_marquardt_scaling
+					d = vec(sum(abs2, Jmat; dims = 1)) # diagonal entries of Jmat' * Jmat
+					d .= max.(d, 1e-16) # prevent Jscaled from having NaN or Inf entries
+					Jscaled = Jmat ./ (sqrt.(d))' # J̃ = JD^(-1/2), J is (m, n), d is (n, 1)
+					svd(Jscaled)
+				else
+					svd(Jmat)
+				end
 				condition_number = record_condition_number ? Jsvd.S[1] / Jsvd.S[end] : NaN
 				verbose && record_condition_number && println("condition number of ∇F: ", condition_number)
 				local α, pred_reduction, actual_reduction
 				while true
-					# Unified TSVD+Tikhonov step: modes below tsvd_threshold*σ₁ are zeroed (hard cutoff),
-					# remaining modes use the Tikhonov filter σ/(σ²+η). tsvd_threshold=0 → pure Tikhonov.
-					threshold_abs = tsvd_threshold * Jsvd.S[1]
-					filters = @. ifelse(Jsvd.S >= threshold_abs, Jsvd.S / (Jsvd.S^2 + max(η, 6e-5)), zero(eltype(Jsvd.S)))
-					filters = @. ifelse(Jsvd.S >= threshold_abs, Jsvd.S / (Jsvd.S^2 + max(1e-9 * Jsvd.S[1], 5e-5)), zero(eltype(Jsvd.S)))
-					δz .= -Jsvd.V * (filters .* (Jsvd.U' * F))
-					# δz .= -pinv(Jmat) * F # minimum-norm solution
-
-					# Main.@infiltrate
+					# filters = @. ifelse(Jsvd.S >= tsvd_threshold, Jsvd.S / (Jsvd.S^2 + max(η, 6e-5)), zero(eltype(Jsvd.S))) 
+					filters = @. ifelse(
+						Jsvd.S >= tsvd_threshold,
+						Jsvd.S / (Jsvd.S^2 + max(η, 6e-5)),
+						zero(eltype(Jsvd.S)),
+					)
+					δz .= if use_marquardt_scaling
+						scaled_step = -Jsvd.V * (filters .* (Jsvd.U' * F))
+						scaled_step ./ sqrt.(d) # undo the scaling
+					else
+						-Jsvd.V * (filters .* (Jsvd.U' * F))
+						# δz .= -pinv(Jmat) * F # minimum-norm solution
+					end
 
 					α = 1.0
 					@. z_trial = z + α * δz
@@ -426,8 +438,8 @@ function _record_solver_diagnostic!(diagnostics, limit, inner_iter, kkt_error, s
 		(;
 			inner_iter,
 			kkt_error,
-				singular_values_lt_1e_6 = count(value -> value < 1e-6, singular_values),
-				singular_values_lt_1e_2 = count(value -> value < 1e-2, singular_values),
+			singular_values_lt_1e_6 = count(value -> value < 1e-6, singular_values),
+			singular_values_lt_1e_2 = count(value -> value < 1e-2, singular_values),
 			max_singular_value = maximum(singular_values),
 			min_singular_value = minimum(singular_values),
 			max_abs_delta_z_1_144 = maximum(abs, @view(δz[1:144])),
