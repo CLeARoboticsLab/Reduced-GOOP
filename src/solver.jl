@@ -22,8 +22,8 @@ Base.@kwdef struct InteriorPointOptions
 	solver_diagnostics_limit::Int = 1000
 	max_eta_retries::Int = 5
 	eta_retry_growth::Float64 = 2.0
-	η_min::Float64 = 0.0
-	η_max::Float64 = 0.1
+	η_min::Float64 = 1e-20
+	η_max::Float64 = 1e-1
 	perturbation_enabled::Bool = false
 	stagnation_iters::Int = 50
 	stagnation_rtol::Float64 = 1e-3
