@@ -8,6 +8,7 @@ using LaTeXStrings: @L_str
 using BlockArrays
 using JLD2, Distributions, Random
 using Symbolics, NonlinearSolve, LinearAlgebra
+using Printf, Statistics
 using ParametricMCPs
 using ReducedGOOP
 
@@ -200,16 +201,16 @@ function get_setup(
 			control_objectives[1],
 
 			# Drive under speed limit
-			function (z, _)
-				(; xs) = unflatten_trajectory(
-					z[Block(1)],
-					state_dimension,
-					control_dimension,
-				)
-				mapreduce(vcat, 1:length(xs)) do k
-					velocity_limit_constraints(xs[k], dynamics_model; velocity_limit)
-				end
-			end,
+			# function (z, _)
+			# 	(; xs) = unflatten_trajectory(
+			# 		z[Block(1)],
+			# 		state_dimension,
+			# 		control_dimension,
+			# 	)
+			# 	mapreduce(vcat, 1:length(xs)) do k
+			# 		velocity_limit_constraints(xs[k], dynamics_model; velocity_limit)
+			# 	end
+			# end,
 
 			# Reach the goal (highest priority for P1)
 			function (z, θ)
@@ -260,7 +261,7 @@ function get_setup(
 	]
 
 	# Preference hierarchy: [lowest priority, ..., highest priority]
-	is_prioritized_constraint = [[false, true, false], [false, false, true]]
+	is_prioritized_constraint = [[false, false], [false, false, true]]
 
 	" Scalarized baseline (Nash / no hierarchy): flattens hierarchical preferences into a single objective per player"
 	use_scalarized_baseline = false
@@ -361,7 +362,7 @@ function demo(;
 	Random.seed!(rng_seed)
 
 	# ── Settings ───────────────────────────────────────────────────────────────
-	run_id = "0_IP_test"
+	run_id = "0_IP_test_pure_Tikhonov"
 	dynamics_model = :planar_double_integrator   # :planar_double_integrator | :unicycle
 	goop_version = :reduced                    # :complete | :reduced | :quasi
 	solver = ReducedGOOP.InteriorPoint() # ReducedGOOP.InteriorPoint() | ReducedGOOP.PATHSolver()
@@ -379,7 +380,7 @@ function demo(;
 
 	# ── Solver schedule ────────────────────────────────────────────────────────
 	epsilon_schedule         = [0.1]
-	max_inner_iters_schedule = fill(10000, length(epsilon_schedule))
+	max_inner_iters_schedule = fill(1000, length(epsilon_schedule))
 
 	# ── Scenario ───────────────────────────────────────────────────────────────
 	# Planar double integrator: state = [px, py, vx, vy]
@@ -445,7 +446,7 @@ function demo(;
 	function solve_game_instance(θ; z₀, ϵ₀, max_inner_iters)
 		options = if solver isa ReducedGOOP.InteriorPoint
 			ReducedGOOP.InteriorPointOptions(;
-				tol = 1e-3, #1e-4
+				tol = 2e-3, #1e-4
 				η₀ = 0.0, # 5e-5, less than 1e-4
 				ϵ₀,
 				max_inner_iters,
@@ -458,11 +459,13 @@ function demo(;
 				use_linsolve = false,
 				record_convergence = true,
 				record_condition_number = true,
+				record_solver_diagnostics = true,
+				solver_diagnostics_limit = 100,
 				eta_retry_growth = 0.3,
 				perturbation_enabled = false,
 				stagnation_rtol = 1e-1,
 				perturbation_scale = 1e-6,
-				tsvd_threshold = 1e-8, # 0.0: turn off TSVD, 1e-8 and η = 0: pure TSVD
+				tsvd_threshold = 0.0, # 0.0: pure Tikhonov, 1e-8 and η = 0: pure TSVD
 				verbose,
 			)
 		else
@@ -490,6 +493,7 @@ function demo(;
 		@info "Solving game instance with $(solver)..."
 		kkt_error_history = Float64[]
 		condition_number_history = Float64[]
+		solver_diagnostics = NamedTuple[]
 		total_iters = 0
 		solver_status = :solved
 		elapsed_time = @elapsed begin
@@ -510,6 +514,7 @@ function demo(;
 					total_iters,
 					kkt_error_history,
 					condition_number_history,
+					solver_diagnostics,
 				) = output
 				if status == :failed
 					println("  [solver exit] total_iters=$(total_iters), kkt_error=$(round(kkt_error; sigdigits=4)), tol=$(options.tol)")
@@ -523,6 +528,13 @@ function demo(;
 				x = z[1:(num_players*primal_dimension)]
 				solver_status = :solved
 			end
+		end
+		if solver isa ReducedGOOP.InteriorPoint
+			save_solver_diagnostics_report(
+				solver_diagnostics,
+				normpath(joinpath(@__DIR__, "..", "solver_diagnostics.pdf"));
+				max_rows = 1000,
+			)
 		end
 
 		strategies = extract_player_strategies(
@@ -543,6 +555,7 @@ function demo(;
 			"total_iters" => total_iters,
 			"kkt_error_history" => kkt_error_history,
 			"condition_number_history" => condition_number_history,
+			"solver_diagnostics" => solver_diagnostics,
 		)
 
 		(; strategies, solution_dict)
@@ -1163,6 +1176,117 @@ function save_convergence_diagnostics(solution_dict, convergence_plots_dir, inst
 			condition_number_fig,
 		)
 	end
+end
+
+function save_solver_diagnostics_report(diagnostics, output_path; max_rows = 1000)
+	max_rows >= 0 || throw(ArgumentError("max_rows must be nonnegative."))
+	rows = diagnostics[1:min(length(diagnostics), max_rows)]
+	isempty(rows) && error("No solver diagnostics were recorded; cannot generate $(output_path).")
+
+	iterations = getproperty.(rows, :inner_iter)
+	metric_specs = [
+		(:kkt_error, "kkt_error"),
+		(:singular_values_lt_1e_6, "count(Jsvd.S < 1e-6)"),
+		(:singular_values_lt_1e_2, "count(Jsvd.S < 1e-2)"),
+		(:max_singular_value, "maximum(Jsvd.S)"),
+		(:min_singular_value, "minimum(Jsvd.S)"),
+		(:max_abs_delta_z_1_144, "maximum(abs.(delta_z[1:144]))"),
+		(:max_abs_delta_z_145_end, "maximum(abs.(delta_z[145:end]))"),
+	]
+
+	mktempdir() do report_dir
+		plots_path = joinpath(report_dir, "solver_diagnostic_plots.pdf")
+		fig = CairoMakie.Figure(size = (1400, 1800), fontsize = 18)
+		axes = [
+			CairoMakie.Axis(fig[1, 1], title = "KKT error", xlabel = "inner iteration", ylabel = "kkt_error"),
+			CairoMakie.Axis(fig[1, 2], title = "Small singular values", xlabel = "inner iteration", ylabel = "count"),
+			CairoMakie.Axis(fig[2, 1], title = "Maximum singular value", xlabel = "inner iteration", ylabel = "maximum(Jsvd.S)"),
+			CairoMakie.Axis(fig[2, 2], title = "Minimum singular value", xlabel = "inner iteration", ylabel = "minimum(Jsvd.S)"),
+			CairoMakie.Axis(fig[3, 1], title = "Maximum primal-step magnitude", xlabel = "inner iteration", ylabel = "max abs delta_z[1:144]"),
+			CairoMakie.Axis(fig[3, 2], title = "Maximum remaining-step magnitude", xlabel = "inner iteration", ylabel = "max abs delta_z[145:end]"),
+		]
+
+		CairoMakie.lines!(axes[1], iterations, getproperty.(rows, :kkt_error); linewidth = 2)
+		CairoMakie.lines!(axes[2], iterations, getproperty.(rows, :singular_values_lt_1e_6); label = "< 1e-6", linewidth = 2)
+		CairoMakie.lines!(axes[2], iterations, getproperty.(rows, :singular_values_lt_1e_2); label = "< 1e-2", linewidth = 2)
+		CairoMakie.axislegend(axes[2]; position = :lt)
+		CairoMakie.lines!(axes[3], iterations, getproperty.(rows, :max_singular_value); linewidth = 2)
+		CairoMakie.lines!(axes[4], iterations, getproperty.(rows, :min_singular_value); linewidth = 2)
+		CairoMakie.lines!(axes[5], iterations, getproperty.(rows, :max_abs_delta_z_1_144); linewidth = 2)
+		CairoMakie.lines!(axes[6], iterations, getproperty.(rows, :max_abs_delta_z_145_end); linewidth = 2)
+		CairoMakie.save(plots_path, fig)
+
+		tex_path = joinpath(report_dir, "solver_diagnostics.tex")
+		open(tex_path, "w") do io
+			println(io, raw"\documentclass[10pt]{article}")
+			println(io, raw"\usepackage[letterpaper,landscape,margin=0.5in]{geometry}")
+			println(io, raw"\usepackage{booktabs,longtable,graphicx}")
+			println(io, raw"\setlength{\tabcolsep}{4pt}")
+			println(io, raw"\begin{document}")
+			println(io, raw"\section*{Solver Diagnostics}")
+			println(io, "Recorded $(length(diagnostics)) inner iterations; reporting $(length(rows)) rows (cap: $(max_rows)).")
+			println(io, raw"\subsection*{Summary statistics}")
+			println(io, raw"\begin{tabular}{lrrrr}")
+			println(io, "\\toprule Metric & Minimum & Maximum & Mean & Median \\\\")
+			println(io, raw"\midrule")
+			for (field, label) in metric_specs
+				values = Float64.(getproperty.(rows, field))
+				println(
+					io,
+					"\\texttt{$(_latex_escape(label))} & $(_diagnostic_number(minimum(values))) & $(_diagnostic_number(maximum(values))) & $(_diagnostic_number(mean(values))) & $(_diagnostic_number(median(values))) \\\\",
+				)
+			end
+			println(io, raw"\bottomrule")
+			println(io, raw"\end{tabular}")
+			println(io, raw"\clearpage")
+			println(io, raw"\subsection*{Metrics versus inner iteration}")
+			println(io, raw"\begin{center}")
+			println(io, raw"\includegraphics[width=0.91\textwidth,height=0.78\textheight,keepaspectratio]{solver_diagnostic_plots.pdf}")
+			println(io, raw"\end{center}")
+			println(io, raw"\clearpage")
+			println(io, raw"\subsection*{Per-iteration diagnostics}")
+			println(io, raw"\scriptsize")
+			println(io, raw"\begin{longtable}{rrrrrrrr}")
+			println(io, "\\toprule Iter & KKT error & \$N_{<10^{-6}}\$ & \$N_{<10^{-2}}\$ & \$\\sigma_{\\max}\$ & \$\\sigma_{\\min}\$ & \$\\max|\\delta z_{1:144}|\$ & \$\\max|\\delta z_{145:}|\$ \\\\")
+			println(io, raw"\midrule")
+			println(io, raw"\endfirsthead")
+			println(io, "\\toprule Iter & KKT error & \$N_{<10^{-6}}\$ & \$N_{<10^{-2}}\$ & \$\\sigma_{\\max}\$ & \$\\sigma_{\\min}\$ & \$\\max|\\delta z_{1:144}|\$ & \$\\max|\\delta z_{145:}|\$ \\\\")
+			println(io, raw"\midrule")
+			println(io, raw"\endhead")
+			for row in rows
+				println(
+					io,
+					"$(row.inner_iter) & $(_diagnostic_number(row.kkt_error)) & $(row.singular_values_lt_1e_6) & $(row.singular_values_lt_1e_2) & $(_diagnostic_number(row.max_singular_value)) & $(_diagnostic_number(row.min_singular_value)) & $(_diagnostic_number(row.max_abs_delta_z_1_144)) & $(_diagnostic_number(row.max_abs_delta_z_145_end)) \\\\",
+				)
+			end
+			println(io, raw"\bottomrule")
+			println(io, raw"\end{longtable}")
+			println(io, raw"\end{document}")
+		end
+
+		isnothing(Sys.which("pdflatex")) && error("pdflatex is required to generate $(output_path).")
+		latex_command = Cmd(`pdflatex -interaction=nonstopmode -halt-on-error solver_diagnostics.tex`; dir = report_dir)
+		for _ in 1:2
+			latex_output = IOBuffer()
+			process = run(
+				pipeline(ignorestatus(latex_command); stdout = latex_output, stderr = latex_output),
+			)
+			success(process) || error(
+				"Failed to generate solver diagnostics PDF with pdflatex:\n$(String(take!(latex_output)))",
+			)
+		end
+		mkpath(dirname(output_path))
+		cp(joinpath(report_dir, "solver_diagnostics.pdf"), output_path; force = true)
+	end
+
+	@info "Saved solver diagnostics report" output_path rows = length(rows)
+	output_path
+end
+
+_diagnostic_number(value) = @sprintf("%.6e", value)
+
+function _latex_escape(text)
+	replace(text, "_" => raw"\_", "<" => raw"\textless{}")
 end
 
 

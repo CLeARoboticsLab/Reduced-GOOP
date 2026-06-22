@@ -18,6 +18,8 @@ Base.@kwdef struct InteriorPointOptions
 	use_linsolve::Bool
 	record_convergence::Bool
 	record_condition_number::Bool = false
+	record_solver_diagnostics::Bool = false
+	solver_diagnostics_limit::Int = 1000
 	max_eta_retries::Int = 5
 	eta_retry_growth::Float64 = 2.0
 	η_min::Float64 = 0.0
@@ -86,6 +88,8 @@ Keyword arguments:
 	- `linear_solve_algorithm::LinearSolve.SciMLLinearSolveAlgorithm`: the linear solve algorithm to use. Any solver from `LinearSolve.jl` that can handle nonsquare system can be used.
 	- `record_convergence::Bool = false`: if true, record and return `kkt_error_history`.
 	- `record_condition_number::Bool = false`: if true, record and return `condition_number_history`.
+	- `record_solver_diagnostics::Bool = false`: if true, record singular-value and step diagnostics.
+	- `solver_diagnostics_limit::Int = 1000`: maximum number of inner-iteration diagnostic rows to record.
 	- `perturbation_enabled::Bool = false`: if true, perturb `x` after repeated KKT residual stagnation.
 	- `stagnation_iters::Int = 5`: accepted iterations without relative KKT improvement before perturbing.
 	- `stagnation_rtol::Real = 1e-3`: relative KKT improvement threshold used to reset the stagnation counter.
@@ -115,6 +119,8 @@ function solve(
 	use_linsolve = options.use_linsolve
 	record_convergence = options.record_convergence
 	record_condition_number = options.record_condition_number
+	record_solver_diagnostics = options.record_solver_diagnostics
+	solver_diagnostics_limit = options.solver_diagnostics_limit
 	verbose = options.verbose
 	max_eta_retries = options.max_eta_retries
 	eta_retry_growth = options.eta_retry_growth
@@ -191,6 +197,9 @@ function solve(
 	is_fraction_to_boundary_linesearch = (linesearch == :fraction_to_boundary)
 	kkt_error_history = Float64[]
 	condition_number_history = Float64[]
+	solver_diagnostics = NamedTuple[]
+	record_solver_diagnostics && solver_diagnostics_limit < 0 &&
+		throw(ArgumentError("solver_diagnostics_limit must be nonnegative."))
 	while outer_iters < max_outer_iters || iszero(total_iters)
 		inner_iters = 1
 		status = :solved
@@ -216,6 +225,14 @@ function solve(
 				threshold_abs = tsvd_threshold * Jsvd.S[1]
 				filters = @. ifelse(Jsvd.S >= threshold_abs, Jsvd.S / (Jsvd.S^2 + η), zero(eltype(Jsvd.S)))
 				δz .= -Jsvd.V * (filters .* (Jsvd.U' * F))
+				record_solver_diagnostics && _record_solver_diagnostic!(
+					solver_diagnostics,
+					solver_diagnostics_limit,
+					total_iters,
+					norm(F, 2),
+					Jsvd.S,
+					δz,
+				)
 
 				α_σ = fraction_to_the_boundary_linesearch(σ, δσ; tol = min_stepsize)
 				α_γ = fraction_to_the_boundary_linesearch(γ, δγ; tol = min_stepsize)
@@ -251,11 +268,15 @@ function solve(
 					# remaining modes use the Tikhonov filter σ/(σ²+η). tsvd_threshold=0 → pure Tikhonov.
 					threshold_abs = tsvd_threshold * Jsvd.S[1]
 					filters = @. ifelse(Jsvd.S >= threshold_abs, Jsvd.S / (Jsvd.S^2 + max(η, 6e-5)), zero(eltype(Jsvd.S)))
+					filters = @. ifelse(Jsvd.S >= threshold_abs, Jsvd.S / (Jsvd.S^2 + max(1e-9 * Jsvd.S[1], 5e-5)), zero(eltype(Jsvd.S)))
 					δz .= -Jsvd.V * (filters .* (Jsvd.U' * F))
+					# δz .= -pinv(Jmat) * F # minimum-norm solution
+
+					# Main.@infiltrate
 
 					α = 1.0
 					@. z_trial = z + α * δz
-					mcp.F!(F_trial, z_trial; θ, ϵ, η)
+					mcp.F!(F_trial, z_trial; θ, ϵ, η = 0.0)
 					F_z_next = norm(F_trial, 2)
 					while (F_z_next >= 1.0 * F_z) || (any(@. σ + α * δσ < 0) || any(@. γ + α * δγ < 0))
 						if α < min_stepsize
@@ -264,7 +285,7 @@ function solve(
 
 						α *= 0.5 # decay
 						@. z_trial = z + α * δz
-						mcp.F!(F_trial, z_trial; θ, ϵ, η)
+						mcp.F!(F_trial, z_trial; θ, ϵ, η = 0.0)
 						F_z_next = norm(F_trial, 2)
 					end
 
@@ -287,6 +308,14 @@ function solve(
 					)
 					η = min(η * eta_retry_growth, η_max)
 				end
+				record_solver_diagnostics && _record_solver_diagnostic!(
+					solver_diagnostics,
+					solver_diagnostics_limit,
+					total_iters,
+					F_z,
+					Jsvd.S,
+					δz,
+				)
 				if status === :failed
 					break
 				end
@@ -327,20 +356,20 @@ function solve(
 
 			if perturbation_enabled && kkt_error > tol &&
 			   iters_since_improvement >= stagnation_iters &&
-			#    num_perturbations < max_perturbations && 
+			   #    num_perturbations < max_perturbations &&
 			   kkt_error < 1.0
 
-			   verbose && println("Stagnation detected: perturbing x to escape local minimum (num_perturbations = $num_perturbations).")
+				verbose && println("Stagnation detected: perturbing x to escape local minimum (num_perturbations = $num_perturbations).")
 
 
 				z_trial .= z
 				z_trial[x_dims] .+= perturbation_scale .* randn(length(x))
-				mcp.F!(F_trial, z_trial; θ, ϵ, η)
+				mcp.F!(F_trial, z_trial; θ, ϵ, η = 0.0)
 				trial_kkt_error = norm(F_trial, 2)
 				num_perturbations += 1
 
 				if isfinite(trial_kkt_error) && all(isfinite, F_trial) &&
-				   trial_kkt_error <= 1.05 * kkt_error 
+				   trial_kkt_error <= 1.05 * kkt_error
 
 					z .= z_trial
 					F .= F_trial
@@ -385,7 +414,26 @@ function solve(
 	# outer_iters to 2 before the check.
 	status = (kkt_error <= tol) ? :solved : :failed
 
-	(; status, z, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters, kkt_error_history, condition_number_history)
+	(; status, z, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters, kkt_error_history, condition_number_history, solver_diagnostics)
+end
+
+function _record_solver_diagnostic!(diagnostics, limit, inner_iter, kkt_error, singular_values, δz)
+	length(diagnostics) >= limit && return
+	length(δz) >= 145 || throw(DimensionMismatch("solver diagnostics require δz to have at least 145 entries."))
+
+	push!(
+		diagnostics,
+		(;
+			inner_iter,
+			kkt_error,
+				singular_values_lt_1e_6 = count(value -> value < 1e-6, singular_values),
+				singular_values_lt_1e_2 = count(value -> value < 1e-2, singular_values),
+			max_singular_value = maximum(singular_values),
+			min_singular_value = minimum(singular_values),
+			max_abs_delta_z_1_144 = maximum(abs, @view(δz[1:144])),
+			max_abs_delta_z_145_end = maximum(abs, @view(δz[145:end])),
+		),
+	)
 end
 
 """Helper function to compute the step size `α` which solves:
