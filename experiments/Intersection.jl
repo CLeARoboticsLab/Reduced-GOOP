@@ -362,7 +362,7 @@ function demo(;
 	Random.seed!(rng_seed)
 
 	# ── Settings ───────────────────────────────────────────────────────────────
-	run_id = "0_IP_test_Marquardt_scaling_w_adaptive_eta"
+	run_id = "0_IP_test_Marquardt_scaling_w_adaptive_eta_and_tsvd"
 	dynamics_model = :planar_double_integrator   # :planar_double_integrator | :unicycle
 	goop_version = :reduced                    # :complete | :reduced | :quasi
 	solver = ReducedGOOP.InteriorPoint() # ReducedGOOP.InteriorPoint() | ReducedGOOP.PATHSolver()
@@ -447,12 +447,12 @@ function demo(;
 		options = if solver isa ReducedGOOP.InteriorPoint
 			ReducedGOOP.InteriorPointOptions(;
 				tol = 1e-3, #1e-4
-				η₀ = 1e-5, # 5e-5, less than 1e-4
+				η₀ = 2e-5, # 5e-5, less than 1e-4
 				ϵ₀,
 				max_inner_iters,
 				max_outer_iters = 1,
-				tightening_rate = 2.0,
-				loosening_rate = 0.5,
+				tightening_rate = 2.0, # high => weak decrease in η
+				loosening_rate = 0.5, # low => strong increase in η
 				min_stepsize = 1e-20,
 				linesearch,
 				linear_solve_algorithm = ReducedGOOP.LinearSolve.KrylovJL_LSMR(),

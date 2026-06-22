@@ -272,7 +272,6 @@ function solve(
 				verbose && record_condition_number && println("condition number of ∇F: ", condition_number)
 				local α, pred_reduction, actual_reduction
 				while true
-					# filters = @. ifelse(Jsvd.S >= tsvd_threshold, Jsvd.S / (Jsvd.S^2 + max(η, 6e-5)), zero(eltype(Jsvd.S))) 
 					filters = @. ifelse(
 						Jsvd.S >= tsvd_threshold,
 						# Jsvd.S / (Jsvd.S^2 + max(η, 6e-5)),
