@@ -380,7 +380,7 @@ function demo(;
 
 	# ── Solver schedule ────────────────────────────────────────────────────────
 	epsilon_schedule         = [0.1]
-	max_inner_iters_schedule = fill(2000, length(epsilon_schedule))
+	max_inner_iters_schedule = fill(3000, length(epsilon_schedule))
 
 	# ── Scenario ───────────────────────────────────────────────────────────────
 	# Planar double integrator: state = [px, py, vx, vy]
@@ -446,7 +446,7 @@ function demo(;
 	function solve_game_instance(θ; z₀, ϵ₀, max_inner_iters)
 		options = if solver isa ReducedGOOP.InteriorPoint
 			ReducedGOOP.InteriorPointOptions(;
-				tol = 3.1e-3, #1e-4
+				tol = 1e-3, #1e-4
 				η₀ = 1e-5, # 5e-5, less than 1e-4
 				ϵ₀,
 				max_inner_iters,
