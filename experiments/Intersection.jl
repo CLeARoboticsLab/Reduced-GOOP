@@ -362,7 +362,7 @@ function demo(;
 	Random.seed!(rng_seed)
 
 	# ── Settings ───────────────────────────────────────────────────────────────
-	run_id = "0_IP_test_Marquardt_scaling"
+	run_id = "0_IP_test_Marquardt_scaling_w_adaptive_eta"
 	dynamics_model = :planar_double_integrator   # :planar_double_integrator | :unicycle
 	goop_version = :reduced                    # :complete | :reduced | :quasi
 	solver = ReducedGOOP.InteriorPoint() # ReducedGOOP.InteriorPoint() | ReducedGOOP.PATHSolver()
@@ -380,7 +380,7 @@ function demo(;
 
 	# ── Solver schedule ────────────────────────────────────────────────────────
 	epsilon_schedule         = [0.1]
-	max_inner_iters_schedule = fill(1000, length(epsilon_schedule))
+	max_inner_iters_schedule = fill(2000, length(epsilon_schedule))
 
 	# ── Scenario ───────────────────────────────────────────────────────────────
 	# Planar double integrator: state = [px, py, vx, vy]
@@ -446,8 +446,8 @@ function demo(;
 	function solve_game_instance(θ; z₀, ϵ₀, max_inner_iters)
 		options = if solver isa ReducedGOOP.InteriorPoint
 			ReducedGOOP.InteriorPointOptions(;
-				tol = 2e-3, #1e-4
-				η₀ = 0.0, # 5e-5, less than 1e-4
+				tol = 3.1e-3, #1e-4
+				η₀ = 1e-5, # 5e-5, less than 1e-4
 				ϵ₀,
 				max_inner_iters,
 				max_outer_iters = 1,

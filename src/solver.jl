@@ -275,8 +275,8 @@ function solve(
 					# filters = @. ifelse(Jsvd.S >= tsvd_threshold, Jsvd.S / (Jsvd.S^2 + max(η, 6e-5)), zero(eltype(Jsvd.S))) 
 					filters = @. ifelse(
 						Jsvd.S >= tsvd_threshold,
-						Jsvd.S / (Jsvd.S^2 + max(η, 6e-5)),
-						zero(eltype(Jsvd.S)),
+						# Jsvd.S / (Jsvd.S^2 + max(η, 6e-5)),
+						Jsvd.S / (Jsvd.S^2 + η), zero(eltype(Jsvd.S)),
 					)
 					δz .= if use_marquardt_scaling
 						scaled_step = -Jsvd.V * (filters .* (Jsvd.U' * F))
