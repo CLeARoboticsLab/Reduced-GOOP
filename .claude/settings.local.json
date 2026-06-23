@@ -31,7 +31,23 @@
       "Bash(julia --project=. -e 'import Pkg; Pkg.test\\(\\)')",
       "Bash(echo \"EXIT CODE: $?\")",
       "Bash(jobs -l)",
-      "Bash(echo \"exit: $?\")"
+      "Bash(echo \"exit: $?\")",
+      "Skill(run)",
+      "Skill(run:*)",
+      "Bash(julia --project=experiments experiments/run_verbose.jl)",
+      "Bash(awk '{print NR, $0}')",
+      "Bash(awk 'NR%10==0 || NR==1 || NR>$\\(cat /tmp/last_n 2>/dev/null || echo 900\\)')",
+      "Bash(awk 'NR%20==1{print NR\": \"$0}')",
+      "Bash(awk ' *)",
+      "Bash(awk 'NR%50==1 || /INCREASE|DECREASE/')",
+      "Bash(grep -E \"inner iter [0-9]+$|KKT error =|Increasing η|Decreasing η\" /tmp/solver_verbose_orig.log)",
+      "Bash(python3 -)",
+      "Bash(grep -E \"inner iter [0-9]+$|condition number|backtracking.*ρ = \" /tmp/solver_verbose_orig.log)",
+      "Bash(awk 'NR>=340 && NR<=360')",
+      "Bash(awk '{print NR, $NF}')",
+      "Bash(awk '$2 >= 0.75')",
+      "Bash(awk '$1 > 300 && $2 >= 0.75')",
+      "Bash(pkill -f \"run_verbose.jl\")"
     ],
     "additionalDirectories": [
       "/private/tmp"

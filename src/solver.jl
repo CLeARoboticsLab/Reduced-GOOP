@@ -282,7 +282,7 @@ function solve(
 						scaled_step ./ sqrt.(d) # undo the scaling
 					else
 						-Jsvd.V * (filters .* (Jsvd.U' * F))
-						# δz .= -pinv(Jmat) * F # minimum-norm solution
+						# δz .= -pinv(Jmat; atol=1e-8, rtol = sqrt(eps(real(float(oneunit(eltype(Jmat))))))) * F # minimum-norm solution
 					end
 
 					α = 1.0
@@ -344,6 +344,23 @@ function solve(
 				elseif ρ > ρ_high
 					verbose && printstyled("Good gain ratio (ρ = $ρ)... Decreasing η. ($η -> $(η * (1 - exp(-tightening_rate))))\n"; color = :blue)
 					η = max(η * (1 - exp(-tightening_rate)), η_min) # 0 ≤ (1 - e⁻ʳ) < 1
+				elseif α ≥ 0.99 # ρ_low ≤ ρ ≤ ρ_high
+					verbose && printstyled("Full step taken... Checking if δz is effective.\n", color = :green)
+					# 1. Current step has little predicted effect on the residual
+					printstyled(" 1. (||F|| - ||F + α∇Fδz||) / ||F|| = $(pred_reduction / F_z)\n", color = :green) # small if < 1e-2
+					printstyled(" ...max(|Jmat * δz|) = $(maximum(abs.(Jmat * δz)))\n", color = :green)
+					if (pred_reduction / F_z) < 1e-2
+						verbose && printstyled("Small relative pred reduction... Increasing η. ($η -> $(η * (1 + exp(-loosening_rate))))\n"; color = :red)
+						η = min(η * (1 + exp(-loosening_rate)), η_max)
+					end
+					# 2. Current residual has components outside Range(∇F): F + α∇Fδz can only modify Fᵣ, the component of F in Range(∇F).
+					τ = 1e-8 * maximum(Jsvd.S)
+					r = count(Jsvd.S .> τ)
+					Uᵣ = Jsvd.U[:, 1:r]
+					Fᵣ = Uᵣ * (Uᵣ' * F)
+					F_perp = F - Fᵣ
+					printstyled(" 2. ||F_perp|| / ||F|| = $(norm(F_perp, 2) / F_z)\n", color = :green) # large is > 0.3
+					# TODO Compute newton step using Fᵣ
 				end
 				verbose && println("backtracking linesearch α = $α, gain ratio ρ = $ρ")
 				α_σ = α
