@@ -200,17 +200,17 @@ function get_setup(
 			# Minimize control effort 
 			control_objectives[1],
 
-			# Drive under speed limit
-			function (z, _)
-				(; xs) = unflatten_trajectory(
-					z[Block(1)],
-					state_dimension,
-					control_dimension,
-				)
-				mapreduce(vcat, 1:length(xs)) do k
-					velocity_limit_constraints(xs[k], dynamics_model; velocity_limit)
-				end
-			end,
+			# # Drive under speed limit
+			# function (z, _)
+			# 	(; xs) = unflatten_trajectory(
+			# 		z[Block(1)],
+			# 		state_dimension,
+			# 		control_dimension,
+			# 	)
+			# 	mapreduce(vcat, 1:length(xs)) do k
+			# 		velocity_limit_constraints(xs[k], dynamics_model; velocity_limit)
+			# 	end
+			# end,
 
 			# Reach the goal (highest priority for P1)
 			function (z, θ)
@@ -261,7 +261,7 @@ function get_setup(
 	]
 
 	# Preference hierarchy: [lowest priority, ..., highest priority]
-	is_prioritized_constraint = [[false, true, false], [false, false, true]]
+	is_prioritized_constraint = [[false, false], [false, false, true]]
 
 	" Scalarized baseline (Nash / no hierarchy): flattens hierarchical preferences into a single objective per player"
 	use_scalarized_baseline = false
@@ -362,7 +362,7 @@ function demo(;
 	Random.seed!(rng_seed)
 
 	# ── Settings ───────────────────────────────────────────────────────────────
-	run_id = "0_IP_test"
+	run_id = "0_IP_test_delete"
 	dynamics_model = :planar_double_integrator   # :planar_double_integrator | :unicycle
 	goop_version = :reduced                    # :complete | :reduced | :quasi
 	solver = ReducedGOOP.InteriorPoint() # ReducedGOOP.InteriorPoint() | ReducedGOOP.PATHSolver()
@@ -446,8 +446,8 @@ function demo(;
 	function solve_game_instance(θ; z₀, ϵ₀, max_inner_iters)
 		options = if solver isa ReducedGOOP.InteriorPoint
 			ReducedGOOP.InteriorPointOptions(;
-				tol = 1.5e-3, #1e-4
-				η₀ = 5e-5, # 5e-5, less than 1e-4
+				tol = 1e-3, #1e-4
+				η₀ = 2e-5, # 5e-5, 0.0 to turn off Tikhonov
 				ϵ₀,
 				max_inner_iters,
 				max_outer_iters = 1,
@@ -1192,19 +1192,23 @@ function save_solver_diagnostics_report(diagnostics, output_path; max_rows = 100
 		(:max_singular_value, "maximum(Jsvd.S)"),
 		(:min_singular_value, "minimum(Jsvd.S)"),
 		(:max_abs_delta_z_1_144, "maximum(abs.(delta_z[1:144]))"),
+		(:median_abs_delta_z_1_144, "median(abs.(delta_z[1:144]))"),
 		(:max_abs_delta_z_145_end, "maximum(abs.(delta_z[145:end]))"),
+		(:median_abs_delta_z_145_end, "median(abs.(delta_z[145:end]))"),
 	]
 
 	mktempdir() do report_dir
 		plots_path = joinpath(report_dir, "solver_diagnostic_plots.pdf")
-		fig = CairoMakie.Figure(size = (1400, 1800), fontsize = 18)
+		fig = CairoMakie.Figure(size = (1400, 2200), fontsize = 18)
 		axes = [
 			CairoMakie.Axis(fig[1, 1], title = "KKT error", xlabel = "inner iteration", ylabel = "kkt_error"),
 			CairoMakie.Axis(fig[1, 2], title = "Small singular values", xlabel = "inner iteration", ylabel = "count"),
 			CairoMakie.Axis(fig[2, 1], title = "Maximum singular value", xlabel = "inner iteration", ylabel = "maximum(Jsvd.S)"),
 			CairoMakie.Axis(fig[2, 2], title = "Minimum singular value", xlabel = "inner iteration", ylabel = "minimum(Jsvd.S)"),
 			CairoMakie.Axis(fig[3, 1], title = "Maximum primal-step magnitude", xlabel = "inner iteration", ylabel = "max abs delta_z[1:144]"),
-			CairoMakie.Axis(fig[3, 2], title = "Maximum remaining-step magnitude", xlabel = "inner iteration", ylabel = "max abs delta_z[145:end]"),
+			CairoMakie.Axis(fig[3, 2], title = "Median primal-step magnitude", xlabel = "inner iteration", ylabel = "median abs delta_z[1:144]"),
+			CairoMakie.Axis(fig[4, 1], title = "Maximum dual-step magnitude", xlabel = "inner iteration", ylabel = "max abs delta_z[145:end]"),
+			CairoMakie.Axis(fig[4, 2], title = "Median dual-step magnitude", xlabel = "inner iteration", ylabel = "median abs delta_z[145:end]"),
 		]
 
 		CairoMakie.lines!(axes[1], iterations, getproperty.(rows, :kkt_error); linewidth = 2)
@@ -1214,7 +1218,9 @@ function save_solver_diagnostics_report(diagnostics, output_path; max_rows = 100
 		CairoMakie.lines!(axes[3], iterations, getproperty.(rows, :max_singular_value); linewidth = 2)
 		CairoMakie.lines!(axes[4], iterations, getproperty.(rows, :min_singular_value); linewidth = 2)
 		CairoMakie.lines!(axes[5], iterations, getproperty.(rows, :max_abs_delta_z_1_144); linewidth = 2)
-		CairoMakie.lines!(axes[6], iterations, getproperty.(rows, :max_abs_delta_z_145_end); linewidth = 2)
+		CairoMakie.lines!(axes[6], iterations, getproperty.(rows, :median_abs_delta_z_1_144); linewidth = 2)
+		CairoMakie.lines!(axes[7], iterations, getproperty.(rows, :max_abs_delta_z_145_end); linewidth = 2)
+		CairoMakie.lines!(axes[8], iterations, getproperty.(rows, :median_abs_delta_z_145_end); linewidth = 2)
 		CairoMakie.save(plots_path, fig)
 
 		tex_path = joinpath(report_dir, "solver_diagnostics.tex")
@@ -1247,17 +1253,17 @@ function save_solver_diagnostics_report(diagnostics, output_path; max_rows = 100
 			println(io, raw"\clearpage")
 			println(io, raw"\subsection*{Per-iteration diagnostics}")
 			println(io, raw"\scriptsize")
-			println(io, raw"\begin{longtable}{rrrrrrrr}")
-			println(io, "\\toprule Iter & KKT error & \$N_{<10^{-6}}\$ & \$N_{<10^{-2}}\$ & \$\\sigma_{\\max}\$ & \$\\sigma_{\\min}\$ & \$\\max|\\delta z_{1:144}|\$ & \$\\max|\\delta z_{145:}|\$ \\\\")
+			println(io, raw"\begin{longtable}{rrrrrrrrrr}")
+			println(io, "\\toprule Iter & KKT error & \$N_{<10^{-6}}\$ & \$N_{<10^{-2}}\$ & \$\\sigma_{\\max}\$ & \$\\sigma_{\\min}\$ & \$\\max|\\delta z_{1:144}|\$ & \$\\mathrm{med}|\\delta z_{1:144}|\$ & \$\\max|\\delta z_{145:}|\$ & \$\\mathrm{med}|\\delta z_{145:}|\$ \\\\")
 			println(io, raw"\midrule")
 			println(io, raw"\endfirsthead")
-			println(io, "\\toprule Iter & KKT error & \$N_{<10^{-6}}\$ & \$N_{<10^{-2}}\$ & \$\\sigma_{\\max}\$ & \$\\sigma_{\\min}\$ & \$\\max|\\delta z_{1:144}|\$ & \$\\max|\\delta z_{145:}|\$ \\\\")
+			println(io, "\\toprule Iter & KKT error & \$N_{<10^{-6}}\$ & \$N_{<10^{-2}}\$ & \$\\sigma_{\\max}\$ & \$\\sigma_{\\min}\$ & \$\\max|\\delta z_{1:144}|\$ & \$\\mathrm{med}|\\delta z_{1:144}|\$ & \$\\max|\\delta z_{145:}|\$ & \$\\mathrm{med}|\\delta z_{145:}|\$ \\\\")
 			println(io, raw"\midrule")
 			println(io, raw"\endhead")
 			for row in rows
 				println(
 					io,
-					"$(row.inner_iter) & $(_diagnostic_number(row.kkt_error)) & $(row.singular_values_lt_1e_6) & $(row.singular_values_lt_1e_2) & $(_diagnostic_number(row.max_singular_value)) & $(_diagnostic_number(row.min_singular_value)) & $(_diagnostic_number(row.max_abs_delta_z_1_144)) & $(_diagnostic_number(row.max_abs_delta_z_145_end)) \\\\",
+					"$(row.inner_iter) & $(_diagnostic_number(row.kkt_error)) & $(row.singular_values_lt_1e_6) & $(row.singular_values_lt_1e_2) & $(_diagnostic_number(row.max_singular_value)) & $(_diagnostic_number(row.min_singular_value)) & $(_diagnostic_number(row.max_abs_delta_z_1_144)) & $(_diagnostic_number(row.median_abs_delta_z_1_144)) & $(_diagnostic_number(row.max_abs_delta_z_145_end)) & $(_diagnostic_number(row.median_abs_delta_z_145_end)) \\\\",
 				)
 			end
 			println(io, raw"\bottomrule")

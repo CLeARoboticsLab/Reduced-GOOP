@@ -1,4 +1,5 @@
 using LinearAlgebra
+using Statistics: median
 
 abstract type SolverType end
 struct InteriorPoint <: SolverType end
@@ -350,8 +351,8 @@ function solve(
 					printstyled(" 1. (||F|| - ||F + α∇Fδz||) / ||F|| = $(pred_reduction / F_z)\n", color = :green) # small if < 1e-2
 					printstyled(" ...max(|Jmat * δz|) = $(maximum(abs.(Jmat * δz)))\n", color = :green)
 					if (pred_reduction / F_z) < 1e-2
-						verbose && printstyled("Small relative pred reduction... Increasing η. ($η -> $(η * (1 + exp(-loosening_rate))))\n"; color = :red)
-						η = min(η * (1 + exp(-loosening_rate)), η_max)
+						# verbose && printstyled("Small relative pred reduction... Increasing η. ($η -> $(η * (1 + exp(-loosening_rate))))\n"; color = :red)
+						# η = min(η * (1 + exp(-loosening_rate)), η_max)
 					end
 					# 2. Current residual has components outside Range(∇F): F + α∇Fδz can only modify Fᵣ, the component of F in Range(∇F).
 					τ = 1e-8 * maximum(Jsvd.S)
@@ -448,6 +449,8 @@ end
 function _record_solver_diagnostic!(diagnostics, limit, inner_iter, kkt_error, singular_values, δz)
 	length(diagnostics) >= limit && return
 	length(δz) >= 145 || throw(DimensionMismatch("solver diagnostics require δz to have at least 145 entries."))
+	primal_step_abs = abs.(@view(δz[1:144]))
+	dual_step_abs = abs.(@view(δz[145:end]))
 
 	push!(
 		diagnostics,
@@ -458,8 +461,10 @@ function _record_solver_diagnostic!(diagnostics, limit, inner_iter, kkt_error, s
 			singular_values_lt_1e_2 = count(value -> value < 1e-2, singular_values),
 			max_singular_value = maximum(singular_values),
 			min_singular_value = minimum(singular_values),
-			max_abs_delta_z_1_144 = maximum(abs, @view(δz[1:144])),
-			max_abs_delta_z_145_end = maximum(abs, @view(δz[145:end])),
+			max_abs_delta_z_1_144 = maximum(primal_step_abs),
+			median_abs_delta_z_1_144 = median(primal_step_abs),
+			max_abs_delta_z_145_end = maximum(dual_step_abs),
+			median_abs_delta_z_145_end = median(dual_step_abs),
 		),
 	)
 end
