@@ -1,5 +1,4 @@
 using LinearAlgebra
-using Statistics: median
 
 abstract type SolverType end
 struct InteriorPoint <: SolverType end
@@ -17,10 +16,8 @@ Base.@kwdef struct InteriorPointOptions
 	linesearch::Symbol
 	linear_solve_algorithm::LinearSolve.SciMLLinearSolveAlgorithm
 	use_linsolve::Bool
-	record_convergence::Bool
+	record_convergence::Bool = false
 	record_condition_number::Bool = false
-	record_solver_diagnostics::Bool = false
-	solver_diagnostics_limit::Int = 1000
 	max_eta_retries::Int = 5
 	eta_retry_growth::Float64 = 2.0
 	η_min::Float64 = 1e-20
@@ -88,10 +85,8 @@ Keyword arguments:
 	- `linesearch::Symbol = :backtracking`: linesearch mode (`:backtracking` or `:fraction_to_boundary`).
 	- `verbose::Bool = false`: whether to print debug information.
 	- `linear_solve_algorithm::LinearSolve.SciMLLinearSolveAlgorithm`: the linear solve algorithm to use. Any solver from `LinearSolve.jl` that can handle nonsquare system can be used.
-	- `record_convergence::Bool = false`: if true, record and return `kkt_error_history`.
+	- `record_convergence::Bool = false`: if true, record and return `kkt_error_history` and `eta_history`.
 	- `record_condition_number::Bool = false`: if true, record and return `condition_number_history`.
-	- `record_solver_diagnostics::Bool = false`: if true, record singular-value and step diagnostics.
-	- `solver_diagnostics_limit::Int = 1000`: maximum number of inner-iteration diagnostic rows to record.
 	- `perturbation_enabled::Bool = false`: if true, perturb `x` after repeated KKT residual stagnation.
 	- `stagnation_iters::Int = 5`: accepted iterations without relative KKT improvement before perturbing.
 	- `stagnation_rtol::Real = 1e-3`: relative KKT improvement threshold used to reset the stagnation counter.
@@ -121,8 +116,6 @@ function solve(
 	use_linsolve = options.use_linsolve
 	record_convergence = options.record_convergence
 	record_condition_number = options.record_condition_number
-	record_solver_diagnostics = options.record_solver_diagnostics
-	solver_diagnostics_limit = options.solver_diagnostics_limit
 	verbose = options.verbose
 	max_eta_retries = options.max_eta_retries
 	eta_retry_growth = options.eta_retry_growth
@@ -199,9 +192,7 @@ function solve(
 	is_fraction_to_boundary_linesearch = (linesearch == :fraction_to_boundary)
 	kkt_error_history = Float64[]
 	condition_number_history = Float64[]
-	solver_diagnostics = NamedTuple[]
-	record_solver_diagnostics && solver_diagnostics_limit < 0 &&
-		throw(ArgumentError("solver_diagnostics_limit must be nonnegative."))
+	eta_history = Float64[]
 	while outer_iters < max_outer_iters || iszero(total_iters)
 		inner_iters = 1
 		status = :solved
@@ -210,7 +201,7 @@ function solve(
 
 		while inner_iters < max_inner_iters && (kkt_error > tol) # (!is_fraction_to_boundary_linesearch || kkt_error > tol)
 			total_iters += 1
-			# Compute the residual at the current iterate (η does not enter F, only ∇F).
+			# Compute the residual at the current iterate
 			mcp.F!(F, z; θ, ϵ, η = 0.0)
 			# @assert all(.!isnan.(F)) "Found NaN in F - aborting!"
 			verbose && println("inner iter $inner_iters")
@@ -220,21 +211,13 @@ function solve(
 				mcp.∇F_z!(∇F, z; θ, ϵ, η = 0.0)
 				Jmat = Matrix(∇F)
 				Jsvd = svd(Jmat)
-				condition_number = record_condition_number ? Jsvd.S[1] / Jsvd.S[end] : NaN
+				condition_number = record_condition_number ? _condition_number(Jsvd.S) : NaN
 				verbose && record_condition_number && println("condition number of ∇F: ", condition_number)
 				# Unified TSVD+Tikhonov step: modes below tsvd_threshold*σ₁ are zeroed (hard cutoff),
 				# remaining modes use the Tikhonov filter σ/(σ²+η). tsvd_threshold=0 → pure Tikhonov.
 				threshold_abs = tsvd_threshold * Jsvd.S[1]
 				filters = @. ifelse(Jsvd.S >= threshold_abs, Jsvd.S / (Jsvd.S^2 + η), zero(eltype(Jsvd.S)))
 				δz .= -Jsvd.V * (filters .* (Jsvd.U' * F))
-				record_solver_diagnostics && _record_solver_diagnostic!(
-					solver_diagnostics,
-					solver_diagnostics_limit,
-					total_iters,
-					norm(F, 2),
-					Jsvd.S,
-					δz,
-				)
 
 				α_σ = fraction_to_the_boundary_linesearch(σ, δσ; tol = min_stepsize)
 				α_γ = fraction_to_the_boundary_linesearch(γ, δγ; tol = min_stepsize)
@@ -269,21 +252,42 @@ function solve(
 				else
 					svd(Jmat)
 				end
-				condition_number = record_condition_number ? Jsvd.S[1] / Jsvd.S[end] : NaN
-				verbose && record_condition_number && println("condition number of ∇F: ", condition_number)
+				if record_condition_number
+					Jsvd_diagnostic = use_marquardt_scaling ? svd(Jmat) : Jsvd
+					condition_number = _condition_number(Jsvd_diagnostic.S)
+					verbose && println("condition number of ∇F: ", condition_number)
+				end
+
+				# Check: current residual has components outside Range(∇F): F + α∇Fδz can only modify Fᵣ, the component of F in Range(∇F).
+				τ = 1e-8 * maximum(Jsvd.S)
+				r = count(Jsvd.S .> τ)
+				Uᵣ = Jsvd.U[:, 1:r]
+				Fᵣ = Uᵣ * (Uᵣ' * F)
+				F_perp = F - Fᵣ
+				# Compute newton step using Fᵣ
+				use_range_step = (kkt_error < 1e-1) && (norm(F_perp, 2) / norm(F, 2)) > 0.3
+				printstyled("|F_perp|| / ||F|| = $(norm(F_perp, 2) / F_z)\n", color = :green) # large is > 0.3
+				if use_range_step
+					verbose && printstyled("Using range-space step (Fᵣ) instead of full-space step (F) because ||F_perp|| / ||F|| = $(norm(F_perp, 2) / norm(F, 2))\n", color = :yellow)
+				end
+
+				# if inner_iters > 20 && kkt_error < 5e-3
+				# 	η = 0.0
+				# end
+
 				local α, pred_reduction, actual_reduction
 				while true
 					filters = @. ifelse(
 						Jsvd.S >= tsvd_threshold,
-						# Jsvd.S / (Jsvd.S^2 + max(η, 6e-5)),
-						Jsvd.S / (Jsvd.S^2 + η), zero(eltype(Jsvd.S)), # max(η, 1e-8)
+						(Jsvd.S / (Jsvd.S^2 + η)), zero(eltype(Jsvd.S)), # max(η, 1e-8)
 					)
+					residual = use_range_step ? Fᵣ : F
 					δz .= if use_marquardt_scaling
-						scaled_step = -Jsvd.V * (filters .* (Jsvd.U' * F))
+						scaled_step = -Jsvd.V * (filters .* (Jsvd.U' * residual))
 						scaled_step ./ sqrt.(d) # undo the scaling
 					else
-						-Jsvd.V * (filters .* (Jsvd.U' * F))
-						# δz .= -pinv(Jmat; atol=1e-8, rtol = sqrt(eps(real(float(oneunit(eltype(Jmat))))))) * F # minimum-norm solution
+						-Jsvd.V * (filters .* (Jsvd.U' * residual))
+						# -pinv(Jmat; atol=1e-8, rtol = sqrt(eps(real(float(oneunit(eltype(Jmat))))))) * residual # minimum-norm solution
 					end
 
 					α = 1.0
@@ -320,14 +324,6 @@ function solve(
 					)
 					η = min(η * eta_retry_growth, η_max)
 				end
-				record_solver_diagnostics && _record_solver_diagnostic!(
-					solver_diagnostics,
-					solver_diagnostics_limit,
-					total_iters,
-					F_z,
-					Jsvd.S,
-					δz,
-				)
 				if status === :failed
 					break
 				end
@@ -347,21 +343,13 @@ function solve(
 					η = max(η * (1 - exp(-tightening_rate)), η_min) # 0 ≤ (1 - e⁻ʳ) < 1
 				elseif α ≥ 0.99 # ρ_low ≤ ρ ≤ ρ_high
 					verbose && printstyled("Full step taken... Checking if δz is effective.\n", color = :green)
-					# 1. Current step has little predicted effect on the residual
-					printstyled(" 1. (||F|| - ||F + α∇Fδz||) / ||F|| = $(pred_reduction / F_z)\n", color = :green) # small if < 1e-2
+					# check: current step has little predicted effect on the residual
+					printstyled(" (||F|| - ||F + α∇Fδz||) / ||F|| = $(pred_reduction / F_z)\n", color = :green) # small if < 1e-2
 					printstyled(" ...max(|Jmat * δz|) = $(maximum(abs.(Jmat * δz)))\n", color = :green)
-					if (pred_reduction / F_z) < 1e-2
-						# verbose && printstyled("Small relative pred reduction... Increasing η. ($η -> $(η * (1 + exp(-loosening_rate))))\n"; color = :red)
-						# η = min(η * (1 + exp(-loosening_rate)), η_max)
-					end
-					# 2. Current residual has components outside Range(∇F): F + α∇Fδz can only modify Fᵣ, the component of F in Range(∇F).
-					τ = 1e-8 * maximum(Jsvd.S)
-					r = count(Jsvd.S .> τ)
-					Uᵣ = Jsvd.U[:, 1:r]
-					Fᵣ = Uᵣ * (Uᵣ' * F)
-					F_perp = F - Fᵣ
-					printstyled(" 2. ||F_perp|| / ||F|| = $(norm(F_perp, 2) / F_z)\n", color = :green) # large is > 0.3
-					# TODO Compute newton step using Fᵣ
+					# if (pred_reduction / F_z) < 1e-2
+					# 	verbose && printstyled("Small relative pred reduction... Increasing η. ($η -> $(η * (1 + exp(-loosening_rate))))\n"; color = :red)
+					# 	η = min(η * (1 + exp(-0.5 * loosening_rate)), η_max)
+					# end
 				end
 				verbose && println("backtracking linesearch α = $α, gain ratio ρ = $ρ")
 				α_σ = α
@@ -413,6 +401,7 @@ function solve(
 
 			if record_convergence
 				push!(kkt_error_history, kkt_error)
+				push!(eta_history, η)
 			end
 			if record_condition_number
 				push!(condition_number_history, condition_number)
@@ -443,30 +432,18 @@ function solve(
 	# outer_iters to 2 before the check.
 	status = (kkt_error <= tol) ? :solved : :failed
 
-	(; status, z, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters, kkt_error_history, condition_number_history, solver_diagnostics)
+	result = (; status, z, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters)
+	if record_convergence || record_condition_number
+		return (; result..., kkt_error_history, condition_number_history, eta_history)
+	end
+	result
 end
 
-function _record_solver_diagnostic!(diagnostics, limit, inner_iter, kkt_error, singular_values, δz)
-	length(diagnostics) >= limit && return
-	length(δz) >= 145 || throw(DimensionMismatch("solver diagnostics require δz to have at least 145 entries."))
-	primal_step_abs = abs.(@view(δz[1:144]))
-	dual_step_abs = abs.(@view(δz[145:end]))
-
-	push!(
-		diagnostics,
-		(;
-			inner_iter,
-			kkt_error,
-			singular_values_lt_1e_6 = count(value -> value < 1e-6, singular_values),
-			singular_values_lt_1e_2 = count(value -> value < 1e-2, singular_values),
-			max_singular_value = maximum(singular_values),
-			min_singular_value = minimum(singular_values),
-			max_abs_delta_z_1_144 = maximum(primal_step_abs),
-			median_abs_delta_z_1_144 = median(primal_step_abs),
-			max_abs_delta_z_145_end = maximum(dual_step_abs),
-			median_abs_delta_z_145_end = median(dual_step_abs),
-		),
-	)
+function _condition_number(singular_values)
+	isempty(singular_values) && return NaN
+	σmax = maximum(singular_values)
+	σmin = minimum(singular_values)
+	σmin > 0 ? σmax / σmin : Inf
 end
 
 """Helper function to compute the step size `α` which solves:

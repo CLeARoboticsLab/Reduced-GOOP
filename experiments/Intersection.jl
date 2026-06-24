@@ -7,8 +7,6 @@ using CairoMakie: CairoMakie
 using LaTeXStrings: @L_str
 using BlockArrays
 using JLD2, Distributions, Random
-using Symbolics, NonlinearSolve, LinearAlgebra
-using Printf, Statistics
 using ParametricMCPs
 using ReducedGOOP
 
@@ -362,7 +360,7 @@ function demo(;
 	Random.seed!(rng_seed)
 
 	# ── Settings ───────────────────────────────────────────────────────────────
-	run_id = "0_IP_test_delete"
+	run_id = "0_IP_test_initial_alpha2.0"
 	dynamics_model = :planar_double_integrator   # :planar_double_integrator | :unicycle
 	goop_version = :reduced                    # :complete | :reduced | :quasi
 	solver = ReducedGOOP.InteriorPoint() # ReducedGOOP.InteriorPoint() | ReducedGOOP.PATHSolver()
@@ -459,8 +457,6 @@ function demo(;
 				use_linsolve = false,
 				record_convergence = true,
 				record_condition_number = true,
-				record_solver_diagnostics = true,
-				solver_diagnostics_limit = 100,
 				eta_retry_growth = 0.3,
 				perturbation_enabled = false,
 				stagnation_rtol = 1e-1,
@@ -494,7 +490,7 @@ function demo(;
 		@info "Solving game instance with $(solver)..."
 		kkt_error_history = Float64[]
 		condition_number_history = Float64[]
-		solver_diagnostics = NamedTuple[]
+		eta_history = Float64[]
 		total_iters = 0
 		solver_status = :solved
 		elapsed_time = @elapsed begin
@@ -515,7 +511,7 @@ function demo(;
 					total_iters,
 					kkt_error_history,
 					condition_number_history,
-					solver_diagnostics,
+					eta_history,
 				) = output
 				if status == :failed
 					println("  [solver exit] total_iters=$(total_iters), kkt_error=$(round(kkt_error; sigdigits=4)), tol=$(options.tol)")
@@ -529,13 +525,6 @@ function demo(;
 				x = z[1:(num_players*primal_dimension)]
 				solver_status = :solved
 			end
-		end
-		if solver isa ReducedGOOP.InteriorPoint
-			save_solver_diagnostics_report(
-				solver_diagnostics,
-				normpath(joinpath(@__DIR__, "..", "solver_diagnostics.pdf"));
-				max_rows = 1000,
-			)
 		end
 
 		strategies = extract_player_strategies(
@@ -556,7 +545,7 @@ function demo(;
 			"total_iters" => total_iters,
 			"kkt_error_history" => kkt_error_history,
 			"condition_number_history" => condition_number_history,
-			"solver_diagnostics" => solver_diagnostics,
+			"eta_history" => eta_history,
 		)
 
 		(; strategies, solution_dict)
@@ -730,17 +719,6 @@ function demo(;
 
 		for (ϵ₀, result) in epsilon_results
 			solution_dict = result.solution_dict
-			# preference_values = evaluate_preferences_at_solution(
-			# 	problem,
-			# 	solution_dict["x"][1:(num_players*primal_dimension)],
-			# 	θ,
-			# )
-			# solution_dict["preference_values"] = preference_values
-			# println("  ϵ₀ = $(round(ϵ₀; digits = 5)):")
-			# println("  kkt_error = $(solution_dict["kkt_error"])")
-			# for (player_idx, player_preferences) in enumerate(preference_values)
-			# 	println("    player $(player_idx): $(_fmt5(player_preferences))")
-			# end
 
 			JLD2.save_object(
 				joinpath(
@@ -749,9 +727,7 @@ function demo(;
 				),
 				solution_dict,
 			)
-
 			save_convergence_diagnostics(solution_dict, convergence_plots_dir, solved_attempts, ϵ₀)
-
 			trajectory_fig, _ = plot_intersection_trajectories(
 				;
 				map_end,
@@ -1177,192 +1153,22 @@ function save_convergence_diagnostics(solution_dict, convergence_plots_dir, inst
 			condition_number_fig,
 		)
 	end
+
+	eta_history = get(solution_dict, "eta_history", Float64[])
+	if !isempty(eta_history)
+		eta_fig, _ = plot_eta_plot(;
+			eta_history = safe_log10_history(eta_history),
+			total_iters = solution_dict["total_iters"],
+		)
+		CairoMakie.save(
+			joinpath(
+				convergence_plots_dir,
+				"eta_instance_$(instance_idx)_eps$(ϵ₀)$(filename_suffix).pdf",
+			),
+			eta_fig,
+		)
+	end
 end
 
-function save_solver_diagnostics_report(diagnostics, output_path; max_rows = 1000)
-	max_rows >= 0 || throw(ArgumentError("max_rows must be nonnegative."))
-	rows = diagnostics[1:min(length(diagnostics), max_rows)]
-	isempty(rows) && error("No solver diagnostics were recorded; cannot generate $(output_path).")
-
-	iterations = getproperty.(rows, :inner_iter)
-	metric_specs = [
-		(:kkt_error, "kkt_error"),
-		(:singular_values_lt_1e_6, "count(Jsvd.S < 1e-6)"),
-		(:singular_values_lt_1e_2, "count(Jsvd.S < 1e-2)"),
-		(:max_singular_value, "maximum(Jsvd.S)"),
-		(:min_singular_value, "minimum(Jsvd.S)"),
-		(:max_abs_delta_z_1_144, "maximum(abs.(delta_z[1:144]))"),
-		(:median_abs_delta_z_1_144, "median(abs.(delta_z[1:144]))"),
-		(:max_abs_delta_z_145_end, "maximum(abs.(delta_z[145:end]))"),
-		(:median_abs_delta_z_145_end, "median(abs.(delta_z[145:end]))"),
-	]
-
-	mktempdir() do report_dir
-		plots_path = joinpath(report_dir, "solver_diagnostic_plots.pdf")
-		fig = CairoMakie.Figure(size = (1400, 2200), fontsize = 18)
-		axes = [
-			CairoMakie.Axis(fig[1, 1], title = "KKT error", xlabel = "inner iteration", ylabel = "kkt_error"),
-			CairoMakie.Axis(fig[1, 2], title = "Small singular values", xlabel = "inner iteration", ylabel = "count"),
-			CairoMakie.Axis(fig[2, 1], title = "Maximum singular value", xlabel = "inner iteration", ylabel = "maximum(Jsvd.S)"),
-			CairoMakie.Axis(fig[2, 2], title = "Minimum singular value", xlabel = "inner iteration", ylabel = "minimum(Jsvd.S)"),
-			CairoMakie.Axis(fig[3, 1], title = "Maximum primal-step magnitude", xlabel = "inner iteration", ylabel = "max abs delta_z[1:144]"),
-			CairoMakie.Axis(fig[3, 2], title = "Median primal-step magnitude", xlabel = "inner iteration", ylabel = "median abs delta_z[1:144]"),
-			CairoMakie.Axis(fig[4, 1], title = "Maximum dual-step magnitude", xlabel = "inner iteration", ylabel = "max abs delta_z[145:end]"),
-			CairoMakie.Axis(fig[4, 2], title = "Median dual-step magnitude", xlabel = "inner iteration", ylabel = "median abs delta_z[145:end]"),
-		]
-
-		CairoMakie.lines!(axes[1], iterations, getproperty.(rows, :kkt_error); linewidth = 2)
-		CairoMakie.lines!(axes[2], iterations, getproperty.(rows, :singular_values_lt_1e_6); label = "< 1e-6", linewidth = 2)
-		CairoMakie.lines!(axes[2], iterations, getproperty.(rows, :singular_values_lt_1e_2); label = "< 1e-2", linewidth = 2)
-		CairoMakie.axislegend(axes[2]; position = :lt)
-		CairoMakie.lines!(axes[3], iterations, getproperty.(rows, :max_singular_value); linewidth = 2)
-		CairoMakie.lines!(axes[4], iterations, getproperty.(rows, :min_singular_value); linewidth = 2)
-		CairoMakie.lines!(axes[5], iterations, getproperty.(rows, :max_abs_delta_z_1_144); linewidth = 2)
-		CairoMakie.lines!(axes[6], iterations, getproperty.(rows, :median_abs_delta_z_1_144); linewidth = 2)
-		CairoMakie.lines!(axes[7], iterations, getproperty.(rows, :max_abs_delta_z_145_end); linewidth = 2)
-		CairoMakie.lines!(axes[8], iterations, getproperty.(rows, :median_abs_delta_z_145_end); linewidth = 2)
-		CairoMakie.save(plots_path, fig)
-
-		tex_path = joinpath(report_dir, "solver_diagnostics.tex")
-		open(tex_path, "w") do io
-			println(io, raw"\documentclass[10pt]{article}")
-			println(io, raw"\usepackage[letterpaper,landscape,margin=0.5in]{geometry}")
-			println(io, raw"\usepackage{booktabs,longtable,graphicx}")
-			println(io, raw"\setlength{\tabcolsep}{4pt}")
-			println(io, raw"\begin{document}")
-			println(io, raw"\section*{Solver Diagnostics}")
-			println(io, "Recorded $(length(diagnostics)) inner iterations; reporting $(length(rows)) rows (cap: $(max_rows)).")
-			println(io, raw"\subsection*{Summary statistics}")
-			println(io, raw"\begin{tabular}{lrrrr}")
-			println(io, "\\toprule Metric & Minimum & Maximum & Mean & Median \\\\")
-			println(io, raw"\midrule")
-			for (field, label) in metric_specs
-				values = Float64.(getproperty.(rows, field))
-				println(
-					io,
-					"\\texttt{$(_latex_escape(label))} & $(_diagnostic_number(minimum(values))) & $(_diagnostic_number(maximum(values))) & $(_diagnostic_number(mean(values))) & $(_diagnostic_number(median(values))) \\\\",
-				)
-			end
-			println(io, raw"\bottomrule")
-			println(io, raw"\end{tabular}")
-			println(io, raw"\clearpage")
-			println(io, raw"\subsection*{Metrics versus inner iteration}")
-			println(io, raw"\begin{center}")
-			println(io, raw"\includegraphics[width=0.91\textwidth,height=0.78\textheight,keepaspectratio]{solver_diagnostic_plots.pdf}")
-			println(io, raw"\end{center}")
-			println(io, raw"\clearpage")
-			println(io, raw"\subsection*{Per-iteration diagnostics}")
-			println(io, raw"\scriptsize")
-			println(io, raw"\begin{longtable}{rrrrrrrrrr}")
-			println(io, "\\toprule Iter & KKT error & \$N_{<10^{-6}}\$ & \$N_{<10^{-2}}\$ & \$\\sigma_{\\max}\$ & \$\\sigma_{\\min}\$ & \$\\max|\\delta z_{1:144}|\$ & \$\\mathrm{med}|\\delta z_{1:144}|\$ & \$\\max|\\delta z_{145:}|\$ & \$\\mathrm{med}|\\delta z_{145:}|\$ \\\\")
-			println(io, raw"\midrule")
-			println(io, raw"\endfirsthead")
-			println(io, "\\toprule Iter & KKT error & \$N_{<10^{-6}}\$ & \$N_{<10^{-2}}\$ & \$\\sigma_{\\max}\$ & \$\\sigma_{\\min}\$ & \$\\max|\\delta z_{1:144}|\$ & \$\\mathrm{med}|\\delta z_{1:144}|\$ & \$\\max|\\delta z_{145:}|\$ & \$\\mathrm{med}|\\delta z_{145:}|\$ \\\\")
-			println(io, raw"\midrule")
-			println(io, raw"\endhead")
-			for row in rows
-				println(
-					io,
-					"$(row.inner_iter) & $(_diagnostic_number(row.kkt_error)) & $(row.singular_values_lt_1e_6) & $(row.singular_values_lt_1e_2) & $(_diagnostic_number(row.max_singular_value)) & $(_diagnostic_number(row.min_singular_value)) & $(_diagnostic_number(row.max_abs_delta_z_1_144)) & $(_diagnostic_number(row.median_abs_delta_z_1_144)) & $(_diagnostic_number(row.max_abs_delta_z_145_end)) & $(_diagnostic_number(row.median_abs_delta_z_145_end)) \\\\",
-				)
-			end
-			println(io, raw"\bottomrule")
-			println(io, raw"\end{longtable}")
-			println(io, raw"\end{document}")
-		end
-
-		isnothing(Sys.which("pdflatex")) && error("pdflatex is required to generate $(output_path).")
-		latex_command = Cmd(`pdflatex -interaction=nonstopmode -halt-on-error solver_diagnostics.tex`; dir = report_dir)
-		for _ in 1:2
-			latex_output = IOBuffer()
-			process = run(
-				pipeline(ignorestatus(latex_command); stdout = latex_output, stderr = latex_output),
-			)
-			success(process) || error(
-				"Failed to generate solver diagnostics PDF with pdflatex:\n$(String(take!(latex_output)))",
-			)
-		end
-		mkpath(dirname(output_path))
-		cp(joinpath(report_dir, "solver_diagnostics.pdf"), output_path; force = true)
-	end
-
-	@info "Saved solver diagnostics report" output_path rows = length(rows)
-	output_path
-end
-
-_diagnostic_number(value) = @sprintf("%.6e", value)
-
-function _latex_escape(text)
-	replace(text, "_" => raw"\_", "<" => raw"\textless{}")
-end
-
-
-_fmt5(x) = x isa Real ? round(x; digits = 5) :
-		   x isa AbstractArray ? map(_fmt5, x) : x
-
-# ── Advanced diagnostic ────────────────────────────────────────────────────────
-# Recovers dual variables for the complete KKT system given a fixed primal.
-# The call site in demo() is commented out; kept here for reference.
-
-function recover_complete_kkt_duals_for_fixed_primal(
-	complete_kkt_system,
-	fixed_primal,
-	θ;
-	ϵ₀,
-	η₀,
-	dual_init = nothing,
-)
-	F_symbolic        = complete_kkt_system.F_symbolic
-	z_symbolic        = complete_kkt_system.z_symbolic
-	primal_indices    = collect(complete_kkt_system.primal_dims)
-	nonprimal_indices = setdiff(collect(eachindex(z_symbolic)), primal_indices)
-	nonprimal_symbols = z_symbolic[nonprimal_indices]
-
-	substitution_dict = Dict{Any, Any}()
-	for (sym, val) in zip(z_symbolic[primal_indices], fixed_primal)
-		substitution_dict[sym] = val
-	end
-	backend = ReducedGOOP.SymbolicTracingUtils.SymbolicsBackend()
-	θ_symbols = ReducedGOOP.SymbolicTracingUtils.make_variables(backend, :θ, length(θ))
-	for (sym, val) in zip(θ_symbols, θ)
-		substitution_dict[sym] = val
-	end
-	let
-		ϵ_sym = only(ReducedGOOP.SymbolicTracingUtils.make_variables(backend, :ϵ, 1))
-		η_sym = only(ReducedGOOP.SymbolicTracingUtils.make_variables(backend, :η, 1))
-		substitution_dict[ϵ_sym] = ϵ₀
-		substitution_dict[η_sym] = η₀
-	end
-
-	F_symbolic_after_sub = Symbolics.substitute.(F_symbolic, Ref(substitution_dict))
-	F_eval = first(
-		Symbolics.build_function(
-			F_symbolic_after_sub,
-			nonprimal_symbols;
-			expression = Val(false),
-		),
-	)
-	dual_residual(u, _) = F_eval(u)
-
-	u₀     = isnothing(dual_init) ? zeros(length(nonprimal_indices)) : copy(dual_init)
-	prob     = NonlinearLeastSquaresProblem(dual_residual, u₀)
-	dual_sol = NonlinearSolve.solve(prob)
-
-	z_recovered = zeros(length(z_symbolic))
-	z_recovered[primal_indices] = fixed_primal
-	z_recovered[nonprimal_indices] = dual_sol.u
-
-	F_recovered = zeros(complete_kkt_system.kkt_dimension)
-	complete_kkt_system.F!(F_recovered, z_recovered; θ, ϵ = ϵ₀, η = η₀)
-	kkt_error_recovered = norm(F_recovered, 2)
-
-	Dict(
-		"status"        => string(dual_sol.retcode),
-		"kkt_error"     => kkt_error_recovered,
-		"fixed_primal"  => fixed_primal,
-		"dual_solution" => dual_sol.u,
-		"z_recovered"   => z_recovered,
-	)
-end
 
 end
