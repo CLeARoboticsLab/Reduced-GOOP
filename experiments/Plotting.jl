@@ -232,13 +232,13 @@ function plot_intersection_trajectories(;
 	return figure, ax
 end
 
-function velocity_plot(;
+function speed_plot(;
 	strategy,
-	velocity_limit = 1.5,
-	dynamics_model = :planar_double_integrator,
+	speed_limit = 1.5,
+	dynamics_model = PlanarDoubleIntegrator(),
 )
 	if length(strategy) < 2
-		error("velocity_plot expects strategies for at least two players.")
+		error("speed_plot expects strategies for at least two players.")
 	end
 
 	axis_label_fontsize = 24
@@ -248,14 +248,15 @@ function velocity_plot(;
 	xs2 = strategy[2].xs
 	trajectory_len = min(length(xs1), length(xs2))
 	if trajectory_len == 0
-		error("velocity_plot expects non-empty player trajectories.")
+		error("speed_plot expects non-empty player trajectories.")
 	end
 
 	horizon_steps = 0:(trajectory_len-1)
-	velocity_limit_profile = fill(velocity_limit, trajectory_len)
+	speed_limit_profile = fill(speed_limit, trajectory_len)
 
 	figure = serif_figure()
-	if dynamics_model === :unicycle
+	model = dynamics_model isa NamedTuple ? dynamics_model.model : dynamics_model
+	if model isa Union{Unicycle, Bicycle} || model === :unicycle || model === :bicycle
 		speed1 = [xs1[k][3] for k in 1:trajectory_len]
 		speed2 = [xs2[k][3] for k in 1:trajectory_len]
 		ax = CairoMakie.Axis(
@@ -286,16 +287,16 @@ function velocity_plot(;
 		speed_limit_line = CairoMakie.lines!(
 			ax,
 			horizon_steps,
-			velocity_limit_profile;
+			speed_limit_profile;
 			color = :black,
 			linestyle = :dash,
-			label = "Speed Limit [$(velocity_limit) m/s]",
+			label = "Speed Limit [$(speed_limit) m/s]",
 			linewidth = 2,
 		)
 		CairoMakie.Legend(
 			figure[1, 1],
 			[player1_speed, player2_speed, speed_limit_line],
-			["Player 1", "Player 2", "Speed Limit [$(velocity_limit) m/s]"];
+			["Player 1", "Player 2", "Speed Limit [$(speed_limit) m/s]"];
 			framevisible = false,
 			labelsize = legend_label_fontsize,
 			orientation = :vertical,
@@ -337,13 +338,13 @@ function velocity_plot(;
 		label = "Player 2",
 		linewidth = 3,
 	)
-	velocity_limit_line = CairoMakie.lines!(
+	speed_limit_line = CairoMakie.lines!(
 		ax_vx,
 		horizon_steps,
-		velocity_limit_profile;
+		speed_limit_profile;
 		color = :black,
 		linestyle = :dash,
-		label = "Speed Limit [$(velocity_limit) m/s]",
+		label = "Speed Limit [$(speed_limit) m/s]",
 		linewidth = 2,
 	)
 
@@ -361,7 +362,7 @@ function velocity_plot(;
 	CairoMakie.lines!(
 		ax_vy,
 		horizon_steps,
-		velocity_limit_profile;
+		speed_limit_profile;
 		color = :black,
 		linestyle = :dash,
 		linewidth = 2,
@@ -370,8 +371,8 @@ function velocity_plot(;
 	CairoMakie.linkyaxes!(ax_vx, ax_vy)
 	CairoMakie.Legend(
 		figure[1, 2],
-		[player1_vx, player2_vx, velocity_limit_line],
-		["Player 1", "Player 2", "Speed Limit [$(velocity_limit) m/s]"];
+		[player1_vx, player2_vx, speed_limit_line],
+		["Player 1", "Player 2", "Speed Limit [$(speed_limit) m/s]"];
 		framevisible = false,
 		labelsize = legend_label_fontsize,
 		orientation = :vertical,
@@ -382,6 +383,10 @@ function velocity_plot(;
 	)
 
 	return figure, (ax_vx, ax_vy)
+end
+
+function velocity_plot(; strategy, velocity_limit = 1.5, dynamics_model = PlanarDoubleIntegrator())
+	speed_plot(; strategy, speed_limit = velocity_limit, dynamics_model)
 end
 
 function control_plot(;

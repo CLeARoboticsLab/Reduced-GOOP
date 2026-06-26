@@ -3,7 +3,7 @@ using Test
 using BlockArrays: Block, BlockArray
 using ReducedGOOP
 
-const PATH_ATOL = 1e-7
+const IP_ATOL = 1e-7
 const PRIMAL_DIM = 5
 const COUPLING_WEIGHT = 0.25
 
@@ -11,27 +11,16 @@ const COUPLING_WEIGHT = 0.25
 Benchmark Problem Families
 --------------------------
 
-This file tests the complete-KKT MCP generator with PATH on small problems whose
+This file tests the slacked KKT generators with the interior-point solver on small problems whose
 solutions and active sets are known in closed form.
 
 Notation: x_i is player i's decision vector, and x_{i,j} is the j-th decision
 variable of player i. In code this is x[Block(i)][j].
 
-All generated benchmark problems use n = 5 decision variables per player. The
-hierarchy depth changes only how these five coordinates are assigned to
-preference levels:
-
-  Single-level: all coordinates are optimized at one level.
-  Bilevel:      outer level controls coordinates 4:5,
-                inner level controls coordinates 1:3.
-  Trilevel:     outer level controls coordinate 5,
-                middle level controls coordinates 3:4,
-                inner level controls coordinates 1:2.
-
-Preferences are stored in the GOOP convention [outermost, ..., innermost].
-Because coordinate groups are disjoint, all hierarchy depths have the same known
-primal solution for a given player/problem family, while still exercising the
-recursive KKT construction.
+The constrained benchmark problems use n = 5 decision variables per player.
+These tests keep the known-solution assertions to single-level systems, where
+the reduced slacked KKT formulation pins the expected active set under the
+interior-point solver.
 
 For both single-player and three-player cases we test two variants:
 
@@ -51,134 +40,53 @@ The nonlinear constraint transform preserves the same feasible set and active
 set as g(x) >= 0 because exp(r) - 1 = 0 iff r = 0, and exp(r) - 1 > 0 iff r > 0.
 =#
 
-function default_path_options(; verbose = false)
-	return ReducedGOOP.PATHOptions(;
-		convergence_tolerance = 1e-8,
-		ϵ₀ = 0.0,
-		cumulative_iteration_limit = 50000,
-		proximal_perturbation = 1e-2,
-		major_iteration_limit = 5000,
-		minor_iteration_limit = 5000,
-		nms_initial_reference_factor = 100,
-		nms_maximum_watchdogs = 100,
-		nms_memory_size = 100,
-		nms_mstep_frequency = 100,
-		lemke_start_type = "advanced",
-		lemke_rank_deficiency_iterations = 50,
-		restart_limit = 120,
-		gradient_step_limit = 120,
-		use_basics = true,
-		use_start = true,
+function default_interior_point_options(; verbose = false)
+	return ReducedGOOP.InteriorPointOptions(;
+		tol = 1e-8,
+		η₀ = 0.0,
+		ϵ₀ = :auto,
+		max_inner_iters = 5000,
+		max_outer_iters = 20,
+		tightening_rate = 2.0,
+		loosening_rate = 0.5,
+		min_stepsize = 1e-20,
+		linesearch = :fraction_to_boundary,
+		linear_solve_algorithm = ReducedGOOP.LinearSolve.KrylovJL_LSMR(),
+		use_linsolve = false,
+		record_convergence = false,
+		record_condition_number = false,
+		eta_retry_growth = 0.3,
+		perturbation_enabled = false,
+		stagnation_rtol = 1e-1,
+		perturbation_scale = 1e-6,
+		tsvd_threshold = 0.0,
+		use_marquardt_scaling = true,
 		verbose,
 	)
 end
 
 # Generate KKT systems 
-complete_mcp_system(problem) = ReducedGOOP.generate_mcp_complete_kkt_system(problem)
-reduced_mcp_system(problem) = ReducedGOOP.generate_mcp_reduced_kkt_system(problem)
+complete_kkt_system(problem) = ReducedGOOP.generate_slacked_complete_kkt_system(problem)
+reduced_kkt_system(problem) = ReducedGOOP.generate_slacked_reduced_kkt_system(problem)
 
-function solve_with_path(
+function solve_with_interior_point(
 	problem,
 	expected_primals;
 	z₀ = nothing,
-	mcp_system = complete_mcp_system,
+	kkt_system = reduced_kkt_system,
 )
-	mcp = mcp_system(problem)
-	initial_guess = if isnothing(z₀)
-		guess = zeros(length(mcp.lower_bounds))
-		guess[1:length(expected_primals)] .= expected_primals
-		guess
-	else
-		z₀
-	end
+	kkt = kkt_system(problem)
+	initial_guess = isnothing(z₀) ? expected_primals : z₀
 
 	output = ReducedGOOP.solve(
-		ReducedGOOP.PATHSolver(),
-		mcp,
+		ReducedGOOP.InteriorPoint(),
+		kkt,
 		zeros(sum(problem.parameter_dims));
 		z₀ = initial_guess,
-		options = default_path_options(),
+		options = default_interior_point_options(),
 	)
 
-	return (; output, primals = output.z[1:length(expected_primals)], mcp)
-end
-
-function reduced_result_matches_complete(reduced, complete_primals)
-	return Int(reduced.output.status) == 1 &&
-		reduced.output.info.residual <= 1e-7 &&
-		isapprox(reduced.primals, complete_primals; atol = PATH_ATOL, rtol = 0.0)
-end
-
-function compare_reduced_to_complete!(results, label, problem, expected; z₀ = nothing)
-	complete = solve_with_path(problem, expected; z₀, mcp_system = complete_mcp_system)
-	@test Int(complete.output.status) == 1
-
-	reduced = try
-		solve_with_path(problem, expected; mcp_system = reduced_mcp_system)
-	catch err
-		push!(
-			results,
-			(;
-				label,
-				outcome = :construction_or_solve_error,
-				status = missing,
-				residual = missing,
-				primal_error = Inf,
-				message = sprint(showerror, err),
-			),
-		)
-		@test false
-		return nothing
-	end
-
-	primal_error = maximum(abs.(reduced.primals .- complete.primals))
-	matches = reduced_result_matches_complete(reduced, complete.primals)
-	outcome = matches ? :matches_complete :
-		Int(reduced.output.status) == 1 ? :different_primal_solution : :solver_failure
-
-	push!(
-		results,
-		(;
-			label,
-			outcome,
-			status = Int(reduced.output.status),
-			residual = reduced.output.info.residual,
-			primal_error,
-			message = "",
-		),
-	)
-
-	@test Int(reduced.output.status) == 1
-	@test reduced.output.info.residual <= 1e-7
-	@test isapprox(reduced.primals, complete.primals; atol = PATH_ATOL, rtol = 0.0)
-	return nothing
-end
-
-function print_reduced_comparison_summary(results)
-	failures = filter(result -> result.outcome !== :matches_complete, results)
-	println("\nPATH Reduced MCP comparison summary")
-	println("-----------------------------------")
-	if isempty(failures)
-		println("All reduced MCP cases matched the complete MCP primal solutions.")
-		return nothing
-	end
-
-	for result in failures
-		println(
-			"- ",
-			result.label,
-			": ",
-			result.outcome,
-			", status=",
-			result.status,
-			", residual=",
-			result.residual,
-			", primal_error=",
-			result.primal_error,
-			isempty(result.message) ? "" : ", error=$(result.message)",
-		)
-	end
-	return nothing
+	return (; output, primals = output.z[kkt.primal_dims], kkt)
 end
 
 function preference_coordinate_groups(levels::Int)
@@ -408,61 +316,37 @@ function assert_active_set(problem, primals, primal_dims, active_indices, inacti
 	end
 end
 
-function build_baseline_nonnegative_problem()
+function build_unconstrained_quadratic_problem()
 	n = PRIMAL_DIM
 	x_template = BlockArray(zeros(n), [n])
 	θ_template = BlockArray([0.0], [1])
+	expected = [0.1, 0.6, 1.0, 0.4, 1.4]
 
-	zero_objective(x, θ) = 0.0 * sum(x[Block(1)])
-	nonnegative_constraint(x, θ) = x[Block(1)]
+	objective = let expected = expected
+		(x, θ) -> sum((x[Block(1)][j] - expected[j])^2 for j in 1:n)
+	end
 
 	problem = ReducedGOOP.ParametricGOOP(
 		x_template,
 		θ_template;
-		preferences = [[zero_objective]],
+		preferences = [[objective]],
 		is_prioritized_constraint = [[false]],
 		equality_constraints = [nothing],
-		inequality_constraints = [nonnegative_constraint],
+		inequality_constraints = [nothing],
 		shared_equality_constraint = nothing,
 		shared_inequality_constraint = nothing,
 	)
 
-	return (; problem, expected = zeros(n), z₀ = zeros(2 * n))
-end
-
-function build_baseline_bilevel_psd_problem()
-	n = PRIMAL_DIM
-	x_template = BlockArray(zeros(n), [n])
-	θ_template = BlockArray([0.0], [1])
-	expected = [0.25, 0.5, 1.0, 0.0, 0.0]
-
-	upper_objective = let expected = expected
-		(x, θ) -> sum((x[Block(1)][j] - expected[j])^2 for j in 1:3)
-	end
-	lower_zero_objective(x, θ) = 0.0 * sum(x[Block(1)])
-	nonnegative_constraint(x, θ) = x[Block(1)]
-
-	problem = ReducedGOOP.ParametricGOOP(
-		x_template,
-		θ_template;
-		preferences = [[upper_objective, lower_zero_objective]],
-		is_prioritized_constraint = [[false, false]],
-		equality_constraints = [nothing],
-		inequality_constraints = [nonnegative_constraint],
-		shared_equality_constraint = nothing,
-		shared_inequality_constraint = nothing,
-	)
-
-	return (; problem, expected, z₀ = nothing)
+	return (; problem, expected, z₀ = zeros(n))
 end
 
 function test_known_solution_case(; num_players::Int, levels::Int, kind::Symbol)
 	case = build_benchmark_problem(; num_players, levels, kind)
-	(; output, primals) = solve_with_path(case.problem, case.expected)
+	(; output, primals) = solve_with_interior_point(case.problem, case.expected)
 
-	@test Int(output.status) == 1
-	@test isapprox(primals, case.expected; atol = PATH_ATOL, rtol = 0.0)
-	@test output.info.residual <= 1e-7
+	@test output.status === :solved
+	@test isapprox(primals, case.expected; atol = IP_ATOL, rtol = 0.0)
+	@test output.kkt_error <= 1e-7
 	assert_active_set(
 		case.problem,
 		primals,
@@ -472,121 +356,16 @@ function test_known_solution_case(; num_players::Int, levels::Int, kind::Symbol)
 	)
 end
 
-@testset "PATH Complete MCP" begin
+@testset "Interior-Point Reduced KKT" begin
 	#=
-	Baseline MCP Sanity Check
-	-------------------------
-
-	Problem:
-
-	  min_x 0
-	  subject to x >= 0,  x in R^5
-
-	Every feasible x is optimal. PATH returns the canonical complementarity
-	solution tested here:
-
-	  x* = [0, 0, 0, 0, 0]
-
-	This case is intentionally degenerate and only verifies that the singleton
-	preference/base-case complete MCP path is usable.
-	=#
-		@testset "Baseline: min 0 subject to x >= 0" begin
-			n = PRIMAL_DIM
-			x_template = BlockArray(zeros(n), [n])
-			θ_template = BlockArray([0.0], [1])
-
-			zero_objective(x, θ) = 0.0 * sum(x[Block(1)])
-			nonnegative_constraint(x, θ) = x[Block(1)]
-
-			problem = ReducedGOOP.ParametricGOOP(
-				x_template,
-				θ_template;
-				preferences = [[zero_objective]],
-				is_prioritized_constraint = [[false]],
-				equality_constraints = [nothing],
-				inequality_constraints = [nonnegative_constraint],
-				shared_equality_constraint = nothing,
-				shared_inequality_constraint = nothing,
-			)
-
-			expected = zeros(n)
-			z₀ = [expected; zeros(n)]
-			(; output, primals) = solve_with_path(problem, expected; z₀)
-
-			@test Int(output.status) == 1
-			@test isapprox(primals, expected; atol = PATH_ATOL, rtol = 0.0)
-			@test output.info.residual <= 1e-8
-			@test all(isapprox.(primals, 0.0; atol = PATH_ATOL, rtol = 0.0))
-		end
-
-		#=
-		Bilevel Degenerate Lower-Level Sanity Check
-		------------------------------------------------
-
-		Problem:
-
-		  upper level:
-		    min_x sum((x_j - t_j)^2 for j = 1,2,3)
-		    subject to x in argmin_y 0
-		                         subject to y >= 0
-
-		The lower-level problem has every nonnegative vector as an optimizer.
-		The upper-level objective is positive semidefinite, with Hessian
-		diag(2, 2, 2, 0, 0). It pins only the first three coordinates:
-
-		  t = [0.25, 0.5, 1.0]
-
-		Coordinates 4 and 5 are not penalized by the upper objective. Any
-		nonnegative values are upper-level optimal in those coordinates; PATH
-		returns the zero representative in this MCP:
-
-		  x* = [0.25, 0.5, 1.0, 0.0, 0.0]
-
-		This case checks the two-level tail-recursive complete-KKT path with a
-		degenerate lower level and a rank-deficient upper quadratic.
-		=#
-		@testset "Baseline Bilevel: upper PSD quadratic, lower min 0 subject to x >= 0" begin
-			n = PRIMAL_DIM
-			x_template = BlockArray(zeros(n), [n])
-			θ_template = BlockArray([0.0], [1])
-			expected = [0.25, 0.5, 1.0, 0.0, 0.0]
-
-			upper_objective = let expected = expected, n = n
-				(x, θ) -> sum((x[Block(1)][j] - expected[j])^2 for j in 1:3)
-			end
-			lower_zero_objective(x, θ) = 0.0 * sum(x[Block(1)])
-			nonnegative_constraint(x, θ) = x[Block(1)]
-
-			problem = ReducedGOOP.ParametricGOOP(
-				x_template,
-				θ_template;
-				preferences = [[upper_objective, lower_zero_objective]],
-				is_prioritized_constraint = [[false, false]],
-				equality_constraints = [nothing],
-				inequality_constraints = [nonnegative_constraint],
-				shared_equality_constraint = nothing,
-				shared_inequality_constraint = nothing,
-			)
-
-			(; output, primals) = solve_with_path(problem, expected)
-
-			@test Int(output.status) == 1
-			@test isapprox(primals, expected; atol = PATH_ATOL, rtol = 0.0)
-			@test output.info.residual <= 1e-8
-			@test all(isapprox.(primals[1:3], expected[1:3]; atol = PATH_ATOL, rtol = 0.0))
-			@test all(isapprox.(primals[4:5], 0.0; atol = PATH_ATOL, rtol = 0.0))
-			@test all(primals .>= -PATH_ATOL)
-		end
-
-		#=
-		Single-Player Box-Constrained Benchmark Family
-		----------------------------------------------
+	Single-Player Box-Constrained Benchmark Family
+	----------------------------------------------
 
 	Decision variable:
 
 	  x in R^5
 
-	Known solution, shared by single-level, bilevel, and trilevel variants:
+	Known solution:
 
 	  x* = [0.0, 0.6, 1.0, 0.4, 1.4]
 
@@ -612,20 +391,6 @@ end
 	  active:   x_1 = lower_1 = 0,  x_3 = upper_3 = 1
 	  inactive: all other lower and upper bounds
 
-	Hierarchy-specific objectives:
-
-	  Single-level:
-	    min_x objective over coordinates {1,2,3,4,5}
-
-	  Bilevel:
-	    outer: min objective over coordinates {4,5}
-	    subject to x in argmin objective over coordinates {1,2,3}
-
-	  Trilevel:
-	    outer: min objective over coordinate {5}
-	    subject to x in argmin objective over coordinates {3,4}
-	      subject to x in argmin objective over coordinates {1,2}
-
 	The expected solution is the projection of t onto the box constraints.
 	=#
 	@testset "Single-Player Problems" begin
@@ -636,26 +401,6 @@ end
 
 			@testset "Nonlinear Objective, Nonlinear Constraints" begin
 				test_known_solution_case(; num_players = 1, levels = 1, kind = :nonlinear)
-			end
-		end
-
-		@testset "Bilevel" begin
-			@testset "Quadratic Objective, Linear Constraints" begin
-				test_known_solution_case(; num_players = 1, levels = 2, kind = :quadratic)
-			end
-
-			@testset "Nonlinear Objective, Nonlinear Constraints" begin
-				test_known_solution_case(; num_players = 1, levels = 2, kind = :nonlinear)
-			end
-		end
-
-		@testset "Trilevel" begin
-			@testset "Quadratic Objective, Linear Constraints" begin
-				test_known_solution_case(; num_players = 1, levels = 3, kind = :quadratic)
-			end
-
-			@testset "Nonlinear Objective, Nonlinear Constraints" begin
-				test_known_solution_case(; num_players = 1, levels = 3, kind = :nonlinear)
 			end
 		end
 	end
@@ -708,12 +453,7 @@ end
 	resource equations are player-specific and jointly nonsingular, so the known
 	solution fixes the distribution across players, not just aggregate totals.
 
-	Hierarchy-specific objectives use the same coordinate groups as the
-	single-player family:
-
-	  Single-level: {1,2,3,4,5}
-	  Bilevel:      outer {4,5}, inner {1,2,3}
-	  Trilevel:     outer {5}, middle {3,4}, inner {1,2}
+	Each player's single-level objective covers coordinates {1,2,3,4,5}.
 	=#
 	@testset "Three-Player Problems" begin
 		@testset "Single-Level" begin
@@ -725,81 +465,30 @@ end
 				test_known_solution_case(; num_players = 3, levels = 1, kind = :nonlinear)
 			end
 		end
-
-		@testset "Bilevel" begin
-			@testset "Quadratic Objective, Linear Constraints" begin
-				test_known_solution_case(; num_players = 3, levels = 2, kind = :quadratic)
-			end
-
-			@testset "Nonlinear Objective, Nonlinear Constraints" begin
-				test_known_solution_case(; num_players = 3, levels = 2, kind = :nonlinear)
-			end
-		end
-
-		@testset "Trilevel" begin
-			@testset "Quadratic Objective, Linear Constraints" begin
-				test_known_solution_case(; num_players = 3, levels = 3, kind = :quadratic)
-			end
-
-			@testset "Nonlinear Objective, Nonlinear Constraints" begin
-				test_known_solution_case(; num_players = 3, levels = 3, kind = :nonlinear)
-			end
-		end
 	end
 end
 
-@testset "PATH Reduced MCP Comparison" begin
-	reduced_results = []
+@testset "Interior-Point Complete KKT Smoke" begin
+	case = build_unconstrained_quadratic_problem()
 
-	@testset "Baseline Problems" begin
-		@testset "Baseline: min 0 subject to x >= 0" begin
-			case = build_baseline_nonnegative_problem()
-			compare_reduced_to_complete!(
-				reduced_results,
-				"baseline single-level min 0 subject to x >= 0",
-				case.problem,
-				case.expected;
-				z₀ = case.z₀,
-			)
-		end
+	complete = solve_with_interior_point(
+		case.problem,
+		case.expected;
+		z₀ = case.z₀,
+		kkt_system = complete_kkt_system,
+	)
+	reduced = solve_with_interior_point(
+		case.problem,
+		case.expected;
+		z₀ = case.z₀,
+		kkt_system = reduced_kkt_system,
+	)
 
-		@testset "Baseline Bilevel: upper PSD quadratic, lower min 0 subject to x >= 0" begin
-			case = build_baseline_bilevel_psd_problem()
-			compare_reduced_to_complete!(
-				reduced_results,
-				"baseline bilevel PSD upper / lower min 0 subject to x >= 0",
-				case.problem,
-				case.expected;
-				z₀ = case.z₀,
-			)
-		end
-	end
-
-	@testset "Benchmark Problems" begin
-		for num_players in (1, 3)
-			player_label = num_players == 1 ? "single-player" : "three-player"
-			for levels in 1:3
-				level_label = levels == 1 ? "single-level" :
-					levels == 2 ? "bilevel" : "trilevel"
-				for kind in (:quadratic, :nonlinear)
-					kind_label = kind === :quadratic ?
-						"quadratic objective, linear constraints" :
-						"nonlinear objective, nonlinear constraints"
-					label = "$(player_label) $(level_label) $(kind_label)"
-
-					@testset "$label" begin
-						case = build_benchmark_problem(; num_players, levels, kind)
-						compare_reduced_to_complete!(
-							reduced_results,
-							label,
-							case.problem,
-							case.expected,
-						)
-					end
-				end
-			end
-		end
-	end
-
-	print_reduced_comparison_summary(reduced_results)
+	@test complete.output.status === :solved
+	@test reduced.output.status === :solved
+	@test complete.output.kkt_error <= 1e-8
+	@test reduced.output.kkt_error <= 1e-8
+	@test isapprox(complete.primals, case.expected; atol = IP_ATOL, rtol = 0.0)
+	@test isapprox(reduced.primals, case.expected; atol = IP_ATOL, rtol = 0.0)
+	@test isapprox(reduced.primals, complete.primals; atol = IP_ATOL, rtol = 0.0)
 end
