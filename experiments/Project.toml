@@ -7,6 +7,7 @@ InvertedIndices = "41ab1584-1d38-5bbf-9106-f11c6c58b48f"
 LaTeXStrings = "b964fa9f-0449-5b57-a5c2-d3ea65f4040f"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 NonlinearSolve = "8913a72c-1f9b-4ce2-8d82-65094dcecaec"
+ParametricMCPs = "9b992ff8-05bb-4ea1-b9d2-5ef72d82f7ad"
 ReducedGOOP = "48e8ddca-bd20-452f-8ba0-e6bfbdc6f25c"
 SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 SymbolicTracingUtils = "77ddf47f-b2ab-4ded-95ee-54f4fa148129"
@@ -16,7 +17,3 @@ TrajectoryGamesExamples = "ff3fa34c-8d8f-519c-b5bc-31760c52507a"
 
 [sources]
 ReducedGOOP = {path = ".."}
-
-[compat]
-SymbolicTracingUtils = "0.1"
-Symbolics = "6"

@@ -11,7 +11,7 @@ struct PlanarDoubleIntegrator <: DynamicsModel end
 struct Unicycle <: DynamicsModel end
 struct Bicycle <: DynamicsModel end
 
-include(joinpath(@__DIR__, "Plotting.jl"))
+include(joinpath(@__DIR__, "plotting.jl"))
 include(joinpath(@__DIR__, "dynamics.jl"))
 
 # ── Problem definition ─────────────────────────────────────────────────────────
@@ -66,7 +66,7 @@ function get_setup(
 		ifelse(preference ≥ ϵ, 0.0, (ϵ - preference)^(level + 2))
 	end
 
-		trajectory(z; player) =
+	trajectory(z; player) =
 		unflatten_trajectory(z[Block(player)], state_dimension, control_dimension)
 
 	function lane_bounds(x; player)
@@ -152,7 +152,7 @@ function get_setup(
 				end,
 				shared_collision_avoidance(z, θ),
 			)
-		end, 
+		end,
 		function (z, θ)
 			(; lb, ub) = control_bounds
 			lb_mask = findall(!isinf, lb)
@@ -353,7 +353,7 @@ function demo(;
 	Random.seed!(rng_seed)
 
 	# ── Settings ───────────────────────────────────────────────────────────────
-	run_id = "0_IP_test_initial_alpha2.0"
+	run_id = "0_IP_test_cleanup"
 	dynamics_model = Intersection.PlanarDoubleIntegrator()
 	goop_version = :reduced                    # :complete | :reduced | :quasi
 	solver = ReducedGOOP.InteriorPoint() # ReducedGOOP.InteriorPoint() | ReducedGOOP.PATHSolver()
@@ -387,7 +387,7 @@ function demo(;
 	# ── Build dynamics and problem ─────────────────────────────────────────────
 	state_dimension   = 4
 	control_dimension = 2
-	Δt                = 0.2
+	Δt               = 0.2
 	control_bounds    = (; lb = [-10.0, -10.0], ub = [10.0, 10.0])
 
 	dynamics = build_intersection_dynamics(dynamics_model; Δt, state_dimension, control_dimension)
@@ -510,8 +510,8 @@ function demo(;
 					total_iters,
 					kkt_error_history,
 					condition_number_history,
-					eta_history,
 				) = output
+				eta_history = hasproperty(output, :eta_history) ? output.eta_history : Float64[]
 				if status == :failed
 					println("  [solver exit] total_iters=$(total_iters), kkt_error=$(round(kkt_error; sigdigits=4)), tol=$(options.tol)")
 				end
@@ -774,19 +774,19 @@ function demo(;
 	JLD2.save_object(
 		joinpath(problem_data_dir, "run_metadata.jld2"),
 		Dict(
-			"run_id"                   => run_id,
-			"debug"                    => debug,
-			"run_dir"                  => run_dir,
-			"rng_seed"                 => rng_seed,
-			"dynamics_model"           => dynamics_model_name(dynamics_model),
-			"num_instances"            => num_instances,
-			"random_initial_state"     => random_initial_state,
-			"use_scalarized_baseline"  => use_scalarized_baseline,
+			"run_id" => run_id,
+			"debug" => debug,
+			"run_dir" => run_dir,
+			"rng_seed" => rng_seed,
+			"dynamics_model" => dynamics_model_name(dynamics_model),
+			"num_instances" => num_instances,
+			"random_initial_state" => random_initial_state,
+			"use_scalarized_baseline" => use_scalarized_baseline,
 			"use_social_equilibrium_baseline" => use_social_equilibrium_baseline,
-			"epsilon_schedule"         => epsilon_schedule,
+			"epsilon_schedule" => epsilon_schedule,
 			"max_inner_iters_schedule" => max_inner_iters_schedule,
-			"speed_limit"              => speed_limit,
-			"perturbation_scale"       => perturbation_scale,
+			"speed_limit" => speed_limit,
+			"perturbation_scale" => perturbation_scale,
 		),
 	)
 end
@@ -914,6 +914,9 @@ function build_intersection_dynamics(
 	state_dimension = 4,
 	control_dimension = 2,
 )
+	state_dimension == 4 || error("PlanarDoubleIntegrator expects a 4D state.")
+	control_dimension == 2 || error("PlanarDoubleIntegrator expects a 2D control input.")
+
 	residual(z, t) = planar_double_integrator(z, t; Δt, state_dimension, control_dimension)
 	step(x, u, t) = planar_double_integrator_step(x, u; Δt)
 	(; model, residual, step, Δt, state_dimension, control_dimension)
@@ -955,38 +958,38 @@ end
 
 
 function speed_limit_constraints(::PlanarDoubleIntegrator, x; speed_limit = 1.5)
-		vx, vy = x[3], x[4]
-		return vcat(
-			vx + speed_limit,
-			-vx + speed_limit,
-			vy + speed_limit,
-			-vy + speed_limit,
-		)
+	vx, vy = x[3], x[4]
+	return vcat(
+		vx + speed_limit,
+		-vx + speed_limit,
+		vy + speed_limit,
+		-vy + speed_limit,
+	)
 end
 
 function speed_limit_constraints(::Unicycle, x; speed_limit = 1.5)
-		speed = x[3]
-		return vcat(speed, -speed + speed_limit) # 0 ≤ speed ≤ speed_limit
+	speed = x[3]
+	return vcat(speed, -speed + speed_limit) # 0 ≤ speed ≤ speed_limit
 end
 
 function speed_limit_constraints(::Bicycle, x; speed_limit = 1.5)
-		speed = x[3]
-		return vcat(speed, -speed + speed_limit) # 0 ≤ speed ≤ speed_limit
+	speed = x[3]
+	return vcat(speed, -speed + speed_limit) # 0 ≤ speed ≤ speed_limit
 end
 
-function sample_initial_state(::PlanarDoubleIntegrator, base_initial_state, state_dimension, perturbation_scale,)
+function sample_initial_state(::PlanarDoubleIntegrator, base_initial_state, state_dimension, perturbation_scale)
 	noise = rand(Uniform(-perturbation_scale, perturbation_scale), state_dimension)
 	return base_initial_state .+ (base_initial_state .!= 0.0) .* noise
 end
 
-function sample_initial_state(::Unicycle, base_initial_state, state_dimension, perturbation_scale,)
+function sample_initial_state(::Unicycle, base_initial_state, state_dimension, perturbation_scale)
 	noise = rand(Uniform(-perturbation_scale, perturbation_scale), state_dimension)
 	initial_state = copy(base_initial_state)
 	initial_state[1:3] .+= noise[1:3] # perturb (px, py, speed) only
 	return initial_state
 end
 
-function sample_initial_state(::Bicycle, base_initial_state, state_dimension, perturbation_scale,)
+function sample_initial_state(::Bicycle, base_initial_state, state_dimension, perturbation_scale)
 	noise = rand(Uniform(-perturbation_scale, perturbation_scale), state_dimension)
 	initial_state = copy(base_initial_state)
 	initial_state[1:3] .+= noise[1:3] # perturb (px, py, speed) only
