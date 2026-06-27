@@ -1,6 +1,5 @@
 module ReducedGOOP
 
-using TrajectoryGamesBase: to_blockvector
 using SymbolicTracingUtils: SymbolicTracingUtils
 using Symbolics: Symbolics
 using BlockArrays: BlockArrays, BlockArray, Block, blocks, blocksizes, blockedrange

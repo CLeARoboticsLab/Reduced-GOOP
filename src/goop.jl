@@ -1123,3 +1123,9 @@ function unflatten_trajectory(z, state_dimension, control_dimension)
 	us = eachcol(U) .|> collect
 	(; xs, us)
 end
+
+function to_blockvector(block_dimensions)
+    function (data)
+        BlockArrays.BlockArray(data, block_dimensions)
+    end
+end

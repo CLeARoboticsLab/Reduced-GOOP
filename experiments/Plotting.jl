@@ -125,17 +125,17 @@ function draw_intersection_map!(ax; map_end, lane_width, offset = 0.2)
 	ys = [-1.0, 1.0, -3.0, 3.0]
 	us = [1.0, -1.0, 0.0, 0.0]
 	vs = [0.0, 0.0, 1.0, -1.0]
-	CairoMakie.arrows!(
+	CairoMakie.arrows2d!(
 		ax,
 		xs,
 		ys,
 		us,
 		vs;
-		arrowsize = 15,
+		shaftlength = 15,
 		lengthscale = 0.5,
-		arrowcolor = :white,
-		linecolor = :white,
-		linewidth = 3,
+		tipcolor = :white,
+		shaftcolor = :white,
+		shaftwidth = 3,
 	)
 
 	return ax
