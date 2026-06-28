@@ -131,11 +131,13 @@ function draw_intersection_map!(ax; map_end, lane_width, offset = 0.2)
 		ys,
 		us,
 		vs;
-		shaftlength = 15,
-		lengthscale = 0.5,
+		shaftlength = 30,
+		lengthscale = 1.0,
 		tipcolor = :white,
 		shaftcolor = :white,
-		shaftwidth = 3,
+		shaftwidth = 8,
+		tiplength = 15,
+		tipwidth = 16,
 	)
 
 	return ax
