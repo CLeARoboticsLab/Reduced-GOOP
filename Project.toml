@@ -18,13 +18,10 @@ Symbolics = "0c5d862f-8b57-4792-8d23-62f2024744c7"
 TimerOutputs = "a759f4b9-e2f1-59dc-863e-4aeb61b1ea8f"
 
 [compat]
-BlockArrays = "0.16.43"
 InvertedIndices = "1.3.1"
-JLD2 = "0.5.13"
 LinearAlgebra = "1.11.0"
 LinearSolve = "3.9.0"
 ProgressMeter = "1.10.4"
-SciMLBase = "2.87.0"
 SparseArrays = "1.11.0"
 Statistics = "1.11.0"
 SymbolicTracingUtils = "0.2"

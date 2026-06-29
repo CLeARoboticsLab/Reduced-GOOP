@@ -380,7 +380,7 @@ function demo(;
 
 	# ── Solver schedule ────────────────────────────────────────────────────────
 	epsilon_schedule         = [0.1]
-	max_inner_iters_schedule = fill(1500, length(epsilon_schedule))
+	max_inner_iters_schedule = fill(1000, length(epsilon_schedule))
 
 	# ── Scenario ───────────────────────────────────────────────────────────────
 	# Planar double integrator: state = [px, py, vx, vy]
@@ -458,12 +458,12 @@ function demo(;
 		options = @timeit TO "solver options construction" if solver isa ReducedGOOP.InteriorPoint
 			ReducedGOOP.InteriorPointOptions(;
 				tol = 1e-3, #1e-4
-				η₀ = 2e-5, # 5e-5, 0.0 to turn off Tikhonov
+				η₀ = 5e-5, # 5e-5, 0.0 to turn off Tikhonov
 				ϵ₀,
 				max_inner_iters,
 				max_outer_iters = 1,
-				tightening_rate = 2.0, # high => weak decrease in η
-				loosening_rate = 0.5, # low => strong increase in η
+				tightening_rate = 1.2, # high => weak decrease in η
+				loosening_rate = 4.0, # low => strong increase in η
 				min_stepsize = 1e-20,
 				linesearch,
 				linear_solve_algorithm = ReducedGOOP.LinearSolve.KrylovJL_LSMR(),

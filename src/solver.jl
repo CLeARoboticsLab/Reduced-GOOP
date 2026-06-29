@@ -280,7 +280,7 @@ function solve(
 					# Compute newton step using Fᵣ
 					use_range_step = (kkt_error < 1e-1) && (norm(F_perp, 2) / norm(F, 2)) > 0.3
 				end
-				printstyled("|F_perp|| / ||F|| = $(norm(F_perp, 2) / F_z)\n", color = :green) # large is > 0.3
+				verbose && printstyled("|F_perp|| / ||F|| = $(norm(F_perp, 2) / F_z)\n", color = :green) # large is > 0.3
 				if use_range_step
 					verbose && printstyled("Using range-space step (Fᵣ) instead of full-space step (F) because ||F_perp|| / ||F|| = $(norm(F_perp, 2) / norm(F, 2))\n", color = :yellow)
 				end
@@ -355,7 +355,7 @@ function solve(
 				# Levenberg-Marquardt gain-ratio update for the next Newton iteration's η.
 				# https://www.cs.cornell.edu/courses/cs4220/2023sp/lec/2023-04-19.pdf
 				@timeit TO "regularization" begin
-					ρ_low = 0.40
+					ρ_low = 0.75
 					ρ_high = 0.75
 					ρ = pred_reduction > 0 ? actual_reduction / pred_reduction : -Inf
 					if ρ ≤ ρ_low
@@ -367,8 +367,8 @@ function solve(
 					elseif α ≥ 0.99 # ρ_low ≤ ρ ≤ ρ_high
 						verbose && printstyled("Full step taken... Checking if δz is effective.\n", color = :green)
 						# check: current step has little predicted effect on the residual
-						printstyled(" (||F|| - ||F + α∇Fδz||) / ||F|| = $(pred_reduction / F_z)\n", color = :green) # small if < 1e-2
-						printstyled(" ...max(|Jmat * δz|) = $(maximum(abs.(Jmat * δz)))\n", color = :green)
+						verbose &&printstyled(" (||F|| - ||F + α∇Fδz||) / ||F|| = $(pred_reduction / F_z)\n", color = :green) # small if < 1e-2
+						verbose && printstyled(" ...max(|Jmat * δz|) = $(maximum(abs.(Jmat * δz)))\n", color = :green)
 						# if (pred_reduction / F_z) < 1e-2
 						# 	verbose && printstyled("Small relative pred reduction... Increasing η. ($η -> $(η * (1 + exp(-loosening_rate))))\n"; color = :red)
 						# 	η = min(η * (1 + exp(-0.5 * loosening_rate)), η_max)
