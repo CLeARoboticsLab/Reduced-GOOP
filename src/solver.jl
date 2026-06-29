@@ -215,8 +215,9 @@ function solve(
 				Jmat = @timeit TO "KKT system assembly" Matrix(∇F)
 				Jsvd = @timeit TO "Newton step / linear solve" svd(Jmat)
 				condition_number = @timeit TO "condition number evaluation" begin
-					record_condition_number ? _condition_number(Jsvd.S) : NaN
+					record_condition_number ? Jsvd.S[1] / Jsvd.S[end] : NaN
 				end
+
 				verbose && record_condition_number && println("condition number of ∇F: ", condition_number)
 				# Unified TSVD+Tikhonov step: modes below tsvd_threshold*σ₁ are zeroed (hard cutoff),
 				# remaining modes use the Tikhonov filter σ/(σ²+η). tsvd_threshold=0 → pure Tikhonov.
@@ -265,12 +266,8 @@ function solve(
 						svd(Jmat)
 					end
 				end
-				if record_condition_number
-					@timeit TO "condition number evaluation" begin
-						Jsvd_diagnostic = use_marquardt_scaling ? svd(Jmat) : Jsvd
-						condition_number = _condition_number(Jsvd_diagnostic.S)
-					end
-					verbose && println("condition number of ∇F: ", condition_number)
+				condition_number = @timeit TO "condition number evaluation" begin
+					record_condition_number ? Jsvd.S[1] / Jsvd.S[end] : NaN
 				end
 
 				# Check: current residual has components outside Range(∇F): F + α∇Fδz can only modify Fᵣ, the component of F in Range(∇F).
@@ -471,13 +468,6 @@ function solve(
 		return (; result..., kkt_error_history, condition_number_history, eta_history)
 	end
 	result
-end
-
-function _condition_number(singular_values)
-	isempty(singular_values) && return NaN
-	σmax = maximum(singular_values)
-	σmin = minimum(singular_values)
-	σmin > 0 ? σmax / σmin : Inf
 end
 
 """Helper function to compute the step size `α` which solves:
