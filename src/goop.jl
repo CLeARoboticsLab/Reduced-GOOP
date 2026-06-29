@@ -154,27 +154,31 @@ function generate_slacked_reduced_kkt_system(
 	drop_higher_order_terms = false,
 )
 	# Symbolic variables for all primals, parameters, and duals for shared constraints.
-	x =
-		SymbolicTracingUtils.make_variables(backend, :x, sum(goop.primal_dims)) |>
-		to_blockvector(goop.primal_dims)
-	θ = SymbolicTracingUtils.make_variables(backend, :θ, sum(goop.parameter_dims)) |>
-		to_blockvector(goop.parameter_dims)
-	ϵ = only(SymbolicTracingUtils.make_variables(backend, :ϵ, 1))
+	@timeit TO "symbolic variable construction" begin
+		x =
+			SymbolicTracingUtils.make_variables(backend, :x, sum(goop.primal_dims)) |>
+			to_blockvector(goop.primal_dims)
+		θ = SymbolicTracingUtils.make_variables(backend, :θ, sum(goop.parameter_dims)) |>
+			to_blockvector(goop.parameter_dims)
+		ϵ = only(SymbolicTracingUtils.make_variables(backend, :ϵ, 1))
 
-	η = only(SymbolicTracingUtils.make_variables(backend, :η, 1))
+		η = only(SymbolicTracingUtils.make_variables(backend, :η, 1))
 
-	λₛ = SymbolicTracingUtils.make_variables(backend, :λₛ, goop.shared_equality_dims)
-	γₛ = SymbolicTracingUtils.make_variables(backend, :γₛ, goop.shared_inequality_dims)
-	σₛ = SymbolicTracingUtils.make_variables(backend, :σₛ, goop.shared_inequality_dims)
+		λₛ = SymbolicTracingUtils.make_variables(backend, :λₛ, goop.shared_equality_dims)
+		γₛ = SymbolicTracingUtils.make_variables(backend, :γₛ, goop.shared_inequality_dims)
+		σₛ = SymbolicTracingUtils.make_variables(backend, :σₛ, goop.shared_inequality_dims)
 
-	symbolic_type = eltype(x)
+		symbolic_type = eltype(x)
+	end
 
-	fₛ =
-		isnothing(goop.shared_equality_constraint) ? nothing :
-		goop.shared_equality_constraint(x, θ)
-	gₛ =
-		isnothing(goop.shared_inequality_constraint) ? nothing :
-		goop.shared_inequality_constraint(x, θ)
+	@timeit TO "shared constraint symbolic construction" begin
+		fₛ =
+			isnothing(goop.shared_equality_constraint) ? nothing :
+			goop.shared_equality_constraint(x, θ)
+		gₛ =
+			isnothing(goop.shared_inequality_constraint) ? nothing :
+			goop.shared_inequality_constraint(x, θ)
+	end
 
 
 	# Keep track of all the preference (s) and interior point (σ) slacks we create.
@@ -312,7 +316,7 @@ function generate_slacked_reduced_kkt_system(
 					_push_quasi_lagrangian_term!(lagrangian_terms, gₛ, γₛ)
 					_quasi_gradient_from_terms(lagrangian_terms, vars)
 				else
-					Symbolics.gradient(L, vars), QuasiLagrangianTerm[]
+					(@timeit TO "symbolic gradient construction" Symbolics.gradient(L, vars)), QuasiLagrangianTerm[]
 				end
 
 				F = Vector{symbolic_type}(
@@ -347,7 +351,7 @@ function generate_slacked_reduced_kkt_system(
 					_push_quasi_lagrangian_term!(lagrangian_terms, gₛ, γₛ)
 					_quasi_gradient_from_terms(lagrangian_terms, x[Block(player)])
 				else
-					Symbolics.gradient(L, x[Block(player)]), QuasiLagrangianTerm[]
+					(@timeit TO "symbolic gradient construction" Symbolics.gradient(L, x[Block(player)])), QuasiLagrangianTerm[]
 				end
 				F = Vector{symbolic_type}(
 					filter!(
@@ -495,7 +499,7 @@ function generate_slacked_reduced_kkt_system(
 				)
 				_quasi_gradient_from_terms(lagrangian_terms, vars)
 			else
-				Symbolics.gradient(L, vars), QuasiLagrangianTerm[]
+				(@timeit TO "symbolic gradient construction" Symbolics.gradient(L, vars)), QuasiLagrangianTerm[]
 			end
 
 			F̃ = [
@@ -545,7 +549,7 @@ function generate_slacked_reduced_kkt_system(
 				)
 				_quasi_gradient_from_terms(lagrangian_terms, x[Block(player)])
 			else
-				Symbolics.gradient(L, x[Block(player)]), QuasiLagrangianTerm[]
+				(@timeit TO "symbolic gradient construction" Symbolics.gradient(L, x[Block(player)])), QuasiLagrangianTerm[]
 			end
 			F̃ = Vector{symbolic_type}(
 				filter!(
@@ -565,7 +569,7 @@ function generate_slacked_reduced_kkt_system(
 	end
 
 	# Recursively generate the rest of the KKT conditions for each player.
-	F_π_pair = mapreduce(vcat, 1:(goop.num_players)) do player
+	F_π_pair = @timeit TO "symbolic expression construction" mapreduce(vcat, 1:(goop.num_players)) do player
 		construct_player_kkt_conditions(
 			goop.preferences[player],
 			goop.is_prioritized_constraint[player];
@@ -575,46 +579,48 @@ function generate_slacked_reduced_kkt_system(
 
 
 	# Flatten the F and π vectors for all players.
-	flattened_F = begin
-		if length(goop.primal_dims) > 1
-			mapreduce(vcat, F_π_pair) do pair
-				pair.F
+	@timeit TO "symbolic KKT vector assembly" begin
+		flattened_F = begin
+			if length(goop.primal_dims) > 1
+				mapreduce(vcat, F_π_pair) do pair
+					pair.F
+				end
+			else
+				F_π_pair.F
 			end
-		else
-			F_π_pair.F
 		end
+
+
+		# Filter out zeros and add shared constraints.
+		F = Vector{symbolic_type}(
+			filter!(!isnothing,
+				vcat(
+					drop_higher_order_terms ? filter!(!iszero, flattened_F) : flattened_F,
+					fₛ,
+					(isnothing(gₛ) ? nothing : gₛ .- σₛ),
+					(isnothing(gₛ) ? nothing : σₛ .* γₛ .- ϵ),
+				),
+			),
+		)
+
+		# 
+
+		# Pack all variables together.
+		z = Vector{symbolic_type}(
+			vcat(x, s, Σ, Λ, Γ, Ψ, λₛ, γₛ, σₛ, Φ, Φₛ), # 10/25: added ϕ
+			# vcat(x, s, Σ, Λ, Γ, Ψ, λₛ, γₛ, σₛ),
+		)
+		θ = Vector{symbolic_type}(θ)
+
+		idx = blockedrange(length.([x, s, Σ, Λ, Γ, Ψ, λₛ, γₛ, σₛ, Φ, Φₛ])) # 10/25: added ϕ
+		# idx = blockedrange(length.([x, s, Σ, Λ, Γ, Ψ, λₛ, γₛ, σₛ]))
+		primal_dims = idx[Block(1)] # x
+		preference_slack_dims = idx[Block(2)] # s
+		interior_point_slack_dims = vcat(idx[Block(3)], idx[Block(9)]) # Σ, σₛ
+		inequality_constraint_dual_dims = vcat(idx[Block(5)], idx[Block(8)]) # Γ, γₛ
 	end
 
-
-	# Filter out zeros and add shared constraints.
-	F = Vector{symbolic_type}(
-		filter!(!isnothing,
-			vcat(
-				drop_higher_order_terms ? filter!(!iszero, flattened_F) : flattened_F,
-				fₛ,
-				(isnothing(gₛ) ? nothing : gₛ .- σₛ),
-				(isnothing(gₛ) ? nothing : σₛ .* γₛ .- ϵ),
-			),
-		),
-	)
-
-	# 
-
-	# Pack all variables together.
-	z = Vector{symbolic_type}(
-		vcat(x, s, Σ, Λ, Γ, Ψ, λₛ, γₛ, σₛ, Φ, Φₛ), # 10/25: added ϕ
-		# vcat(x, s, Σ, Λ, Γ, Ψ, λₛ, γₛ, σₛ),
-	)
-	θ = Vector{symbolic_type}(θ)
-
-	idx = blockedrange(length.([x, s, Σ, Λ, Γ, Ψ, λₛ, γₛ, σₛ, Φ, Φₛ])) # 10/25: added ϕ
-	# idx = blockedrange(length.([x, s, Σ, Λ, Γ, Ψ, λₛ, γₛ, σₛ]))
-	primal_dims = idx[Block(1)] # x
-	preference_slack_dims = idx[Block(2)] # s
-	interior_point_slack_dims = vcat(idx[Block(3)], idx[Block(9)]) # Σ, σₛ
-	inequality_constraint_dual_dims = vcat(idx[Block(5)], idx[Block(8)]) # Γ, γₛ
-
-	BuildGOOPKKTSystem(
+	@timeit TO "Jacobian / KKT construction" BuildGOOPKKTSystem(
 		F,
 		z,
 		θ,

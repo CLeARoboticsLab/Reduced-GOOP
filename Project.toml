@@ -15,6 +15,7 @@ SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
 SymbolicTracingUtils = "77ddf47f-b2ab-4ded-95ee-54f4fa148129"
 Symbolics = "0c5d862f-8b57-4792-8d23-62f2024744c7"
+TimerOutputs = "a759f4b9-e2f1-59dc-863e-4aeb61b1ea8f"
 
 [compat]
 BlockArrays = "0.16.43"
@@ -28,3 +29,4 @@ SparseArrays = "1.11.0"
 Statistics = "1.11.0"
 SymbolicTracingUtils = "0.2"
 Symbolics = "7"
+TimerOutputs = "0.5.29"

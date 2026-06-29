@@ -10,6 +10,9 @@ using LinearSolve: LinearSolve, LinearProblem, init, solve!
 using SciMLBase: SciMLBase
 using SymbolicTracingUtils: SymbolicTracingUtils
 using JLD2: JLD2
+using TimerOutputs: TimerOutput, @timeit
+
+const TO = TimerOutput()
 
 include("goop_kkt_system.jl")
 include("goop.jl")

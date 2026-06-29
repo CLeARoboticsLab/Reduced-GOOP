@@ -46,61 +46,65 @@ function BuildGOOPKKTSystem(
 	inequality_constraint_dual_dims;
 	backend_options = (;),
 ) where {T <: Union{SymbolicTracingUtils.FD.Node, SymbolicTracingUtils.Symbolics.Num}}
-	if T == SymbolicTracingUtils.FD.Node
-		backend = SymbolicTracingUtils.FastDifferentiationBackend()
-	else
-		@assert T === SymbolicTracingUtils.Symbolics.Num
-		backend = SymbolicTracingUtils.SymbolicsBackend()
-	end
+	@timeit TO "KKT executable construction" begin
+		if T == SymbolicTracingUtils.FD.Node
+			backend = SymbolicTracingUtils.FastDifferentiationBackend()
+		else
+			@assert T === SymbolicTracingUtils.Symbolics.Num
+			backend = SymbolicTracingUtils.SymbolicsBackend()
+		end
 
-	F! = let
-		_F! = SymbolicTracingUtils.build_function(
+		F! = @timeit TO "residual function build" let
+			_F! = SymbolicTracingUtils.build_function(
+				F_symbolic,
+				z_symbolic,
+				θ_symbolic,
+				ϵ_symbolic,
+				η_symbolic;
+				in_place = true,
+				backend_options,
+			)
+
+			(result, z; θ, ϵ, η) -> _F!(result, z, θ, ϵ, η)
+		end
+
+		∇F_z! = @timeit TO "Jacobian function construction" let
+			∇F_symbolic = @timeit TO "Jacobian symbolic construction" SymbolicTracingUtils.sparse_jacobian(F_symbolic, z_symbolic)
+			_∇F! = @timeit TO "Jacobian function build" SymbolicTracingUtils.build_function(
+				∇F_symbolic,
+				z_symbolic,
+				θ_symbolic,
+				ϵ_symbolic,
+				η_symbolic;
+				in_place = true,
+				backend_options,
+			)
+
+			@timeit TO "Jacobian sparsity metadata" begin
+				rows, cols, _ = SparseArrays.findnz(∇F_symbolic)
+				constant_entries =
+					SymbolicTracingUtils.get_constant_entries(∇F_symbolic, z_symbolic)
+				SymbolicTracingUtils.SparseFunction(
+					(result, z; θ, ϵ, η) -> _∇F!(result, z, θ, ϵ, η),
+					rows,
+					cols,
+					size(∇F_symbolic),
+					constant_entries,
+				)
+			end
+		end
+
+		GOOPKKTSystem(
+			F!,
+			∇F_z!,
+			primal_dims,
+			preference_slack_dims,
+			interior_point_slack_dims,
+			inequality_constraint_dual_dims,
+			length(F_symbolic),
+			length(z_symbolic),
 			F_symbolic,
 			z_symbolic,
-			θ_symbolic,
-			ϵ_symbolic,
-			η_symbolic;
-			in_place = true,
-			backend_options,
-		)
-
-		(result, z; θ, ϵ, η) -> _F!(result, z, θ, ϵ, η)
-	end
-
-	∇F_z! = let
-		∇F_symbolic = SymbolicTracingUtils.sparse_jacobian(F_symbolic, z_symbolic)
-		_∇F! = SymbolicTracingUtils.build_function(
-			∇F_symbolic,
-			z_symbolic,
-			θ_symbolic,
-			ϵ_symbolic,
-			η_symbolic;
-			in_place = true,
-			backend_options,
-		)
-
-		rows, cols, _ = SparseArrays.findnz(∇F_symbolic)
-		constant_entries =
-			SymbolicTracingUtils.get_constant_entries(∇F_symbolic, z_symbolic)
-		SymbolicTracingUtils.SparseFunction(
-			(result, z; θ, ϵ, η) -> _∇F!(result, z, θ, ϵ, η),
-			rows,
-			cols,
-			size(∇F_symbolic),
-			constant_entries,
 		)
 	end
-
-	GOOPKKTSystem(
-		F!,
-		∇F_z!,
-		primal_dims,
-		preference_slack_dims,
-		interior_point_slack_dims,
-		inequality_constraint_dual_dims,
-		length(F_symbolic),
-		length(z_symbolic),
-		F_symbolic,
-		z_symbolic,
-	)
 end

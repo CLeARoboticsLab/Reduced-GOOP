@@ -5,6 +5,9 @@ using LaTeXStrings: @L_str
 using BlockArrays
 using JLD2, Distributions, Random
 using ReducedGOOP
+using TimerOutputs: @timeit, reset_timer!
+
+const TO = ReducedGOOP.TO
 
 abstract type DynamicsModel end
 struct PlanarDoubleIntegrator <: DynamicsModel end
@@ -254,16 +257,18 @@ function get_setup(
 	is_prioritized_constraint = [[false, false], [false, false, true]]
 
 	function build_goop_problem()
-		ReducedGOOP.ParametricGOOP(
-			dummy_primals,
-			dummy_parameters;
-			preferences = use_scalarized_baseline ? scalarized_preferences : preferences,
-			is_prioritized_constraint = use_scalarized_baseline ? scalarized_is_prioritized_constraint : is_prioritized_constraint,
-			equality_constraints,
-			inequality_constraints = [nothing, nothing],
-			shared_equality_constraint = nothing,
-			shared_inequality_constraint = nothing,
-		)
+		@timeit TO "ParametricGOOP construction" begin
+			ReducedGOOP.ParametricGOOP(
+				dummy_primals,
+				dummy_parameters;
+				preferences = use_scalarized_baseline ? scalarized_preferences : preferences,
+				is_prioritized_constraint = use_scalarized_baseline ? scalarized_is_prioritized_constraint : is_prioritized_constraint,
+				equality_constraints,
+				inequality_constraints = [nothing, nothing],
+				shared_equality_constraint = nothing,
+				shared_inequality_constraint = nothing,
+			)
+		end
 	end
 
 	function evaluate_preference_level(preference, is_constraint, level, z, θ)
@@ -320,20 +325,24 @@ function get_setup(
 	inequality_dimension = 0
 
 	function build_social_problem()
-		ReducedGOOP.ParametricOptimizationProblem(;
-			objective,
-			equality_constraint,
-			inequality_constraint,
-			parameter_dimension,
-			primal_dimension,
-			equality_dimension,
-			inequality_dimension,
-			num_players,
-		)
+		@timeit TO "ParametricOptimizationProblem construction" begin
+			ReducedGOOP.ParametricOptimizationProblem(;
+				objective,
+				equality_constraint,
+				inequality_constraint,
+				parameter_dimension,
+				primal_dimension,
+				equality_dimension,
+				inequality_dimension,
+				num_players,
+			)
+		end
 	end
 
 	# Build problem
-	problem = use_social_equilibrium_baseline ? build_social_problem() : build_goop_problem()
+	problem = @timeit TO "preference and constraint construction" begin
+		use_social_equilibrium_baseline ? build_social_problem() : build_goop_problem()
+	end
 
 	(; problem, flatten_parameters)
 end
@@ -350,7 +359,8 @@ function demo(;
 	use_scalarized_baseline = false,
 	use_social_equilibrium_baseline = false,
 )
-	Random.seed!(rng_seed)
+	reset_timer!(TO)
+	@timeit TO "experiment setup" Random.seed!(rng_seed)
 
 	# ── Settings ───────────────────────────────────────────────────────────────
 	run_id = "0_IP_test_cleanup"
@@ -390,20 +400,22 @@ function demo(;
 	Δt               = 0.2
 	control_bounds    = (; lb = [-10.0, -10.0], ub = [10.0, 10.0])
 
-	dynamics = build_intersection_dynamics(dynamics_model; Δt, state_dimension, control_dimension)
+	dynamics = @timeit TO "dynamics construction" build_intersection_dynamics(dynamics_model; Δt, state_dimension, control_dimension)
 
-	(; problem, flatten_parameters) = get_setup(
-		num_players;
-		dynamics,
-		control_bounds,
-		planning_horizon,
-		collision_avoidance,
-		speed_limit,
-		map_end,
-		lane_width,
-		use_scalarized_baseline,
-		use_social_equilibrium_baseline,
-	)
+	@timeit TO "problem setup" begin
+		(; problem, flatten_parameters) = get_setup(
+			num_players;
+			dynamics,
+			control_bounds,
+			planning_horizon,
+			collision_avoidance,
+			speed_limit,
+			map_end,
+			lane_width,
+			use_scalarized_baseline,
+			use_social_equilibrium_baseline,
+		)
+	end
 	kkt_generators = if solver isa ReducedGOOP.InteriorPoint
 		Dict(
 			:complete => ReducedGOOP.generate_slacked_complete_kkt_system,
@@ -417,15 +429,17 @@ function demo(;
 		)
 	end
 
-	GOOP_kkt_system = get(kkt_generators, goop_version, nothing)
-	isnothing(GOOP_kkt_system) && error("Unknown GOOP version: $(goop_version)")
+	GOOP_kkt_generator = get(kkt_generators, goop_version, nothing)
+	isnothing(GOOP_kkt_generator) && error("Unknown GOOP version: $(goop_version)")
 
 	@info "Building KKT system for $(goop_version) GOOP formulation and $(solver) solver..."
 	# Check if problem is not an instance of GOOPKKTSystem. Otherwise, build GOOPKKTSystem.
-	if problem isa ReducedGOOP.GOOPKKTSystem
-		GOOP_kkt_system = problem
-	else
-		GOOP_kkt_system = GOOP_kkt_system(problem)
+	GOOP_kkt_system = @timeit TO "KKT construction" begin
+		if problem isa ReducedGOOP.GOOPKKTSystem
+			problem
+		else
+			GOOP_kkt_generator(problem)
+		end
 	end
 
 	if solver isa ReducedGOOP.InteriorPoint
@@ -441,7 +455,7 @@ function demo(;
 
 	# ── Per-instance solver ────────────────────────────────────────────────────
 	function solve_game_instance(θ; z₀, ϵ₀, max_inner_iters)
-		options = if solver isa ReducedGOOP.InteriorPoint
+		options = @timeit TO "solver options construction" if solver isa ReducedGOOP.InteriorPoint
 			ReducedGOOP.InteriorPointOptions(;
 				tol = 1e-3, #1e-4
 				η₀ = 2e-5, # 5e-5, 0.0 to turn off Tikhonov
@@ -493,13 +507,13 @@ function demo(;
 		total_iters = 0
 		solver_status = :solved
 		elapsed_time = @elapsed begin
-			output = ReducedGOOP.solve(
-				solver,
-				GOOP_kkt_system,
-				θ;
-				z₀,
-				options,
-			)
+			output = @timeit TO "solver invocation" ReducedGOOP.solve(
+					solver,
+					GOOP_kkt_system,
+					θ;
+					z₀,
+					options,
+				)
 			if solver isa ReducedGOOP.InteriorPoint
 				(;
 					status,
@@ -526,12 +540,12 @@ function demo(;
 			end
 		end
 
-		strategies = extract_player_strategies(
-			x,
-			num_players,
-			primal_dimension,
-			dynamics,
-		)
+		strategies = @timeit TO "solution postprocessing" extract_player_strategies(
+				x,
+				num_players,
+				primal_dimension,
+				dynamics,
+			)
 
 		solution_dict = Dict(
 			"strategies" => strategies,
@@ -560,7 +574,7 @@ function demo(;
 		speed_plots_dir,
 		control_plots_dir,
 		warmstart_plots_dir,
-	) = prepare_intersection_output_dirs(run_id; debug)
+	) = @timeit TO "output directory setup" prepare_intersection_output_dirs(run_id; debug)
 
 	# ── Main solve loop ────────────────────────────────────────────────────────
 	instance_problem_data = Dict{String, Any}[]
@@ -596,16 +610,16 @@ function demo(;
 		println("initial_state2:", initial_state2)
 		println("goal_position2:", goal_position2)
 
-		(; θ1, θ2, θ) = build_instance_parameters(
-			flatten_parameters,
-			initial_state1,
-			initial_state2,
-			goal_position1,
-			goal_position2,
-			obstacle_position,
-		)
+		(; θ1, θ2, θ) = @timeit TO "instance parameter construction" build_instance_parameters(
+				flatten_parameters,
+				initial_state1,
+				initial_state2,
+				goal_position1,
+				goal_position2,
+				obstacle_position,
+			)
 
-		(; warmstart_solution) = if compute_warmstart
+		(; warmstart_solution) = @timeit TO "warmstart construction" if compute_warmstart
 			build_default_warmstart(
 				planning_horizon,
 				dynamics,
@@ -618,23 +632,25 @@ function demo(;
 				warmstart_solution = load("experiments/solution_dict_instance_1_eps0.1.jld2")["single_stored_object"]["x"][1:(num_players*primal_dimension)],
 			)
 		end
-		save_warmstart_visualizations(
-			warmstart_solution,
-			warmstart_plots_dir,
-			total_attempts,
-			solved_attempts + 1,
-			num_players,
-			primal_dimension,
-			dynamics,
-			map_end,
-			lane_width,
-			θ1,
-			θ2,
-			goal_position1,
-			goal_position2,
-			speed_limit,
-			control_bounds,
-		)
+		@timeit TO "warmstart visualization" begin
+			save_warmstart_visualizations(
+				warmstart_solution,
+				warmstart_plots_dir,
+				total_attempts,
+				solved_attempts + 1,
+				num_players,
+				primal_dimension,
+				dynamics,
+				map_end,
+				lane_width,
+				θ1,
+				θ2,
+				goal_position1,
+				goal_position2,
+				speed_limit,
+				control_bounds,
+			)
+		end
 
 		epsilon_results = Pair{Float64, Any}[]
 		stage_warmstart = warmstart_solution
@@ -710,85 +726,95 @@ function demo(;
 		)
 		println("instance $(solved_attempts) converged preference values by ϵ:")
 
-		JLD2.save_object(
-			joinpath(problem_data_dir, "problem_data_instance_$(solved_attempts).jld2"),
-			instance_problem_data,
-		)
+		@timeit TO "problem data save" begin
+			JLD2.save_object(
+				joinpath(problem_data_dir, "problem_data_instance_$(solved_attempts).jld2"),
+				instance_problem_data,
+			)
+		end
 
 		for (ϵ₀, result) in epsilon_results
 			solution_dict = result.solution_dict
 
-			JLD2.save_object(
-				joinpath(
-					solution_data_dir,
-					"solution_dict_instance_$(solved_attempts)_eps$(ϵ₀).jld2",
-				),
-				solution_dict,
-			)
-			save_convergence_diagnostics(solution_dict, convergence_plots_dir, solved_attempts, ϵ₀)
-			trajectory_fig, _ = plot_intersection_trajectories(
-				;
-				map_end,
-				lane_width,
-				strategy = result.strategies,
-				θ1,
-				θ2,
-				goal_position1,
-				goal_position2,
-			)
-			speed_fig, _ = speed_plot(;
-				strategy = result.strategies,
-				speed_limit = speed_limit,
-				dynamics_model,
-			)
-			control_fig, _ = control_plot(;
-				strategy = result.strategies,
-				control_lb = control_bounds.lb,
-				control_ub = control_bounds.ub,
-			)
+			@timeit TO "solution output and plotting" begin
+				JLD2.save_object(
+					joinpath(
+						solution_data_dir,
+						"solution_dict_instance_$(solved_attempts)_eps$(ϵ₀).jld2",
+					),
+					solution_dict,
+				)
+				save_convergence_diagnostics(solution_dict, convergence_plots_dir, solved_attempts, ϵ₀)
+				trajectory_fig, _ = plot_intersection_trajectories(
+					;
+					map_end,
+					lane_width,
+					strategy = result.strategies,
+					θ1,
+					θ2,
+					goal_position1,
+					goal_position2,
+				)
+				speed_fig, _ = speed_plot(;
+					strategy = result.strategies,
+					speed_limit = speed_limit,
+					dynamics_model,
+				)
+				control_fig, _ = control_plot(;
+					strategy = result.strategies,
+					control_lb = control_bounds.lb,
+					control_ub = control_bounds.ub,
+				)
 
-			CairoMakie.save(
-				joinpath(
-					trajectory_plots_dir,
-					"trajectory_instance_$(solved_attempts)_eps$(ϵ₀).pdf",
-				),
-				trajectory_fig,
-			)
-			CairoMakie.save(
-				joinpath(
-					speed_plots_dir,
-					"speed_instance_$(solved_attempts)_eps$(ϵ₀).pdf",
-				),
-				speed_fig,
-			)
-			CairoMakie.save(
-				joinpath(
-					control_plots_dir,
-					"control_instance_$(solved_attempts)_eps$(ϵ₀).pdf",
-				),
-				control_fig,
-			)
+				CairoMakie.save(
+					joinpath(
+						trajectory_plots_dir,
+						"trajectory_instance_$(solved_attempts)_eps$(ϵ₀).pdf",
+					),
+					trajectory_fig,
+				)
+				CairoMakie.save(
+					joinpath(
+						speed_plots_dir,
+						"speed_instance_$(solved_attempts)_eps$(ϵ₀).pdf",
+					),
+					speed_fig,
+				)
+				CairoMakie.save(
+					joinpath(
+						control_plots_dir,
+						"control_instance_$(solved_attempts)_eps$(ϵ₀).pdf",
+					),
+					control_fig,
+				)
+			end
 		end
 	end
 
-	JLD2.save_object(
-		joinpath(problem_data_dir, "run_metadata.jld2"),
-		Dict(
-			"run_id" => run_id,
-			"debug" => debug,
-			"run_dir" => run_dir,
-			"rng_seed" => rng_seed,
-			"dynamics_model" => dynamics_model_name(dynamics_model),
-			"num_instances" => num_instances,
-			"random_initial_state" => random_initial_state,
-			"use_scalarized_baseline" => use_scalarized_baseline,
-			"use_social_equilibrium_baseline" => use_social_equilibrium_baseline,
-			"epsilon_schedule" => epsilon_schedule,
-			"max_inner_iters_schedule" => max_inner_iters_schedule,
-			"speed_limit" => speed_limit,
-			"perturbation_scale" => perturbation_scale,
-		),
-	)
+	@timeit TO "run metadata save" begin
+		JLD2.save_object(
+			joinpath(problem_data_dir, "run_metadata.jld2"),
+			Dict(
+				"run_id" => run_id,
+				"debug" => debug,
+				"run_dir" => run_dir,
+				"rng_seed" => rng_seed,
+				"dynamics_model" => dynamics_model_name(dynamics_model),
+				"num_instances" => num_instances,
+				"random_initial_state" => random_initial_state,
+				"use_scalarized_baseline" => use_scalarized_baseline,
+				"use_social_equilibrium_baseline" => use_social_equilibrium_baseline,
+				"epsilon_schedule" => epsilon_schedule,
+				"max_inner_iters_schedule" => max_inner_iters_schedule,
+				"speed_limit" => speed_limit,
+				"perturbation_scale" => perturbation_scale,
+			),
+		)
+	end
+
+	println("\nTiming summary:")
+	show(TO)
+	println()
 end
 
 # ── Output / plotting helpers ──────────────────────────────────────────────────

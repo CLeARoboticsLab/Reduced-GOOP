@@ -128,71 +128,73 @@ function solve(
 	max_perturbations = options.max_perturbations
 	tsvd_threshold = options.tsvd_threshold
 	use_marquardt_scaling = options.use_marquardt_scaling
-	# z = @something(z₀, begin
-	# 	z = zeros(mcp.variable_dimension)
-	# 	z[mcp.preference_slack_dims] .= 1.0
-	# 	z[mcp.interior_point_slack_dims] .= 1.0
-	# 	z[mcp.inequality_constraint_dual_dims] .= 1.0
-	# 	z
-	# end)
-	z = zeros(mcp.variable_dimension)
-	z[mcp.preference_slack_dims] .= 1.0
-	z[mcp.interior_point_slack_dims] .= 1.0
-	z[mcp.inequality_constraint_dual_dims] .= 1.0
+	@timeit TO "solver initialization" begin
+		# z = @something(z₀, begin
+		# 	z = zeros(mcp.variable_dimension)
+		# 	z[mcp.preference_slack_dims] .= 1.0
+		# 	z[mcp.interior_point_slack_dims] .= 1.0
+		# 	z[mcp.inequality_constraint_dual_dims] .= 1.0
+		# 	z
+		# end)
+		z = zeros(mcp.variable_dimension)
+		z[mcp.preference_slack_dims] .= 1.0
+		z[mcp.interior_point_slack_dims] .= 1.0
+		z[mcp.inequality_constraint_dual_dims] .= 1.0
 
-	if !isnothing(z₀)
-		z[mcp.primal_dims] .= z₀
-	end
-
-	x_dims = Not(vcat(mcp.preference_slack_dims, mcp.interior_point_slack_dims, mcp.inequality_constraint_dual_dims))
-	x = @view z[x_dims]
-	s = @view z[mcp.preference_slack_dims]
-	σ = @view z[mcp.interior_point_slack_dims]
-	γ = @view z[mcp.inequality_constraint_dual_dims]
-
-	# Set up common memory.
-	∇F = mcp.∇F_z!.result_buffer
-	F = zeros(mcp.kkt_dimension)
-	F_trial = zeros(mcp.kkt_dimension)
-	Jδz = zeros(mcp.kkt_dimension)
-	z_trial = similar(z)
-	δz = zeros(mcp.variable_dimension)
-	δx = @view δz[x_dims]
-	δs = @view δz[mcp.preference_slack_dims]
-	δσ = @view δz[mcp.interior_point_slack_dims]
-	δγ = @view δz[mcp.inequality_constraint_dual_dims]
-
-	use_linsolve && (linsolve = init(LinearProblem(∇F, δz), linear_solve_algorithm, maxiters = 100000))
-
-	# Main solver loop.
-	if ϵ₀ === :auto
-		is_warmstarted = !isnothing(z₀)
-		if is_warmstarted
-			ϵ = tol
-		else
-			ϵ = one(tol)
+		if !isnothing(z₀)
+			z[mcp.primal_dims] .= z₀
 		end
-	else
-		ϵ = ϵ₀
+
+		x_dims = Not(vcat(mcp.preference_slack_dims, mcp.interior_point_slack_dims, mcp.inequality_constraint_dual_dims))
+		x = @view z[x_dims]
+		s = @view z[mcp.preference_slack_dims]
+		σ = @view z[mcp.interior_point_slack_dims]
+		γ = @view z[mcp.inequality_constraint_dual_dims]
+
+		# Set up common memory.
+		∇F = mcp.∇F_z!.result_buffer
+		F = zeros(mcp.kkt_dimension)
+		F_trial = zeros(mcp.kkt_dimension)
+		Jδz = zeros(mcp.kkt_dimension)
+		z_trial = similar(z)
+		δz = zeros(mcp.variable_dimension)
+		δx = @view δz[x_dims]
+		δs = @view δz[mcp.preference_slack_dims]
+		δσ = @view δz[mcp.interior_point_slack_dims]
+		δγ = @view δz[mcp.inequality_constraint_dual_dims]
+
+		use_linsolve && (linsolve = init(LinearProblem(∇F, δz), linear_solve_algorithm, maxiters = 100000))
+
+		# Main solver loop.
+		if ϵ₀ === :auto
+			is_warmstarted = !isnothing(z₀)
+			if is_warmstarted
+				ϵ = tol
+			else
+				ϵ = one(tol)
+			end
+		else
+			ϵ = ϵ₀
+		end
+
+		# Initialize regularization parameter.
+		η = η₀
+
+		status = :solved
+		linesearch ∈ (:backtracking, :fraction_to_boundary) ||
+			throw(ArgumentError("Unsupported linesearch $(linesearch). Use :backtracking or :fraction_to_boundary."))
+		total_iters = 0
+		inner_iters = 1
+		outer_iters = 1
+		kkt_error = Inf
+		best_kkt_error = Inf
+		iters_since_improvement = 0
+		num_perturbations = 0
+		is_fraction_to_boundary_linesearch = (linesearch == :fraction_to_boundary)
+		kkt_error_history = Float64[]
+		condition_number_history = Float64[]
+		eta_history = Float64[]
 	end
-
-	# Initialize regularization parameter.
-	η = η₀
-
-	status = :solved
-	linesearch ∈ (:backtracking, :fraction_to_boundary) ||
-		throw(ArgumentError("Unsupported linesearch $(linesearch). Use :backtracking or :fraction_to_boundary."))
-	total_iters = 0
-	inner_iters = 1
-	outer_iters = 1
-	kkt_error = Inf
-	best_kkt_error = Inf
-	iters_since_improvement = 0
-	num_perturbations = 0
-	is_fraction_to_boundary_linesearch = (linesearch == :fraction_to_boundary)
-	kkt_error_history = Float64[]
-	condition_number_history = Float64[]
-	eta_history = Float64[]
 	while outer_iters < max_outer_iters || iszero(total_iters)
 		inner_iters = 1
 		status = :solved
@@ -200,27 +202,34 @@ function solve(
 		verbose && @info "Outer iteration $(outer_iters): ϵ = $ϵ, kkt_error = $kkt_error"
 
 		while inner_iters < max_inner_iters && (kkt_error > tol) # (!is_fraction_to_boundary_linesearch || kkt_error > tol)
+			@timeit TO "inner iteration loop" begin
 			total_iters += 1
 			# Compute the residual at the current iterate
-			mcp.F!(F, z; θ, ϵ, η = 0.0)
+			@timeit TO "residual evaluation" mcp.F!(F, z; θ, ϵ, η = 0.0)
 			# @assert all(.!isnan.(F)) "Found NaN in F - aborting!"
 			verbose && println("inner iter $inner_iters")
 			condition_number = NaN
 
 			if linesearch == :fraction_to_boundary
-				mcp.∇F_z!(∇F, z; θ, ϵ, η = 0.0)
-				Jmat = Matrix(∇F)
-				Jsvd = svd(Jmat)
-				condition_number = record_condition_number ? _condition_number(Jsvd.S) : NaN
+				@timeit TO "Jacobian evaluation" mcp.∇F_z!(∇F, z; θ, ϵ, η = 0.0)
+				Jmat = @timeit TO "KKT system assembly" Matrix(∇F)
+				Jsvd = @timeit TO "Newton step / linear solve" svd(Jmat)
+				condition_number = @timeit TO "condition number evaluation" begin
+					record_condition_number ? _condition_number(Jsvd.S) : NaN
+				end
 				verbose && record_condition_number && println("condition number of ∇F: ", condition_number)
 				# Unified TSVD+Tikhonov step: modes below tsvd_threshold*σ₁ are zeroed (hard cutoff),
 				# remaining modes use the Tikhonov filter σ/(σ²+η). tsvd_threshold=0 → pure Tikhonov.
-				threshold_abs = tsvd_threshold * Jsvd.S[1]
-				filters = @. ifelse(Jsvd.S >= threshold_abs, Jsvd.S / (Jsvd.S^2 + η), zero(eltype(Jsvd.S)))
-				δz .= -Jsvd.V * (filters .* (Jsvd.U' * F))
+				@timeit TO "Newton step / linear solve" begin
+					threshold_abs = tsvd_threshold * Jsvd.S[1]
+					filters = @. ifelse(Jsvd.S >= threshold_abs, Jsvd.S / (Jsvd.S^2 + η), zero(eltype(Jsvd.S)))
+					δz .= -Jsvd.V * (filters .* (Jsvd.U' * F))
+				end
 
-				α_σ = fraction_to_the_boundary_linesearch(σ, δσ; tol = min_stepsize)
-				α_γ = fraction_to_the_boundary_linesearch(γ, δγ; tol = min_stepsize)
+				@timeit TO "line search" begin
+					α_σ = fraction_to_the_boundary_linesearch(σ, δσ; tol = min_stepsize)
+					α_γ = fraction_to_the_boundary_linesearch(γ, δγ; tol = min_stepsize)
+				end
 				verbose && println("fraction_to_boundary linesearch α_σ = $α_σ, α_γ = $α_γ")
 				if isnan(α_σ) || isnan(α_γ)
 					verbose && @warn "Fraction-to-boundary linesearch failed. Exiting prematurely."
@@ -229,12 +238,14 @@ function solve(
 				end
 
 				# Update regularization parameter.
-				if min(α_σ, α_γ) == 1.0
-					verbose && printstyled("Full step taken... Decreasing η. ($η -> $(η * (1 - exp(-tightening_rate * inner_iters))))\n"; color = :blue)
-					η *= 1 - exp(-tightening_rate)
-				else
-					verbose && printstyled("Partial step (<1.0) taken... Increasing η. ($η -> $(η * (1 + exp(-loosening_rate * inner_iters))))\n"; color = :red)
-					η *= 1 + exp(-loosening_rate)
+				@timeit TO "regularization" begin
+					if min(α_σ, α_γ) == 1.0
+						verbose && printstyled("Full step taken... Decreasing η. ($η -> $(η * (1 - exp(-tightening_rate * inner_iters))))\n"; color = :blue)
+						η *= 1 - exp(-tightening_rate)
+					else
+						verbose && printstyled("Partial step (<1.0) taken... Increasing η. ($η -> $(η * (1 + exp(-loosening_rate * inner_iters))))\n"; color = :red)
+						η *= 1 + exp(-loosening_rate)
+					end
 				end
 			else
 				# Backtracking linesearch: if the line search exhausts at the current η,
@@ -242,30 +253,36 @@ function solve(
 				F_z = norm(F, 2)
 				eta_retries = 0
 				# J is fixed at this iterate; only η changes between retries, so compute SVD once.
-				mcp.∇F_z!(∇F, z; θ, ϵ, η = 0.0)
-				Jmat = Matrix(∇F)
-				Jsvd = if use_marquardt_scaling
-					d = vec(sum(abs2, Jmat; dims = 1)) # diagonal entries of Jmat' * Jmat
-					d .= max.(d, 1e-16) # prevent Jscaled from having NaN or Inf entries
-					Jscaled = Jmat ./ (sqrt.(d))' # J̃ = JD^(-1/2), J is (m, n), d is (n, 1)
-					svd(Jscaled)
-				else
-					svd(Jmat)
+				@timeit TO "Jacobian evaluation" mcp.∇F_z!(∇F, z; θ, ϵ, η = 0.0)
+				Jmat = @timeit TO "KKT system assembly" Matrix(∇F)
+				Jsvd = @timeit TO "Newton step / linear solve" begin
+					if use_marquardt_scaling
+						d = vec(sum(abs2, Jmat; dims = 1)) # diagonal entries of Jmat' * Jmat
+						d .= max.(d, 1e-16) # prevent Jscaled from having NaN or Inf entries
+						Jscaled = Jmat ./ (sqrt.(d))' # J̃ = JD^(-1/2), J is (m, n), d is (n, 1)
+						svd(Jscaled)
+					else
+						svd(Jmat)
+					end
 				end
 				if record_condition_number
-					Jsvd_diagnostic = use_marquardt_scaling ? svd(Jmat) : Jsvd
-					condition_number = _condition_number(Jsvd_diagnostic.S)
+					@timeit TO "condition number evaluation" begin
+						Jsvd_diagnostic = use_marquardt_scaling ? svd(Jmat) : Jsvd
+						condition_number = _condition_number(Jsvd_diagnostic.S)
+					end
 					verbose && println("condition number of ∇F: ", condition_number)
 				end
 
 				# Check: current residual has components outside Range(∇F): F + α∇Fδz can only modify Fᵣ, the component of F in Range(∇F).
-				τ = 1e-8 * maximum(Jsvd.S)
-				r = count(Jsvd.S .> τ)
-				Uᵣ = Jsvd.U[:, 1:r]
-				Fᵣ = Uᵣ * (Uᵣ' * F)
-				F_perp = F - Fᵣ
-				# Compute newton step using Fᵣ
-				use_range_step = (kkt_error < 1e-1) && (norm(F_perp, 2) / norm(F, 2)) > 0.3
+				@timeit TO "range-space residual projection" begin
+					τ = 1e-8 * maximum(Jsvd.S)
+					r = count(Jsvd.S .> τ)
+					Uᵣ = Jsvd.U[:, 1:r]
+					Fᵣ = Uᵣ * (Uᵣ' * F)
+					F_perp = F - Fᵣ
+					# Compute newton step using Fᵣ
+					use_range_step = (kkt_error < 1e-1) && (norm(F_perp, 2) / norm(F, 2)) > 0.3
+				end
 				printstyled("|F_perp|| / ||F|| = $(norm(F_perp, 2) / F_z)\n", color = :green) # large is > 0.3
 				if use_range_step
 					verbose && printstyled("Using range-space step (Fᵣ) instead of full-space step (F) because ||F_perp|| / ||F|| = $(norm(F_perp, 2) / norm(F, 2))\n", color = :yellow)
@@ -277,52 +294,60 @@ function solve(
 
 				local α, pred_reduction, actual_reduction
 				while true
-					filters = @. ifelse(
-						Jsvd.S >= tsvd_threshold,
-						(Jsvd.S / (Jsvd.S^2 + η)), zero(eltype(Jsvd.S)), # max(η, 1e-8)
-					)
-					residual = use_range_step ? Fᵣ : F
-					δz .= if use_marquardt_scaling
-						scaled_step = -Jsvd.V * (filters .* (Jsvd.U' * residual))
-						scaled_step ./ sqrt.(d) # undo the scaling
-					else
-						-Jsvd.V * (filters .* (Jsvd.U' * residual))
-						# -pinv(Jmat; atol=1e-8, rtol = sqrt(eps(real(float(oneunit(eltype(Jmat))))))) * residual # minimum-norm solution
+					@timeit TO "Newton step / linear solve" begin
+						filters = @. ifelse(
+							Jsvd.S >= tsvd_threshold,
+							(Jsvd.S / (Jsvd.S^2 + η)), zero(eltype(Jsvd.S)), # max(η, 1e-8)
+						)
+						residual = use_range_step ? Fᵣ : F
+						δz .= if use_marquardt_scaling
+							scaled_step = -Jsvd.V * (filters .* (Jsvd.U' * residual))
+							scaled_step ./ sqrt.(d) # undo the scaling
+						else
+							-Jsvd.V * (filters .* (Jsvd.U' * residual))
+							# -pinv(Jmat; atol=1e-8, rtol = sqrt(eps(real(float(oneunit(eltype(Jmat))))))) * residual # minimum-norm solution
+						end
 					end
 
-					α = 1.0
-					@. z_trial = z + α * δz
-					mcp.F!(F_trial, z_trial; θ, ϵ, η = 0.0)
-					F_z_next = norm(F_trial, 2)
-					while (F_z_next >= 1.0 * F_z) || (any(@. σ + α * δσ < 0) || any(@. γ + α * δγ < 0))
-						if α < min_stepsize
-							break # exhausted at this η — escalate below
-						end
-
-						α *= 0.5 # decay
+					@timeit TO "line search" begin
+						α = 1.0
 						@. z_trial = z + α * δz
-						mcp.F!(F_trial, z_trial; θ, ϵ, η = 0.0)
+						@timeit TO "residual evaluation" mcp.F!(F_trial, z_trial; θ, ϵ, η = 0.0)
 						F_z_next = norm(F_trial, 2)
+						while (F_z_next >= 1.0 * F_z) || (any(@. σ + α * δσ < 0) || any(@. γ + α * δγ < 0))
+							if α < min_stepsize
+								break # exhausted at this η — escalate below
+							end
+
+							α *= 0.5 # decay
+							@. z_trial = z + α * δz
+							@timeit TO "residual evaluation" mcp.F!(F_trial, z_trial; θ, ϵ, η = 0.0)
+							F_z_next = norm(F_trial, 2)
+						end
 					end
 
 					if α >= min_stepsize
-						mul!(Jδz, ∇F, δz)
-						pred_reduction = F_z^2 - norm(F .+ α .* Jδz, 2)^2
-						actual_reduction = F_z^2 - F_z_next^2
+						@timeit TO "line search" begin
+							mul!(Jδz, ∇F, δz)
+							pred_reduction = F_z^2 - norm(F .+ α .* Jδz, 2)^2
+							actual_reduction = F_z^2 - F_z_next^2
+						end
 						break
 					end
 
-					eta_retries += 1
-					if eta_retries > max_eta_retries
-						verbose && @warn "Backtracking linesearch failed after $max_eta_retries η-retries. Exiting prematurely."
-						status = :failed
-						break
+					@timeit TO "regularization" begin
+						eta_retries += 1
+						if eta_retries > max_eta_retries
+							verbose && @warn "Backtracking linesearch failed after $max_eta_retries η-retries. Exiting prematurely."
+							status = :failed
+							break
+						end
+						verbose && printstyled(
+							"Backtracking exhausted at η=$η. Retrying with $(eta_retry_growth >= 1 ? "larger" : "smaller") η ($η -> $(η * eta_retry_growth)), attempt $eta_retries/$max_eta_retries\n";
+							color = :yellow,
+						)
+						η = min(η * eta_retry_growth, η_max)
 					end
-					verbose && printstyled(
-						"Backtracking exhausted at η=$η. Retrying with $(eta_retry_growth >= 1 ? "larger" : "smaller") η ($η -> $(η * eta_retry_growth)), attempt $eta_retries/$max_eta_retries\n";
-						color = :yellow,
-					)
-					η = min(η * eta_retry_growth, η_max)
 				end
 				if status === :failed
 					break
@@ -332,24 +357,26 @@ function solve(
 
 				# Levenberg-Marquardt gain-ratio update for the next Newton iteration's η.
 				# https://www.cs.cornell.edu/courses/cs4220/2023sp/lec/2023-04-19.pdf
-				ρ_low = 0.40
-				ρ_high = 0.75
-				ρ = pred_reduction > 0 ? actual_reduction / pred_reduction : -Inf
-				if ρ ≤ ρ_low
-					verbose && printstyled("Poor gain ratio (ρ = $ρ)... Increasing η. ($η -> $(η * (1 + exp(-loosening_rate))))\n"; color = :red)
-					η = min(η * (1 + exp(-loosening_rate)), η_max) # 1 < (1 + e⁻ʳ) ≤ 2
-				elseif ρ > ρ_high
-					verbose && printstyled("Good gain ratio (ρ = $ρ)... Decreasing η. ($η -> $(η * (1 - exp(-tightening_rate))))\n"; color = :blue)
-					η = max(η * (1 - exp(-tightening_rate)), η_min) # 0 ≤ (1 - e⁻ʳ) < 1
-				elseif α ≥ 0.99 # ρ_low ≤ ρ ≤ ρ_high
-					verbose && printstyled("Full step taken... Checking if δz is effective.\n", color = :green)
-					# check: current step has little predicted effect on the residual
-					printstyled(" (||F|| - ||F + α∇Fδz||) / ||F|| = $(pred_reduction / F_z)\n", color = :green) # small if < 1e-2
-					printstyled(" ...max(|Jmat * δz|) = $(maximum(abs.(Jmat * δz)))\n", color = :green)
-					# if (pred_reduction / F_z) < 1e-2
-					# 	verbose && printstyled("Small relative pred reduction... Increasing η. ($η -> $(η * (1 + exp(-loosening_rate))))\n"; color = :red)
-					# 	η = min(η * (1 + exp(-0.5 * loosening_rate)), η_max)
-					# end
+				@timeit TO "regularization" begin
+					ρ_low = 0.40
+					ρ_high = 0.75
+					ρ = pred_reduction > 0 ? actual_reduction / pred_reduction : -Inf
+					if ρ ≤ ρ_low
+						verbose && printstyled("Poor gain ratio (ρ = $ρ)... Increasing η. ($η -> $(η * (1 + exp(-loosening_rate))))\n"; color = :red)
+						η = min(η * (1 + exp(-loosening_rate)), η_max) # 1 < (1 + e⁻ʳ) ≤ 2
+					elseif ρ > ρ_high
+						verbose && printstyled("Good gain ratio (ρ = $ρ)... Decreasing η. ($η -> $(η * (1 - exp(-tightening_rate))))\n"; color = :blue)
+						η = max(η * (1 - exp(-tightening_rate)), η_min) # 0 ≤ (1 - e⁻ʳ) < 1
+					elseif α ≥ 0.99 # ρ_low ≤ ρ ≤ ρ_high
+						verbose && printstyled("Full step taken... Checking if δz is effective.\n", color = :green)
+						# check: current step has little predicted effect on the residual
+						printstyled(" (||F|| - ||F + α∇Fδz||) / ||F|| = $(pred_reduction / F_z)\n", color = :green) # small if < 1e-2
+						printstyled(" ...max(|Jmat * δz|) = $(maximum(abs.(Jmat * δz)))\n", color = :green)
+						# if (pred_reduction / F_z) < 1e-2
+						# 	verbose && printstyled("Small relative pred reduction... Increasing η. ($η -> $(η * (1 + exp(-loosening_rate))))\n"; color = :red)
+						# 	η = min(η * (1 + exp(-0.5 * loosening_rate)), η_max)
+						# end
+					end
 				end
 				verbose && println("backtracking linesearch α = $α, gain ratio ρ = $ρ")
 				α_σ = α
@@ -357,18 +384,20 @@ function solve(
 			end
 
 			# Update variables accordingly.
-			@. x += α_σ * δx
-			@. s += α_σ * δs
-			@. σ += α_σ * δσ
-			@. γ += α_γ * δγ
+			@timeit TO "iterate update and bookkeeping" begin
+				@. x += α_σ * δx
+				@. s += α_σ * δs
+				@. σ += α_σ * δσ
+				@. γ += α_γ * δγ
 
-			kkt_error = norm(F, 2)
-			if kkt_error < best_kkt_error * (1 - stagnation_rtol)
-				best_kkt_error = kkt_error
-				iters_since_improvement = 0
-			else
-				iters_since_improvement += 1
-				verbose && println("No significant improvement in KKT error for $iters_since_improvement iterations (best_kkt_error = $best_kkt_error, current kkt_error = $kkt_error).")
+				kkt_error = norm(F, 2)
+				if kkt_error < best_kkt_error * (1 - stagnation_rtol)
+					best_kkt_error = kkt_error
+					iters_since_improvement = 0
+				else
+					iters_since_improvement += 1
+					verbose && println("No significant improvement in KKT error for $iters_since_improvement iterations (best_kkt_error = $best_kkt_error, current kkt_error = $kkt_error).")
+				end
 			end
 
 			if perturbation_enabled && kkt_error > tol &&
@@ -376,40 +405,45 @@ function solve(
 			   #    num_perturbations < max_perturbations &&
 			   kkt_error < 1.0
 
-				verbose && println("Stagnation detected: perturbing x to escape local minimum (num_perturbations = $num_perturbations).")
+				@timeit TO "perturbation" begin
+					verbose && println("Stagnation detected: perturbing x to escape local minimum (num_perturbations = $num_perturbations).")
 
 
-				z_trial .= z
-				z_trial[x_dims] .+= perturbation_scale .* randn(length(x))
-				mcp.F!(F_trial, z_trial; θ, ϵ, η = 0.0)
-				trial_kkt_error = norm(F_trial, 2)
-				num_perturbations += 1
+					z_trial .= z
+					z_trial[x_dims] .+= perturbation_scale .* randn(length(x))
+					@timeit TO "residual evaluation" mcp.F!(F_trial, z_trial; θ, ϵ, η = 0.0)
+					trial_kkt_error = norm(F_trial, 2)
+					num_perturbations += 1
 
-				if isfinite(trial_kkt_error) && all(isfinite, F_trial) &&
-				   trial_kkt_error <= 1.05 * kkt_error
+					if isfinite(trial_kkt_error) && all(isfinite, F_trial) &&
+					   trial_kkt_error <= 1.05 * kkt_error
 
-					z .= z_trial
-					F .= F_trial
-					kkt_error = trial_kkt_error
-					best_kkt_error = min(best_kkt_error, kkt_error)
-					iters_since_improvement = 0
-					verbose && printstyled("...Applied perturbation to x; KKT error = $kkt_error\n", color = :green)
-				else
-					verbose && println("...Rejected perturbation; trial KKT error = $trial_kkt_error")
+						z .= z_trial
+						F .= F_trial
+						kkt_error = trial_kkt_error
+						best_kkt_error = min(best_kkt_error, kkt_error)
+						iters_since_improvement = 0
+						verbose && printstyled("...Applied perturbation to x; KKT error = $kkt_error\n", color = :green)
+					else
+						verbose && println("...Rejected perturbation; trial KKT error = $trial_kkt_error")
+					end
 				end
 			end
 
-			if record_convergence
-				push!(kkt_error_history, kkt_error)
-				push!(eta_history, η)
-			end
-			if record_condition_number
-				push!(condition_number_history, condition_number)
+			@timeit TO "iterate update and bookkeeping" begin
+				if record_convergence
+					push!(kkt_error_history, kkt_error)
+					push!(eta_history, η)
+				end
+				if record_condition_number
+					push!(condition_number_history, condition_number)
+				end
 			end
 
 			verbose && println("KKT error = $kkt_error")
 
 			inner_iters += 1
+			end
 		end
 
 		if linesearch == :fraction_to_boundary
@@ -461,4 +495,3 @@ function fraction_to_the_boundary_linesearch(v, δ; max_stepsize = 1.0, τ = 0.9
 
 	α
 end
-
