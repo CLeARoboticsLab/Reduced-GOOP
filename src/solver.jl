@@ -20,8 +20,10 @@ Base.@kwdef struct InteriorPointOptions
 	record_condition_number::Bool = false
 	max_eta_retries::Int = 5
 	eta_retry_growth::Float64 = 2.0
-	η_min::Float64 = 1e-20
+	η_min::Float64 = 0.0
 	η_max::Float64 = 1e-1
+	ρ_low::Float64 = 0.75
+	ρ_high::Float64 = 0.75
 	perturbation_enabled::Bool = false
 	stagnation_iters::Int = 50
 	stagnation_rtol::Float64 = 1e-3
@@ -121,6 +123,8 @@ function solve(
 	eta_retry_growth = options.eta_retry_growth
 	η_min = options.η_min
 	η_max = options.η_max
+	ρ_low = options.ρ_low
+	ρ_high = options.ρ_high
 	perturbation_enabled = options.perturbation_enabled
 	stagnation_iters = options.stagnation_iters
 	stagnation_rtol = options.stagnation_rtol
@@ -266,6 +270,12 @@ function solve(
 						svd(Jmat)
 					end
 				end
+				# Check numerical rank of Jacobian. Full row rank <=> # nonzero singular values == # rows 
+				numerical_rank = count(σ -> σ > 1e-10 * Jsvd.S[1], Jsvd.S)
+				n_row, n_col = size(Jmat)
+				verbose && println("Numerical rank of ∇F: $numerical_rank / $(n_row) rows)")
+				verbose && println("rank(∇F): ", rank(Jmat))
+
 				condition_number = @timeit TO "condition number evaluation" begin
 					record_condition_number ? Jsvd.S[1] / Jsvd.S[end] : NaN
 				end
@@ -350,21 +360,21 @@ function solve(
 					break
 				end
 
-				F .= F_trial # commit the accepted trial residual to compute kkt error at the end of this iteration
+				F .= F_trial 
 
 				# Levenberg-Marquardt gain-ratio update for the next Newton iteration's η.
 				# https://www.cs.cornell.edu/courses/cs4220/2023sp/lec/2023-04-19.pdf
 				@timeit TO "regularization" begin
-					ρ_low = 0.75
-					ρ_high = 0.75
 					ρ = pred_reduction > 0 ? actual_reduction / pred_reduction : -Inf
 					if ρ ≤ ρ_low
 						verbose && printstyled("Poor gain ratio (ρ = $ρ)... Increasing η. ($η -> $(η * (1 + exp(-loosening_rate))))\n"; color = :red)
 						η = min(η * (1 + exp(-loosening_rate)), η_max) # 1 < (1 + e⁻ʳ) ≤ 2
 					elseif ρ > ρ_high
+						consecutive_late_good_ρ = 0
 						verbose && printstyled("Good gain ratio (ρ = $ρ)... Decreasing η. ($η -> $(η * (1 - exp(-tightening_rate))))\n"; color = :blue)
 						η = max(η * (1 - exp(-tightening_rate)), η_min) # 0 ≤ (1 - e⁻ʳ) < 1
 					elseif α ≥ 0.99 # ρ_low ≤ ρ ≤ ρ_high
+						consecutive_late_good_ρ = 0
 						verbose && printstyled("Full step taken... Checking if δz is effective.\n", color = :green)
 						# check: current step has little predicted effect on the residual
 						verbose &&printstyled(" (||F|| - ||F + α∇Fδz||) / ||F|| = $(pred_reduction / F_z)\n", color = :green) # small if < 1e-2

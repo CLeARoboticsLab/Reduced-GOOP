@@ -150,9 +150,9 @@ function get_setup(
 				# mapreduce(vcat, us) do u
 				# 	vcat(u[lb_mask] - lb[lb_mask], ub[ub_mask] - u[ub_mask])
 				# end,
-				mapreduce(vcat, 1:length(xs)) do t
-					lane_bounds(xs[t]; player = 1)
-				end,
+				# mapreduce(vcat, 1:length(xs)) do t
+				# 	lane_bounds(xs[t]; player = 1)
+				# end,
 				shared_collision_avoidance(z, θ),
 			)
 		end,
@@ -165,9 +165,9 @@ function get_setup(
 				# mapreduce(vcat, us) do u
 				# 	vcat(u[lb_mask] - lb[lb_mask], ub[ub_mask] - u[ub_mask])
 				# end,
-				mapreduce(vcat, 1:length(xs)) do t
-					lane_bounds(xs[t]; player = 2)
-				end,
+				# mapreduce(vcat, 1:length(xs)) do t
+				# 	lane_bounds(xs[t]; player = 2)
+				# end,
 				shared_collision_avoidance(z, θ),
 			)
 		end,
@@ -230,7 +230,7 @@ function get_setup(
 			control_objective(; player = 1),
 
 			# # Drive under speed limit
-			# speed_limit_preference(; player = 1),
+			speed_limit_preference(; player = 1),
 
 			# Reach the goal (highest priority for P1)
 			goal_objective(; player = 1),
@@ -254,7 +254,7 @@ function get_setup(
 	]
 
 	# Preference hierarchy: [lowest priority, ..., highest priority]
-	is_prioritized_constraint = [[false, false], [false, false, true]]
+	is_prioritized_constraint = [[false, true, false], [false, false, true]]
 
 	function build_goop_problem()
 		@timeit TO "ParametricGOOP construction" begin
@@ -458,12 +458,12 @@ function demo(;
 		options = @timeit TO "solver options construction" if solver isa ReducedGOOP.InteriorPoint
 			ReducedGOOP.InteriorPointOptions(;
 				tol = 1e-3, #1e-4
-				η₀ = 5e-5, # 5e-5, 0.0 to turn off Tikhonov
+				η₀ = 2e-5, # 5e-5, 0.0 to turn off Tikhonov
 				ϵ₀,
 				max_inner_iters,
 				max_outer_iters = 1,
 				tightening_rate = 1.2, # high => weak decrease in η
-				loosening_rate = 4.0, # low => strong increase in η
+				loosening_rate = 3.0, # low => strong increase in η
 				min_stepsize = 1e-20,
 				linesearch,
 				linear_solve_algorithm = ReducedGOOP.LinearSolve.KrylovJL_LSMR(),
