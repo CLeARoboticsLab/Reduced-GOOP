@@ -153,6 +153,7 @@ function generate_slacked_reduced_kkt_system(
 	backend = SymbolicTracingUtils.SymbolicsBackend(),
 	drop_higher_order_terms = false,
 )
+	# Main.@infiltrate
 	# Symbolic variables for all primals, parameters, and duals for shared constraints.
 	@timeit TO "symbolic variable construction" begin
 		x =
@@ -318,7 +319,6 @@ function generate_slacked_reduced_kkt_system(
 				else
 					(@timeit TO "symbolic gradient construction" Symbolics.gradient(L, vars)), QuasiLagrangianTerm[]
 				end
-
 				F = Vector{symbolic_type}(
 					filter!(
 						!isnothing,

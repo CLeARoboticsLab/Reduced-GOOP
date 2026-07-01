@@ -145,3 +145,28 @@ function single_integrator_2d(z, t; Δt, state_dimension = 2, control_dimension 
 	x_pred = x_t .+ Δt .* u_t
 	return x_tp1 - x_pred
 end
+
+"""
+	single_integrator_3d(z, t; Δt, state_dimension=3, control_dimension=3)
+
+3D single integrator dynamics constraint (linear).
+State: x = [x, y, z] (position)
+Control: u = [vx, vy, vz] (velocity)
+
+Returns the dynamics residual: x_{t+1} - f(x_t, u_t)
+"""
+function single_integrator_3d(z, t; Δt, state_dimension = 3, control_dimension = 3)
+	(; xs, us) = unflatten_trajectory(z, state_dimension, control_dimension)
+
+	x_t = xs[t]
+	u_t = us[t]
+	x_tp1 = xs[t+1]
+
+	x_pred = single_integrator_3d_step(x_t, u_t; Δt)
+	# x_pred =  .+ Δt .* u_t
+	return x_tp1 - x_pred
+end
+
+function single_integrator_3d_step(x, u; Δt)
+	x .+ Δt .* u
+end

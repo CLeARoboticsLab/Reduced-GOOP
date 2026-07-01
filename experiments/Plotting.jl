@@ -234,6 +234,16 @@ function plot_intersection_trajectories(;
 	return figure, ax
 end
 
+function dynamics_model_symbol(model)
+	model isa Symbol && return model
+	Symbol(nameof(typeof(model)))
+end
+
+function first_three_norm(v, label)
+	length(v) >= 3 || error("$(label) must have at least three entries.")
+	sqrt(sum(abs2, v[1:3]))
+end
+
 function speed_plot(;
 	strategy,
 	speed_limit = 1.5,
@@ -258,9 +268,25 @@ function speed_plot(;
 
 	figure = serif_figure()
 	model = dynamics_model isa NamedTuple ? dynamics_model.model : dynamics_model
-	if model isa Union{Unicycle, Bicycle} || model === :unicycle || model === :bicycle
+	model_symbol = dynamics_model_symbol(model)
+	if model_symbol in (:Unicycle, :Bicycle, :unicycle, :bicycle)
 		speed1 = [xs1[k][3] for k in 1:trajectory_len]
 		speed2 = [xs2[k][3] for k in 1:trajectory_len]
+	elseif model_symbol in (:SingleIntegrator3D, :single_integrator_3d)
+		us1 = strategy[1].us
+		us2 = strategy[2].us
+		speed_len = min(length(us1), length(us2), trajectory_len)
+		speed_len > 0 || error("speed_plot expects non-empty controls for SingleIntegrator3D.")
+		horizon_steps = 0:(speed_len-1)
+		speed_limit_profile = fill(speed_limit, speed_len)
+		speed1 = [first_three_norm(us1[k], "Player 1 control") for k in 1:speed_len]
+		speed2 = [first_three_norm(us2[k], "Player 2 control") for k in 1:speed_len]
+	else
+		speed1 = nothing
+		speed2 = nothing
+	end
+
+	if !isnothing(speed1)
 		ax = CairoMakie.Axis(
 			figure[1, 1];
 			xlabel = "time step [s]",
@@ -423,7 +449,7 @@ function control_plot(;
 	end
 
 	horizon_steps = 0:(control_horizon-1)
-	figure = serif_figure()
+	figure = serif_figure(size = (950, max(420, 260 * control_dimension)))
 	axes = CairoMakie.Axis[]
 
 	player1_handle = nothing
@@ -436,9 +462,9 @@ function control_plot(;
 		u2 = [us2[k][control_idx] for k in 1:control_horizon]
 
 		ax = CairoMakie.Axis(
-			figure[1, control_idx];
-			xlabel = "time step [s]",
-			ylabel = "u$(control_idx)",
+			figure[control_idx, 1];
+			xlabel = control_idx == control_dimension ? "time step [s]" : "",
+			ylabel = "u_$(control_idx)(t)",
 			xlabelsize = axis_label_fontsize,
 			ylabelsize = axis_label_fontsize,
 			xticklabelsize = tick_label_fontsize,
@@ -494,7 +520,7 @@ function control_plot(;
 	end
 
 	if length(axes) > 1
-		CairoMakie.linkyaxes!(axes...)
+		CairoMakie.linkxaxes!(axes...)
 	end
 
 	legend_elements = Any[player1_handle, player2_handle]
@@ -509,7 +535,7 @@ function control_plot(;
 	end
 
 	CairoMakie.Legend(
-		figure[1, control_dimension],
+		figure[1, 1],
 		legend_elements,
 		legend_labels;
 		framevisible = false,
@@ -522,6 +548,122 @@ function control_plot(;
 	)
 
 	return figure, Tuple(axes)
+end
+
+function inter_player_distance_plot(;
+	strategy,
+	reference_distance = nothing,
+)
+	if length(strategy) < 2
+		error("inter_player_distance_plot expects strategies for at least two players.")
+	end
+
+	xs1 = strategy[1].xs
+	xs2 = strategy[2].xs
+	trajectory_len = min(length(xs1), length(xs2))
+	if trajectory_len == 0
+		error("inter_player_distance_plot expects non-empty player trajectories.")
+	end
+	any(length(xs1[k]) < 3 || length(xs2[k]) < 3 for k in 1:trajectory_len) &&
+		error("inter_player_distance_plot expects at least 3D player states.")
+
+	horizon_steps = 0:(trajectory_len-1)
+	distances = [
+		sqrt(
+			(xs1[k][1] - xs2[k][1])^2 +
+			(xs1[k][2] - xs2[k][2])^2 +
+			(xs1[k][3] - xs2[k][3])^2,
+		)
+		for k in 1:trajectory_len
+	]
+	vertical_differences = [abs(xs1[k][3] - xs2[k][3]) for k in 1:trajectory_len]
+
+	axis_label_fontsize = 24
+	tick_label_fontsize = 22
+	legend_label_fontsize = 18
+	figure = serif_figure(size = (950, 700))
+	distance_ax = CairoMakie.Axis(
+		figure[1, 1];
+		xlabel = "",
+		ylabel = "inter-player distance [m]",
+		xlabelsize = axis_label_fontsize,
+		ylabelsize = axis_label_fontsize,
+		xticklabelsize = tick_label_fontsize,
+		yticklabelsize = tick_label_fontsize,
+	)
+
+	distance_handle = CairoMakie.scatterlines!(
+		distance_ax,
+		horizon_steps,
+		distances;
+		color = :dodgerblue,
+		linewidth = 3,
+		markersize = 7,
+	)
+
+	legend_elements = Any[distance_handle]
+	legend_labels = ["Inter-player Distance"]
+	if !isnothing(reference_distance)
+		reference_profile = fill(reference_distance, trajectory_len)
+		reference_handle = CairoMakie.lines!(
+			distance_ax,
+			horizon_steps,
+			reference_profile;
+			color = :black,
+			linestyle = :dash,
+			linewidth = 2,
+		)
+		push!(legend_elements, reference_handle)
+		push!(legend_labels, "Reference Distance [$(reference_distance) m]")
+	end
+
+	CairoMakie.Legend(
+		figure[1, 1],
+		legend_elements,
+		legend_labels;
+		framevisible = false,
+		labelsize = legend_label_fontsize,
+		orientation = :vertical,
+		tellheight = false,
+		tellwidth = false,
+		halign = :right,
+		valign = :top,
+	)
+
+	vertical_ax = CairoMakie.Axis(
+		figure[2, 1];
+		title = "Vertical Position Difference",
+		xlabel = "time step [s]",
+		ylabel = "|z_1(t) - z_2(t)| [m]",
+		titlesize = axis_label_fontsize,
+		xlabelsize = axis_label_fontsize,
+		ylabelsize = axis_label_fontsize,
+		xticklabelsize = tick_label_fontsize,
+		yticklabelsize = tick_label_fontsize,
+	)
+	vertical_handle = CairoMakie.scatterlines!(
+		vertical_ax,
+		horizon_steps,
+		vertical_differences;
+		color = :seagreen,
+		linewidth = 3,
+		markersize = 7,
+	)
+	CairoMakie.Legend(
+		figure[2, 1],
+		[vertical_handle],
+		["Vertical Difference"];
+		framevisible = false,
+		labelsize = legend_label_fontsize,
+		orientation = :vertical,
+		tellheight = false,
+		tellwidth = false,
+		halign = :right,
+		valign = :top,
+	)
+	CairoMakie.linkxaxes!(distance_ax, vertical_ax)
+
+	return figure, (distance_ax, vertical_ax)
 end
 
 
