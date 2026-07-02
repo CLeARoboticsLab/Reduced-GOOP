@@ -634,13 +634,14 @@ function inter_player_distance_plot(;
 		figure[2, 1];
 		title = "Vertical Position Difference",
 		xlabel = "time step [s]",
-		ylabel = "|z_1(t) - z_2(t)| [m]",
+		ylabel = L"$|z_1(t) - z_2(t)|$ [m]",
 		titlesize = axis_label_fontsize,
 		xlabelsize = axis_label_fontsize,
 		ylabelsize = axis_label_fontsize,
 		xticklabelsize = tick_label_fontsize,
 		yticklabelsize = tick_label_fontsize,
 	)
+	CairoMakie.ylims!(vertical_ax, -1.0, 1.0)
 	vertical_handle = CairoMakie.scatterlines!(
 		vertical_ax,
 		horizon_steps,

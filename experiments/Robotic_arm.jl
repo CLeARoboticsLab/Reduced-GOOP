@@ -107,13 +107,17 @@ function get_setup(
 	]
 
 	shared_equality_constraint = function (z, θ)
-		# (x,y) distance between the two players must be equal to some distance, dₚ, at all times t
+		# Hard handle-grasp constraint: the two grippers must remain separated by the
+		# fixed 3D handle distance dₚ at all times. This allows vertical imbalance
+		# because z-separation is not constrained to be zero; if one gripper rises,
+		# the horizontal separation adjusts so the full 3D handle distance is fixed.
 		(; xs, us) = trajectory(z; player = 1)
 		xs1 = copy(xs)
 		(; xs, us) = trajectory(z; player = 2)
 		xs2 = copy(xs)
 		mapreduce(vcat, eachindex(xs1)) do t
-			sum(abs2, xs1[t][1:2] .- xs2[t][1:2]) - dₚ
+			gripper_separation = xs1[t].- xs2[t]
+			sum(abs2, gripper_separation) - dₚ^2
 		end
 	end
 
@@ -125,14 +129,14 @@ function get_setup(
 		for i in 1:num_players
 	]
 
-	# Keep the object vertically balanced.
+	# Load balance objective
 	function load_balance_objective(z, θ)
 		(; xs, us) = trajectory(z; player = 1)
 		xs1 = copy(xs)
 		(; xs, us) = trajectory(z; player = 2)
 		xs2 = copy(xs)
 		sum(eachindex(xs1)) do t
-    		(xs1[t][3] - xs2[t][3])^2
+    		(xs1[t][position_dimension] - xs2[t][position_dimension])^2
 		end
 	end
 
@@ -170,7 +174,7 @@ function get_setup(
 				dummy_parameters;
 				preferences = use_scalarized_baseline ? scalarized_preferences : preferences,
 				is_prioritized_constraint = use_scalarized_baseline ? scalarized_is_prioritized_constraint : is_prioritized_constraint,
-				equality_constraints = player_equality_constraints,
+				equality_constraints,
 				inequality_constraints = [nothing, nothing],
 				shared_equality_constraint = nothing,
 				shared_inequality_constraint = nothing,
@@ -285,6 +289,8 @@ function demo(;
 	speed_limit         = 2.0
 	num_instances       = 1
 	perturbation_scale  = 0.3
+	dₚ                  = 2.0
+
 
 	# ── Solver schedule ────────────────────────────────────────────────────────
 	epsilon_schedule         = [0.1]
@@ -294,9 +300,9 @@ function demo(;
 	# Single Integrator 3D: state = [px, py, pz]
 	base_initial_state1 = [-1.0, 6.0, 0.0]
 	base_initial_state2 = [ 1.0, 6.0, 0.0]
-	goal_position1    = [5.0, -5.0, 10.0]
-	goal_position2    = [5.0, -7.0, 10.0]
-	obstacle_position = [0.25, 0.15, 0.0]   # placeholder
+	goal_position1      = [5.0, -5.0, 5.0]
+	goal_position2      = [5.0, -7.0, 5.0]
+	obstacle_position   = [0.25, 0.15, 0.0]   # placeholder
 
 	# ── Build dynamics and problem ─────────────────────────────────────────────
 	state_dimension   = 3
@@ -312,6 +318,7 @@ function demo(;
 			dynamics,
 			control_bounds,
 			planning_horizon,
+			dₚ,
 			collision_avoidance,
 			speed_limit,
 			map_end,
@@ -362,7 +369,7 @@ function demo(;
 		options = @timeit TO "solver options construction" if solver isa ReducedGOOP.InteriorPoint
 			ReducedGOOP.InteriorPointOptions(;
 				tol = 1e-3, #1e-4
-				η₀ = 0.0, # 5e-5, 0.0 to turn off Tikhonov
+				η₀ = 5e-5, # 5e-5, 0.0 to turn off Tikhonov
 				ϵ₀,
 				max_inner_iters,
 				max_outer_iters = 1,
