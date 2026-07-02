@@ -12,6 +12,7 @@ SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 SymbolicTracingUtils = "77ddf47f-b2ab-4ded-95ee-54f4fa148129"
 Symbolics = "0c5d862f-8b57-4792-8d23-62f2024744c7"
 TimerOutputs = "a759f4b9-e2f1-59dc-863e-4aeb61b1ea8f"
+WGLMakie = "276b4fcb-3e11-5398-bf8b-a0c2d153d008"
 
 [sources]
 ReducedGOOP = {path = ".."}

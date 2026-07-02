@@ -224,7 +224,7 @@ function get_setup(
 		# safety constraints remain robot-only; Player 3 is merely limited to a
 		# plausible ground speed so it cannot teleport into the pot center.
 		mapreduce(vcat, us) do u
-			[speed_limit^2 - sum(abs2, u[1:2])]
+			[(speed_limit/2)^2 - sum(abs2, u[1:2])]
 		end
 	end
 
@@ -267,32 +267,20 @@ function get_setup(
 
 	preferences = [
 		[
-			# Lowest priority: minimize robot effort.
 			# control_objective(; player = 1),
-
-			# Reach the goal.
 			goal_objective(; player = 1),
-
-			# Highest priority: keep the carried pot vertically balanced.
 			load_balance_objective,
+			# goal_objective(; player = 1),
 		],
 		[
-			# Lowest priority: minimize robot effort.
 			# control_objective(; player = 2),
-
-			# Reach the goal.
 			# goal_objective(; player = 2),
-
-			# Highest priority: keep the carried pot vertically balanced.
 			load_balance_objective,
-
 			goal_objective(; player = 2),
-
 		],
 		[
 			negative_load_balance_objective,
 			pot_approach_objective,
-
 		],
 	]
 
@@ -422,14 +410,14 @@ function demo(;
 	compute_warmstart = true # Whether to compute a warmstart trajectory via rollout (true) or load from file (false)
 
 	# ── Problem parameters ─────────────────────────────────────────────────────
-	num_players         = 3
-	planning_horizon    = 20
-	collision_avoidance = 2.0
-	child_initial_buffer = 2.5
-	speed_limit         = 2.0
-	num_instances       = 1
-	perturbation_scale  = 0.3
-	dₚ                  = 2.0
+	num_players          = 3
+	planning_horizon     = 20
+	collision_avoidance  = 2.0
+	child_initial_buffer = 4.0
+	speed_limit          = 3.0
+	num_instances        = 1
+	perturbation_scale   = 0.3
+	dₚ                   = 2.0
 
 
 	# ── Solver schedule ────────────────────────────────────────────────────────
@@ -442,17 +430,8 @@ function demo(;
 	base_initial_state2 = [ 1.0,  6.0, 0.0]
 	goal_position1      = [-1.0, -5.0, 5.0]
 	goal_position2      = [ 1.0, -5.0, 5.0]
-	# Player 3 is a curious child/pet on the ground. Its initial and nominal goal
-	# are derived from the robot centerline below, so the proof-of-concept stays
-	# tied to the current delivery path instead of hard-coding an unrelated point.
-	base_initial_state3, goal_position3 = choose_child_initial_and_goal(
-		base_initial_state1,
-		base_initial_state2,
-		goal_position1,
-		goal_position2,
-		collision_avoidance,
-		child_initial_buffer = child_initial_buffer,
-	)
+	initial_state3      = [-6.0, -1.0, 0.0]
+	goal_position3	    = [ 0.0,  0.0, 0.0]
 	obstacle_position   = [0.25, 0.15, 0.0]   # placeholder
 
 	# ── Build dynamics and problem ─────────────────────────────────────────────
@@ -664,14 +643,14 @@ function demo(;
 		else
 			(copy(base_initial_state1), copy(base_initial_state2))
 		end
-		initial_state3, goal_position3 = choose_child_initial_and_goal(
-			initial_state1,
-			initial_state2,
-			goal_position1,
-			goal_position2,
-			collision_avoidance,
-			child_initial_buffer = child_initial_buffer,
-		)
+		# initial_state3, goal_position3 = choose_child_initial_and_goal(
+		# 	initial_state1,
+		# 	initial_state2,
+		# 	goal_position1,
+		# 	goal_position2,
+		# 	collision_avoidance,
+		# 	child_initial_buffer = child_initial_buffer,
+		# )
 
 		println(
 			"solved $(solved_attempts)/$(num_instances), attempt $(total_attempts), goop version $(goop_version): ",
@@ -886,6 +865,10 @@ function demo(;
 					distance_fig,
 				)
 				if show_interactive_trajectory
+					interactive_trajectory_path = joinpath(
+						trajectory_plots_dir,
+						"trajectory_interactive_instance_$(solved_attempts)_eps$(ϵ₀).html",
+					)
 					plot_trajectory_3d_interactive(
 						;
 						map_end,
@@ -898,7 +881,10 @@ function demo(;
 						goal_position2,
 						goal_position3,
 						collision_avoidance,
+						display_figure = false,
+						save_path = interactive_trajectory_path,
 					)
+					println("saved interactive trajectory browser file: ", interactive_trajectory_path)
 				end
 			end
 		end

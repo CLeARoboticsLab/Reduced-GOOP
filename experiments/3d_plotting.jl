@@ -1,10 +1,10 @@
 using CairoMakie: CairoMakie
 
 const SINGLE_INTEGRATOR_3D_PLAYER_COLORS = (:blue, :red, :darkorange)
-const GLMAKIE_PKGID = Base.PkgId(Base.UUID("e9467ef8-e4e7-5192-8a1a-b1aee30e663a"), "GLMakie")
+const WGLMAKIE_PKGID = Base.PkgId(Base.UUID("276b4fcb-3e11-5398-bf8b-a0c2d153d008"), "WGLMakie")
 
-function _load_glmakie()
-	Base.require(GLMAKIE_PKGID)
+function _load_wglmakie()
+	Base.require(WGLMAKIE_PKGID)
 end
 
 function _trajectory_xyz(xs; player)
@@ -566,6 +566,258 @@ function _plot_single_integrator_3d_trajectories(
 	return figure, ax
 end
 
+function _plot_single_integrator_3d_browser_trajectories(
+	makie;
+	strategy,
+	θ1 = nothing,
+	θ2 = nothing,
+	θ3 = nothing,
+	initial_position1 = nothing,
+	initial_position2 = nothing,
+	initial_position3 = nothing,
+	goal_position1,
+	goal_position2,
+	goal_position3 = nothing,
+	collision_avoidance = nothing,
+	map_end = nothing,
+	lane_width = nothing,
+	workspace_margin = 0.75,
+	figure_size = (1100, 850),
+	legend_label_fontsize = 16,
+)
+	plot_data = _single_integrator_3d_plot_data(
+		;
+		strategy,
+		θ1,
+		θ2,
+		θ3,
+		initial_position1,
+		initial_position2,
+		initial_position3,
+		goal_position1,
+		goal_position2,
+		goal_position3,
+		collision_avoidance,
+		map_end,
+		workspace_margin,
+	)
+	(;
+		x1,
+		y1,
+		z1,
+		x2,
+		y2,
+		z2,
+		has_child,
+		x3,
+		y3,
+		z3,
+		start1,
+		start2,
+		start3,
+		goal1,
+		goal2,
+		collision_avoidance,
+		xlims,
+		ylims,
+		zlims,
+	) = plot_data
+
+	figure = _serif_figure(makie; size = figure_size)
+	scene_axis = makie.LScene(figure[1, 1]; show_axis = true)
+	makie.cam3d!(scene_axis.scene)
+
+	grid_spacing = isnothing(lane_width) ? 2.0 : max(float(lane_width), 1.0)
+	draw_single_integrator_3d_environment!(
+		makie,
+		scene_axis;
+		xlims,
+		ylims,
+		zlims,
+		grid_spacing,
+	)
+
+	player1_color, player2_color, player3_color = SINGLE_INTEGRATOR_3D_PLAYER_COLORS
+	safety_handle = nothing
+	if has_child && !isnothing(collision_avoidance)
+		safety_stride = max(1, cld(length(x3), 6))
+		safety_indices = unique(vcat(collect(1:safety_stride:length(x3)), length(x3)))
+		for t in safety_indices
+			hemisphere_segments = _hemisphere_wireframe(
+				[x3[t], y3[t], z3[t]],
+				collision_avoidance,
+			)
+			for (segment_x, segment_y, segment_z) in hemisphere_segments
+				current_safety = makie.lines!(
+					scene_axis,
+					segment_x,
+					segment_y,
+					segment_z;
+					color = (player3_color, 0.42),
+					linestyle = :dash,
+					linewidth = 2.0,
+				)
+				if isnothing(safety_handle)
+					safety_handle = current_safety
+				end
+			end
+		end
+	end
+
+	player1_path = makie.lines!(scene_axis, x1, y1, z1; color = player1_color, linewidth = 4)
+	player2_path = makie.lines!(scene_axis, x2, y2, z2; color = player2_color, linewidth = 4)
+	player3_path = nothing
+	if has_child
+		player3_path = makie.lines!(
+			scene_axis,
+			x3,
+			y3,
+			z3;
+			color = player3_color,
+			linewidth = 4,
+			linestyle = :dash,
+		)
+	end
+
+	makie.scatter!(scene_axis, x1, y1, z1; color = player1_color, markersize = 10)
+	makie.scatter!(scene_axis, x2, y2, z2; color = player2_color, markersize = 10)
+	if has_child
+		makie.scatter!(
+			scene_axis,
+			x3,
+			y3,
+			z3;
+			color = player3_color,
+			marker = :utriangle,
+			markersize = 12,
+		)
+	end
+
+	start1_marker = makie.scatter!(
+		scene_axis,
+		[start1[1]],
+		[start1[2]],
+		[start1[3]];
+		markersize = 24,
+		color = player1_color,
+		strokecolor = :black,
+		strokewidth = 1,
+	)
+	start2_marker = makie.scatter!(
+		scene_axis,
+		[start2[1]],
+		[start2[2]],
+		[start2[3]];
+		markersize = 24,
+		color = player2_color,
+		strokecolor = :black,
+		strokewidth = 1,
+	)
+	start3_marker = has_child ? makie.scatter!(
+		scene_axis,
+		[start3[1]],
+		[start3[2]],
+		[start3[3]];
+		marker = :utriangle,
+		markersize = 26,
+		color = player3_color,
+		strokecolor = :black,
+		strokewidth = 1,
+	) : nothing
+	current1_marker = makie.scatter!(
+		scene_axis,
+		[x1[end]],
+		[y1[end]],
+		[z1[end]];
+		marker = :diamond,
+		markersize = 30,
+		color = player1_color,
+		strokecolor = :black,
+		strokewidth = 1,
+	)
+	current2_marker = makie.scatter!(
+		scene_axis,
+		[x2[end]],
+		[y2[end]],
+		[z2[end]];
+		marker = :diamond,
+		markersize = 30,
+		color = player2_color,
+		strokecolor = :black,
+		strokewidth = 1,
+	)
+	current3_marker = has_child ? makie.scatter!(
+		scene_axis,
+		[x3[end]],
+		[y3[end]],
+		[z3[end]];
+		marker = :diamond,
+		markersize = 30,
+		color = player3_color,
+		strokecolor = :black,
+		strokewidth = 1,
+	) : nothing
+	goal1_marker = makie.scatter!(
+		scene_axis,
+		[goal1[1]],
+		[goal1[2]],
+		[goal1[3]];
+		marker = :star5,
+		markersize = 32,
+		color = player1_color,
+		strokecolor = :black,
+		strokewidth = 1,
+	)
+	goal2_marker = makie.scatter!(
+		scene_axis,
+		[goal2[1]],
+		[goal2[2]],
+		[goal2[3]];
+		marker = :star5,
+		markersize = 32,
+		color = player2_color,
+		strokecolor = :black,
+		strokewidth = 1,
+	)
+
+	legend_elements = Any[player1_path, player2_path]
+	legend_labels = ["Left gripper (P1)", "Right gripper (P2)"]
+	if has_child
+		push!(legend_elements, player3_path)
+		push!(legend_labels, "Child/Pet (P3)")
+	end
+	append!(
+		legend_elements,
+		Any[start1_marker, start2_marker, current1_marker, current2_marker, goal1_marker, goal2_marker],
+	)
+	append!(
+		legend_labels,
+		["Start 1", "Start 2", "Current 1", "Current 2", "Goal 1", "Goal 2"],
+	)
+	if has_child
+		append!(legend_elements, Any[start3_marker, current3_marker])
+		append!(legend_labels, ["Child/Pet Start", "Child/Pet Current"])
+	end
+	if !isnothing(safety_handle)
+		push!(legend_elements, safety_handle)
+		push!(legend_labels, "Safety hemisphere")
+	end
+
+	makie.Legend(
+		figure[1, 2],
+		legend_elements,
+		legend_labels;
+		framevisible = false,
+		labelsize = legend_label_fontsize,
+		orientation = :vertical,
+		halign = :left,
+		valign = :top,
+	)
+	makie.center!(scene_axis.scene)
+
+	return figure, scene_axis
+end
+
 function plot_single_integrator_3d_trajectories(; kwargs...)
 	CairoMakie.activate!()
 	_plot_single_integrator_3d_trajectories(
@@ -577,20 +829,24 @@ end
 
 function plot_trajectory_3d_interactive(;
 	display_figure = true,
+	save_path = nothing,
 	figure_size = (1100, 850),
+	exportable = true,
+	offline = true,
 	kwargs...,
 )
-	GLMakie = _load_glmakie()
-	Base.invokelatest(GLMakie.activate!)
-	figure, ax = _plot_single_integrator_3d_trajectories(
-		GLMakie;
+	WGLMakie = _load_wglmakie()
+	Base.invokelatest(WGLMakie.Page; exportable, offline)
+	Base.invokelatest(WGLMakie.activate!)
+	figure, ax = _plot_single_integrator_3d_browser_trajectories(
+		WGLMakie;
 		kwargs...,
 		figure_size,
-		axis_label_fontsize = 24,
-		tick_label_fontsize = 18,
 		legend_label_fontsize = 16,
-		interactive = true,
 	)
+	if !isnothing(save_path)
+		Base.invokelatest(WGLMakie.save, save_path, figure)
+	end
 	display_figure && Base.invokelatest(display, figure)
 	return figure, ax
 end
