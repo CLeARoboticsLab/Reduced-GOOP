@@ -3,6 +3,7 @@ using CairoMakie: CairoMakie
 # using LaTeXStrings: @L_str
 
 const SERIF_FONT = "TeX Gyre Termes Makie"
+const DEFAULT_PLAYER_COLORS = (:blue, :red, :darkorange, :purple, :seagreen, :magenta)
 
 function serif_figure(; kwargs...)
 	return CairoMakie.Figure(;
@@ -244,10 +245,27 @@ function first_three_norm(v, label)
 	sqrt(sum(abs2, v[1:3]))
 end
 
+function player_plot_color(player)
+	DEFAULT_PLAYER_COLORS[mod1(player, length(DEFAULT_PLAYER_COLORS))]
+end
+
+function speed_limit_label(speed_limit, speed_limit_players)
+	if isnothing(speed_limit_players)
+		return "Speed Limit [$(speed_limit) m/s]"
+	end
+	players = speed_limit_players isa Integer ? [speed_limit_players] : collect(speed_limit_players)
+	isempty(players) && return "Speed Limit [$(speed_limit) m/s]"
+	player_text = length(players) == 1 ?
+		"P$(only(players))" :
+		"Players " * join(["P$(player)" for player in players], ", ")
+	"$(player_text) Speed Limit [$(speed_limit) m/s]"
+end
+
 function speed_plot(;
 	strategy,
 	speed_limit = 1.5,
 	dynamics_model = PlanarDoubleIntegrator(),
+	speed_limit_players = nothing,
 )
 	if length(strategy) < 2
 		error("speed_plot expects strategies for at least two players.")
@@ -256,9 +274,9 @@ function speed_plot(;
 	axis_label_fontsize = 24
 	tick_label_fontsize = 22
 	legend_label_fontsize = 18
-	xs1 = strategy[1].xs
-	xs2 = strategy[2].xs
-	trajectory_len = min(length(xs1), length(xs2))
+	num_players = length(strategy)
+	xs_by_player = [strategy[player].xs for player in 1:num_players]
+	trajectory_len = minimum(length, xs_by_player)
 	if trajectory_len == 0
 		error("speed_plot expects non-empty player trajectories.")
 	end
@@ -266,27 +284,29 @@ function speed_plot(;
 	horizon_steps = 0:(trajectory_len-1)
 	speed_limit_profile = fill(speed_limit, trajectory_len)
 
-	figure = serif_figure()
+	figure = serif_figure(size = (1000, 650))
 	model = dynamics_model isa NamedTuple ? dynamics_model.model : dynamics_model
 	model_symbol = dynamics_model_symbol(model)
 	if model_symbol in (:Unicycle, :Bicycle, :unicycle, :bicycle)
-		speed1 = [xs1[k][3] for k in 1:trajectory_len]
-		speed2 = [xs2[k][3] for k in 1:trajectory_len]
+		speed_profiles = [
+			[xs_by_player[player][k][3] for k in 1:trajectory_len]
+			for player in 1:num_players
+		]
 	elseif model_symbol in (:SingleIntegrator3D, :single_integrator_3d)
-		us1 = strategy[1].us
-		us2 = strategy[2].us
-		speed_len = min(length(us1), length(us2), trajectory_len)
+		us_by_player = [strategy[player].us for player in 1:num_players]
+		speed_len = minimum(length, us_by_player)
 		speed_len > 0 || error("speed_plot expects non-empty controls for SingleIntegrator3D.")
 		horizon_steps = 0:(speed_len-1)
 		speed_limit_profile = fill(speed_limit, speed_len)
-		speed1 = [first_three_norm(us1[k], "Player 1 control") for k in 1:speed_len]
-		speed2 = [first_three_norm(us2[k], "Player 2 control") for k in 1:speed_len]
+		speed_profiles = [
+			[first_three_norm(us_by_player[player][k], "Player $(player) control") for k in 1:speed_len]
+			for player in 1:num_players
+		]
 	else
-		speed1 = nothing
-		speed2 = nothing
+		speed_profiles = nothing
 	end
 
-	if !isnothing(speed1)
+	if !isnothing(speed_profiles)
 		ax = CairoMakie.Axis(
 			figure[1, 1];
 			xlabel = "time step [s]",
@@ -296,46 +316,44 @@ function speed_plot(;
 			xticklabelsize = tick_label_fontsize,
 			yticklabelsize = tick_label_fontsize,
 		)
-		player1_speed = CairoMakie.scatterlines!(
-			ax,
-			horizon_steps,
-			speed1;
-			color = :blue,
-			label = "Player 1",
-			linewidth = 3,
-		)
-		player2_speed = CairoMakie.scatterlines!(
-			ax,
-			horizon_steps,
-			speed2;
-			color = :red,
-			label = "Player 2",
-			linewidth = 3,
-		)
+		player_handles = Any[]
+		player_labels = String[]
+		for player in 1:num_players
+			player_handle = CairoMakie.scatterlines!(
+				ax,
+				horizon_steps,
+				speed_profiles[player];
+				color = player_plot_color(player),
+				label = "Player $(player)",
+				linewidth = 3,
+			)
+			push!(player_handles, player_handle)
+			push!(player_labels, "Player $(player)")
+		end
 		speed_limit_line = CairoMakie.lines!(
 			ax,
 			horizon_steps,
 			speed_limit_profile;
 			color = :black,
 			linestyle = :dash,
-			label = "Speed Limit [$(speed_limit) m/s]",
+			label = speed_limit_label(speed_limit, speed_limit_players),
 			linewidth = 2,
 		)
 		CairoMakie.Legend(
-			figure[1, 1],
-			[player1_speed, player2_speed, speed_limit_line],
-			["Player 1", "Player 2", "Speed Limit [$(speed_limit) m/s]"];
+			figure[1, 2],
+			vcat(player_handles, Any[speed_limit_line]),
+			vcat(player_labels, [speed_limit_label(speed_limit, speed_limit_players)]);
 			framevisible = false,
 			labelsize = legend_label_fontsize,
 			orientation = :vertical,
-			tellheight = false,
-			tellwidth = false,
-			halign = :right,
+			halign = :left,
 			valign = :top,
 		)
 		return figure, (ax,)
 	end
 
+	xs1 = strategy[1].xs
+	xs2 = strategy[2].xs
 	vx1 = [xs1[k][3] for k in 1:trajectory_len]
 	vy1 = [xs1[k][4] for k in 1:trajectory_len]
 	vx2 = [xs2[k][3] for k in 1:trajectory_len]
@@ -400,7 +418,7 @@ function speed_plot(;
 	CairoMakie.Legend(
 		figure[1, 2],
 		[player1_vx, player2_vx, speed_limit_line],
-		["Player 1", "Player 2", "Speed Limit [$(speed_limit) m/s]"];
+		["Player 1", "Player 2", speed_limit_label(speed_limit, speed_limit_players)];
 		framevisible = false,
 		labelsize = legend_label_fontsize,
 		orientation = :vertical,
@@ -430,16 +448,20 @@ function control_plot(;
 	tick_label_fontsize = 22
 	legend_label_fontsize = 18
 
-	us1 = strategy[1].us
-	us2 = strategy[2].us
-	control_horizon = min(length(us1), length(us2))
+	num_players = length(strategy)
+	us_by_player = [strategy[player].us for player in 1:num_players]
+	control_horizon = minimum(length, us_by_player)
 	if control_horizon == 0
 		error("control_plot expects non-empty player controls.")
 	end
 
-	control_dimension = length(us1[1])
+	control_dimension = length(us_by_player[1][1])
 	if control_dimension == 0
 		error("control_plot expects control vectors with non-zero dimension.")
+	end
+	for player in 1:num_players
+		length(us_by_player[player][1]) == control_dimension ||
+			error("Player $(player) control dimension does not match player 1.")
 	end
 
 	lb = isnothing(control_lb) ? fill(-Inf, control_dimension) : collect(control_lb)
@@ -449,18 +471,14 @@ function control_plot(;
 	end
 
 	horizon_steps = 0:(control_horizon-1)
-	figure = serif_figure(size = (950, max(420, 260 * control_dimension)))
+	figure = serif_figure(size = (1100, max(420, 260 * control_dimension)))
 	axes = CairoMakie.Axis[]
 
-	player1_handle = nothing
-	player2_handle = nothing
+	player_handles = Vector{Any}(undef, num_players)
 	upper_bound_handle = nothing
 	lower_bound_handle = nothing
 
 	for control_idx in 1:control_dimension
-		u1 = [us1[k][control_idx] for k in 1:control_horizon]
-		u2 = [us2[k][control_idx] for k in 1:control_horizon]
-
 		ax = CairoMakie.Axis(
 			figure[control_idx, 1];
 			xlabel = control_idx == control_dimension ? "time step [s]" : "",
@@ -472,23 +490,18 @@ function control_plot(;
 		)
 		push!(axes, ax)
 
-		current_player1 = CairoMakie.scatterlines!(
-			ax,
-			horizon_steps,
-			u1;
-			color = :blue,
-			linewidth = 3,
-		)
-		current_player2 = CairoMakie.scatterlines!(
-			ax,
-			horizon_steps,
-			u2;
-			color = :red,
-			linewidth = 3,
-		)
-		if isnothing(player1_handle)
-			player1_handle = current_player1
-			player2_handle = current_player2
+		for player in 1:num_players
+			u = [us_by_player[player][k][control_idx] for k in 1:control_horizon]
+			current_player = CairoMakie.scatterlines!(
+				ax,
+				horizon_steps,
+				u;
+				color = player_plot_color(player),
+				linewidth = 3,
+			)
+			if control_idx == 1
+				player_handles[player] = current_player
+			end
 		end
 
 		if isfinite(ub[control_idx])
@@ -523,8 +536,8 @@ function control_plot(;
 		CairoMakie.linkxaxes!(axes...)
 	end
 
-	legend_elements = Any[player1_handle, player2_handle]
-	legend_labels = ["Player 1", "Player 2"]
+	legend_elements = Any[player_handles...]
+	legend_labels = ["Player $(player)" for player in 1:num_players]
 	if !isnothing(upper_bound_handle)
 		push!(legend_elements, upper_bound_handle)
 		push!(legend_labels, "Upper Control Bound")
@@ -535,15 +548,13 @@ function control_plot(;
 	end
 
 	CairoMakie.Legend(
-		figure[1, 1],
+		figure[1, 2],
 		legend_elements,
 		legend_labels;
 		framevisible = false,
 		labelsize = legend_label_fontsize,
 		orientation = :vertical,
-		tellheight = false,
-		tellwidth = false,
-		halign = :right,
+		halign = :left,
 		valign = :top,
 	)
 

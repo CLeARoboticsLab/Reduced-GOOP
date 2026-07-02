@@ -1,6 +1,6 @@
 using CairoMakie: CairoMakie
 
-const SINGLE_INTEGRATOR_3D_PLAYER_COLORS = (:blue, :red)
+const SINGLE_INTEGRATOR_3D_PLAYER_COLORS = (:blue, :red, :darkorange)
 const GLMAKIE_PKGID = Base.PkgId(Base.UUID("e9467ef8-e4e7-5192-8a1a-b1aee30e663a"), "GLMakie")
 
 function _load_glmakie()
@@ -27,6 +27,34 @@ end
 
 function _initial_position_from_parameter_block(parameter_block, label)
 	_position3(parameter_block, label)
+end
+
+function _horizontal_circle(center, radius; point_count = 96)
+	angles = range(0, 2pi; length = point_count)
+	xs = [center[1] + radius * cos(angle) for angle in angles]
+	ys = [center[2] + radius * sin(angle) for angle in angles]
+	zs = fill(center[3], point_count)
+	(xs, ys, zs)
+end
+
+function _hemisphere_wireframe(center, radius; point_count = 56)
+	segments = Tuple{Vector{Float64}, Vector{Float64}, Vector{Float64}}[]
+
+	for elevation in (0.0, pi / 6, pi / 3)
+		ring_radius = radius * cos(elevation)
+		ring_center = [center[1], center[2], center[3] + radius * sin(elevation)]
+		push!(segments, _horizontal_circle(ring_center, ring_radius; point_count))
+	end
+
+	arc_angles = range(0, pi; length = point_count)
+	for azimuth in (0.0, pi / 4, pi / 2, 3pi / 4)
+		xs = [center[1] + radius * cos(angle) * cos(azimuth) for angle in arc_angles]
+		ys = [center[2] + radius * cos(angle) * sin(azimuth) for angle in arc_angles]
+		zs = [center[3] + radius * sin(angle) for angle in arc_angles]
+		push!(segments, (xs, ys, zs))
+	end
+
+	segments
 end
 
 function _padded_limits(values; lower = nothing, upper = nothing, margin = 0.75)
@@ -69,10 +97,14 @@ function _single_integrator_3d_plot_data(;
 	strategy,
 	θ1 = nothing,
 	θ2 = nothing,
+	θ3 = nothing,
 	initial_position1 = nothing,
 	initial_position2 = nothing,
+	initial_position3 = nothing,
 	goal_position1,
 	goal_position2,
+	goal_position3 = nothing,
+	collision_avoidance = nothing,
 	map_end = nothing,
 	workspace_margin = 0.75,
 )
@@ -83,6 +115,8 @@ function _single_integrator_3d_plot_data(;
 	xs2 = strategy[2].xs
 	x1, y1, z1 = _trajectory_xyz(xs1; player = 1)
 	x2, y2, z2 = _trajectory_xyz(xs2; player = 2)
+	has_child = length(strategy) >= 3
+	x3, y3, z3 = has_child ? _trajectory_xyz(strategy[3].xs; player = 3) : (Float64[], Float64[], Float64[])
 
 	start1 = isnothing(initial_position1) ?
 		_initial_position_from_parameter_block(θ1, "θ1") :
@@ -90,12 +124,38 @@ function _single_integrator_3d_plot_data(;
 	start2 = isnothing(initial_position2) ?
 		_initial_position_from_parameter_block(θ2, "θ2") :
 		_position3(initial_position2, "initial_position2")
+	start3 = if has_child
+		if !isnothing(initial_position3)
+			_position3(initial_position3, "initial_position3")
+		elseif !isnothing(θ3)
+			_initial_position_from_parameter_block(θ3, "θ3")
+		else
+			[x3[1], y3[1], z3[1]]
+		end
+	else
+		nothing
+	end
 	goal1 = _position3(goal_position1, "goal_position1")
 	goal2 = _position3(goal_position2, "goal_position2")
 
 	all_x = vcat(x1, x2, start1[1], start2[1], goal1[1], goal2[1])
 	all_y = vcat(y1, y2, start1[2], start2[2], goal1[2], goal2[2])
 	all_z = vcat(z1, z2, start1[3], start2[3], goal1[3], goal2[3])
+	if has_child
+		append!(all_x, x3)
+		append!(all_y, y3)
+		append!(all_z, z3)
+		push!(all_x, start3[1])
+		push!(all_y, start3[2])
+		push!(all_z, start3[3])
+		if !isnothing(collision_avoidance)
+			for k in eachindex(x3)
+				append!(all_x, (x3[k] - collision_avoidance, x3[k] + collision_avoidance))
+				append!(all_y, (y3[k] - collision_avoidance, y3[k] + collision_avoidance))
+				append!(all_z, z3[k] + collision_avoidance)
+			end
+		end
+	end
 
 	xlims = isnothing(map_end) ?
 		_padded_limits(all_x; margin = workspace_margin) :
@@ -104,6 +164,8 @@ function _single_integrator_3d_plot_data(;
 		_padded_limits(all_y; margin = workspace_margin) :
 		_padded_limits(all_y; lower = -map_end, upper = map_end, margin = workspace_margin)
 	zlims = _padded_limits(all_z; lower = 0.0, margin = workspace_margin)
+	z_data_min = minimum(all_z)
+	zlims = (z_data_min < 0.0 ? zlims[1] : 0.0, zlims[2])
 
 	(;
 		x1,
@@ -112,10 +174,16 @@ function _single_integrator_3d_plot_data(;
 		x2,
 		y2,
 		z2,
+		has_child,
+		x3,
+		y3,
+		z3,
 		start1,
 		start2,
+		start3,
 		goal1,
 		goal2,
+		collision_avoidance,
 		xlims,
 		ylims,
 		zlims,
@@ -211,10 +279,14 @@ function _plot_single_integrator_3d_trajectories(
 	strategy,
 	θ1 = nothing,
 	θ2 = nothing,
+	θ3 = nothing,
 	initial_position1 = nothing,
 	initial_position2 = nothing,
+	initial_position3 = nothing,
 	goal_position1,
 	goal_position2,
+	goal_position3 = nothing,
+	collision_avoidance = nothing,
 	map_end = nothing,
 	lane_width = nothing,
 	workspace_margin = 0.75,
@@ -229,10 +301,14 @@ function _plot_single_integrator_3d_trajectories(
 		strategy,
 		θ1,
 		θ2,
+		θ3,
 		initial_position1,
 		initial_position2,
+		initial_position3,
 		goal_position1,
 		goal_position2,
+		goal_position3,
+		collision_avoidance,
 		map_end,
 		workspace_margin,
 	)
@@ -243,10 +319,16 @@ function _plot_single_integrator_3d_trajectories(
 		x2,
 		y2,
 		z2,
+		has_child,
+		x3,
+		y3,
+		z3,
 		start1,
 		start2,
+		start3,
 		goal1,
 		goal2,
+		collision_avoidance,
 		xlims,
 		ylims,
 		zlims,
@@ -287,7 +369,33 @@ function _plot_single_integrator_3d_trajectories(
 		grid_spacing,
 	)
 
-	player1_color, player2_color = SINGLE_INTEGRATOR_3D_PLAYER_COLORS
+	player1_color, player2_color, player3_color = SINGLE_INTEGRATOR_3D_PLAYER_COLORS
+	safety_handle = nothing
+	if has_child && !isnothing(collision_avoidance)
+		safety_stride = max(1, cld(length(x3), 6))
+		safety_indices = unique(vcat(collect(1:safety_stride:length(x3)), length(x3)))
+		for t in safety_indices
+			hemisphere_segments = _hemisphere_wireframe(
+				[x3[t], y3[t], z3[t]],
+				collision_avoidance,
+			)
+			for (segment_x, segment_y, segment_z) in hemisphere_segments
+				current_safety = makie.lines!(
+					ax,
+					segment_x,
+					segment_y,
+					segment_z;
+					color = (player3_color, 0.42),
+					linestyle = :dash,
+					linewidth = interactive ? 2.0 : 1.35,
+				)
+				if isnothing(safety_handle)
+					safety_handle = current_safety
+				end
+			end
+		end
+	end
+
 	player1_path = makie.lines!(
 		ax,
 		x1,
@@ -304,9 +412,32 @@ function _plot_single_integrator_3d_trajectories(
 		color = player2_color,
 		linewidth = interactive ? 4 : 3,
 	)
+	player3_path = nothing
+	if has_child
+		player3_path = makie.lines!(
+			ax,
+			x3,
+			y3,
+			z3;
+			color = player3_color,
+			linewidth = interactive ? 4 : 3,
+			linestyle = :dash,
+		)
+	end
 
 	makie.scatter!(ax, x1, y1, z1; color = player1_color, markersize = interactive ? 10 : 7)
 	makie.scatter!(ax, x2, y2, z2; color = player2_color, markersize = interactive ? 10 : 7)
+	if has_child
+		makie.scatter!(
+			ax,
+			x3,
+			y3,
+			z3;
+			color = player3_color,
+			marker = :utriangle,
+			markersize = interactive ? 12 : 8,
+		)
+	end
 
 	start1_marker = makie.scatter!(
 		ax,
@@ -328,6 +459,17 @@ function _plot_single_integrator_3d_trajectories(
 		strokecolor = :black,
 		strokewidth = 1,
 	)
+	start3_marker = has_child ? makie.scatter!(
+		ax,
+		[start3[1]],
+		[start3[2]],
+		[start3[3]];
+		marker = :utriangle,
+		markersize = interactive ? 26 : 21,
+		color = player3_color,
+		strokecolor = :black,
+		strokewidth = 1,
+	) : nothing
 	current1_marker = makie.scatter!(
 		ax,
 		[x1[end]],
@@ -350,6 +492,17 @@ function _plot_single_integrator_3d_trajectories(
 		strokecolor = :black,
 		strokewidth = 1,
 	)
+	current3_marker = has_child ? makie.scatter!(
+		ax,
+		[x3[end]],
+		[y3[end]],
+		[z3[end]];
+		marker = :diamond,
+		markersize = interactive ? 30 : 24,
+		color = player3_color,
+		strokecolor = :black,
+		strokewidth = 1,
+	) : nothing
 	goal1_marker = makie.scatter!(
 		ax,
 		[goal1[1]],
@@ -373,28 +526,33 @@ function _plot_single_integrator_3d_trajectories(
 		strokewidth = 1,
 	)
 
+	legend_elements = Any[player1_path, player2_path]
+	legend_labels = ["Left gripper (P1)", "Right gripper (P2)"]
+	if has_child
+		push!(legend_elements, player3_path)
+		push!(legend_labels, "Child/Pet (P3)")
+	end
+	append!(
+		legend_elements,
+		Any[start1_marker, start2_marker, current1_marker, current2_marker, goal1_marker, goal2_marker],
+	)
+	append!(
+		legend_labels,
+		["Start 1", "Start 2", "Current 1", "Current 2", "Goal 1", "Goal 2"],
+	)
+	if has_child
+		append!(legend_elements, Any[start3_marker, current3_marker])
+		append!(legend_labels, ["Child/Pet Start", "Child/Pet Current"])
+	end
+	if !isnothing(safety_handle)
+		push!(legend_elements, safety_handle)
+		push!(legend_labels, "Safety hemisphere")
+	end
+
 	makie.Legend(
 		figure[1, 1],
-		[
-			player1_path,
-			player2_path,
-			start1_marker,
-			start2_marker,
-			current1_marker,
-			current2_marker,
-			goal1_marker,
-			goal2_marker,
-		],
-		[
-			"Player 1",
-			"Player 2",
-			"Start 1",
-			"Start 2",
-			"Current 1",
-			"Current 2",
-			"Goal 1",
-			"Goal 2",
-		];
+		legend_elements,
+		legend_labels;
 		framevisible = false,
 		labelsize = legend_label_fontsize,
 		orientation = :vertical,

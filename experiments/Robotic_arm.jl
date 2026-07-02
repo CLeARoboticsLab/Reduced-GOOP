@@ -31,7 +31,7 @@ function get_setup(
 	use_scalarized_baseline = false,
 	use_social_equilibrium_baseline = false,
 )
-	num_players == 2 || error("robotic_arm setup currently expects exactly two players.")
+	num_players == 3 || error("robotic_arm Zero-Sum GOOP setup expects exactly three players.")
 
 	state_dimension = dynamics.state_dimension
 	control_dimension = dynamics.control_dimension
@@ -77,10 +77,18 @@ function get_setup(
 		unflatten_trajectory(z[Block(player)], state_dimension, control_dimension)
 
 	function goal_objective(; player)
+		player in (1, 2) || error("Center goal objective belongs only to robot players 1 and 2.")
 		function (z, θ)
-			(; xs, us) = trajectory(z; player)
-			(; goal_position) = unflatten_parameters(θ[Block(player)])
-			goal_deviation = xs[end] .- goal_position
+			(; xs) = trajectory(z; player = 1)
+			xs1 = copy(xs)
+			(; xs) = trajectory(z; player = 2)
+			xs2 = copy(xs)
+			params1 = unflatten_parameters(θ[Block(1)])
+			params2 = unflatten_parameters(θ[Block(2)])
+
+			center_position = 0.5 .* (xs1[end] .+ xs2[end])
+			center_goal_position = 0.5 .* (params1.goal_position .+ params2.goal_position)
+			goal_deviation = center_position .- center_goal_position
 			sum(goal_deviation .^ 2)
 		end
 	end
@@ -117,21 +125,36 @@ function get_setup(
 				# xs[t] - dynamics(xs[t-1], us[t-1], t)
 				dynamics.residual(z[Block(i)], t)
 			end
-			terminal_state_constraint = xs[end][position_dimension] - goal_position[position_dimension]
+			empty_constraint = similar(initial_state_constraint, 0)
+
+			# The robot grippers carry the pot to a raised delivery height. The child/pet
+			# stays on the ground and does not receive this terminal height constraint.
+			terminal_state_constraint = i <= 2 ?
+				[xs[end][position_dimension] - goal_position[position_dimension]] :
+				empty_constraint
+			terminal_state_constraint = empty_constraint
+
+			# Player 3 is modeled with the same 3D single-integrator dynamics, but its
+			# vertical velocity is fixed to zero. Since its initial z is zero, the child
+			# remains on the ground for the full trajectory.
+			child_ground_constraint = i == 3 ?
+				mapreduce(u -> [u[position_dimension]], vcat, us) :
+				empty_constraint
 
 			vcat(
 				initial_state_constraint,
 				dynamics_constraints,
-				terminal_state_constraint
+				terminal_state_constraint,
+				child_ground_constraint,
 			)
 		end for i in 1:num_players
 	]
 
 	shared_equality_constraint = function (z, θ)
-		# Hard handle-grasp constraint: the two grippers must remain separated by the
-		# fixed 3D handle distance dₚ at all times. This allows vertical imbalance
-		# because z-separation is not constrained to be zero; if one gripper rises,
-		# the horizontal separation adjusts so the full 3D handle distance is fixed.
+		# Players 1 and 2 jointly carry the hot pot. This hard handle-grasp
+		# constraint keeps the two robot grippers separated by the fixed 3D handle
+		# distance dₚ at all times. Player 3 never directly manipulates the pot and
+		# is deliberately excluded from this equality constraint.
 		(; xs, us) = trajectory(z; player = 1)
 		xs1 = copy(xs)
 		(; xs, us) = trajectory(z; player = 2)
@@ -143,11 +166,72 @@ function get_setup(
 	end
 
 	equality_constraints = [
-		(z, θ) -> vcat(
-			player_equality_constraints[i](z, θ), 
-			shared_equality_constraint(z, θ)
-		)
+		i <= 2 ?
+			((z, θ) -> vcat(
+				player_equality_constraints[i](z, θ),
+				shared_equality_constraint(z, θ),
+			)) :
+			player_equality_constraints[i]
 		for i in 1:num_players
+	]
+
+	function robot_child_safety_inequality(; player)
+		player in (1, 2) || error("Robot-child safety constraints belong only to robot players 1 and 2.")
+		function (z, θ)
+			(; xs) = trajectory(z; player)
+			robot_xs = copy(xs)
+			(; xs) = trajectory(z; player = 3)
+			child_xs = copy(xs)
+
+			# The child/pet is not constrained by this residual. Instead, each robot
+			# player must keep its gripper outside the child-centered safety sphere.
+			# This is the proof-of-concept Zero-Sum GOOP coupling: Player 3's curious
+			# motion restricts the feasible robot motions indirectly through safety.
+			mapreduce(vcat, eachindex(robot_xs)) do t
+				separation = robot_xs[t] .- child_xs[t]
+				[sum(abs2, separation) - collision_avoidance^2]
+			end
+		end
+	end
+
+	function robot_arm_speed_inequality(; player)
+		player in (1, 2) || error("Robot arm speed constraints belong only to robot players 1 and 2.")
+		function (z, θ)
+			(; us) = trajectory(z; player)
+
+			mapreduce(vcat, us) do u
+				[speed_limit^2 - sum(abs2, u[1:position_dimension])]
+			end
+		end
+	end
+
+	function robot_inequality(; player)
+		safety_inequality = robot_child_safety_inequality(; player)
+		speed_inequality = robot_arm_speed_inequality(; player)
+
+		function (z, θ)
+			vcat(
+				safety_inequality(z, θ),
+				speed_inequality(z, θ),
+			)
+		end
+	end
+
+	function child_ground_speed_inequality(z, θ)
+		(; us) = trajectory(z; player = 3)
+
+		# This is a physical child-motion bound, not a robot safety constraint. The
+		# safety constraints remain robot-only; Player 3 is merely limited to a
+		# plausible ground speed so it cannot teleport into the pot center.
+		mapreduce(vcat, us) do u
+			[speed_limit^2 - sum(abs2, u[1:2])]
+		end
+	end
+
+	inequality_constraints = [
+		robot_inequality(; player = 1),
+		robot_inequality(; player = 2),
+		child_ground_speed_inequality,
 	]
 
 	# Load balance objective
@@ -161,32 +245,59 @@ function get_setup(
 		end
 	end
 
+	function negative_load_balance_objective(z, θ)
+		-load_balance_objective(z, θ)
+	end
+
+	function pot_approach_objective(z, θ)
+		(; xs) = trajectory(z; player = 1)
+		xs1 = copy(xs)
+		(; xs) = trajectory(z; player = 2)
+		xs2 = copy(xs)
+		(; xs) = trajectory(z; player = 3)
+		xs3 = copy(xs)
+
+		# The child/pet is curious, not physically coupled to the pot.
+		# Approach the pot center c = (p₁ + p₂) / 2.
+		sum(eachindex(xs3)) do t
+			pot_center = 0.5 .* (xs1[t] .+ xs2[t])
+			sum(abs2, xs3[t] .- pot_center)
+		end
+	end
+
 	preferences = [
 		[
-			# Control bound
-			# control_bound_inequality(; player = 1),
+			# Lowest priority: minimize robot effort.
+			# control_objective(; player = 1),
 
-			# Reach the goal
+			# Reach the goal.
 			goal_objective(; player = 1),
 
-			# Keep the object vertically balanced
+			# Highest priority: keep the carried pot vertically balanced.
 			load_balance_objective,
 		],
 		[
-			# Control bound
-			# control_bound_inequality(; player = 2),
+			# Lowest priority: minimize robot effort.
+			# control_objective(; player = 2),
 
-			# Reach the goal
+			# Reach the goal.
+			# goal_objective(; player = 2),
+
+			# Highest priority: keep the carried pot vertically balanced.
+			load_balance_objective,
+
 			goal_objective(; player = 2),
 
-			# Keep the object vertically balanced
-			load_balance_objective,
+		],
+		[
+			negative_load_balance_objective,
+			pot_approach_objective,
 
 		],
 	]
 
 	# Preference hierarchy: [lowest priority, ..., highest priority]
-	is_prioritized_constraint = [[false, false], [false, false]]
+	is_prioritized_constraint = [[false, false], [false, false], [false, false]]
 
 	function build_goop_problem()
 		@timeit TO "ParametricGOOP construction" begin
@@ -196,7 +307,7 @@ function get_setup(
 				preferences = use_scalarized_baseline ? scalarized_preferences : preferences,
 				is_prioritized_constraint = use_scalarized_baseline ? scalarized_is_prioritized_constraint : is_prioritized_constraint,
 				equality_constraints,
-				inequality_constraints = [nothing, nothing],
+				inequality_constraints,
 				shared_equality_constraint = nothing,
 				shared_inequality_constraint = nothing,
 			)
@@ -251,10 +362,17 @@ function get_setup(
 		)
 	end
 	inequality_constraint = nothing
+	inequality_constraint = function (z, θ)
+		vcat(
+			inequality_constraints[1](z, θ),
+			inequality_constraints[2](z, θ),
+			inequality_constraints[3](z, θ),
+		)
+	end
 	primal_dimension = sum(primal_dimensions)
 	parameter_dimension = sum(parameter_dimensions)
 	equality_dimension = length(equality_constraint(dummy_primals, dummy_parameters))
-	inequality_dimension = 0
+	inequality_dimension = length(inequality_constraint(dummy_primals, dummy_parameters))
 
 	function build_social_problem()
 		@timeit TO "ParametricOptimizationProblem construction" begin
@@ -304,9 +422,10 @@ function demo(;
 	compute_warmstart = true # Whether to compute a warmstart trajectory via rollout (true) or load from file (false)
 
 	# ── Problem parameters ─────────────────────────────────────────────────────
-	num_players         = 2
-	planning_horizon    = 30
-	collision_avoidance = 1.5
+	num_players         = 3
+	planning_horizon    = 20
+	collision_avoidance = 2.0
+	child_initial_buffer = 2.5
 	speed_limit         = 2.0
 	num_instances       = 1
 	perturbation_scale  = 0.3
@@ -323,12 +442,23 @@ function demo(;
 	base_initial_state2 = [ 1.0,  6.0, 0.0]
 	goal_position1      = [-1.0, -5.0, 5.0]
 	goal_position2      = [ 1.0, -5.0, 5.0]
+	# Player 3 is a curious child/pet on the ground. Its initial and nominal goal
+	# are derived from the robot centerline below, so the proof-of-concept stays
+	# tied to the current delivery path instead of hard-coding an unrelated point.
+	base_initial_state3, goal_position3 = choose_child_initial_and_goal(
+		base_initial_state1,
+		base_initial_state2,
+		goal_position1,
+		goal_position2,
+		collision_avoidance,
+		child_initial_buffer = child_initial_buffer,
+	)
 	obstacle_position   = [0.25, 0.15, 0.0]   # placeholder
 
 	# ── Build dynamics and problem ─────────────────────────────────────────────
 	state_dimension   = 3
 	control_dimension = 3
-	Δt               = 0.1
+	Δt                = 0.1
 	control_bounds    = (; lb = [-10.0, -10.0, -10.0], ub = [10.0, 10.0, 10.0])
 
 	dynamics = @timeit TO "dynamics construction" build_dynamics(dynamics_model; Δt, state_dimension, control_dimension)
@@ -389,8 +519,8 @@ function demo(;
 	function solve_game_instance(θ; z₀, ϵ₀, max_inner_iters)
 		options = @timeit TO "solver options construction" if solver isa ReducedGOOP.InteriorPoint
 			ReducedGOOP.InteriorPointOptions(;
-				tol = 1e-3, #1e-4
-				η₀ = 1e-5, # 5e-5, 0.0 to turn off Tikhonov
+				tol = 1e-2, #1e-4
+				η₀ = 5e-5, # 5e-5, 0.0 to turn off Tikhonov
 				ϵ₀,
 				max_inner_iters,
 				max_outer_iters = 1,
@@ -534,6 +664,14 @@ function demo(;
 		else
 			(copy(base_initial_state1), copy(base_initial_state2))
 		end
+		initial_state3, goal_position3 = choose_child_initial_and_goal(
+			initial_state1,
+			initial_state2,
+			goal_position1,
+			goal_position2,
+			collision_avoidance,
+			child_initial_buffer = child_initial_buffer,
+		)
 
 		println(
 			"solved $(solved_attempts)/$(num_instances), attempt $(total_attempts), goop version $(goop_version): ",
@@ -542,13 +680,17 @@ function demo(;
 		println("goal_position1:", goal_position1)
 		println("initial_state2:", initial_state2)
 		println("goal_position2:", goal_position2)
+		println("initial_state3:", initial_state3)
+		println("goal_position3:", goal_position3)
 
-		(; θ1, θ2, θ) = @timeit TO "instance parameter construction" build_instance_parameters(
+		(; θ1, θ2, θ3, θ) = @timeit TO "instance parameter construction" build_instance_parameters(
 				flatten_parameters,
 				initial_state1,
 				initial_state2,
+				initial_state3,
 				goal_position1,
 				goal_position2,
+				goal_position3,
 				obstacle_position,
 			)
 
@@ -557,7 +699,9 @@ function demo(;
 				planning_horizon,
 				dynamics,
 				initial_state1,
-				initial_state2;
+				initial_state2,
+				initial_state3,
+				goal_position3;
 				speed_limit,
 			)
 		else
@@ -578,8 +722,12 @@ function demo(;
 				lane_width,
 				θ1,
 				θ2,
+				θ3,
 				goal_position1,
 				goal_position2,
+				goal_position3,
+				collision_avoidance,
+				dₚ,
 				speed_limit,
 				control_bounds,
 			)
@@ -649,6 +797,8 @@ function demo(;
 				"goal_position1" => goal_position1,
 				"initial_state2" => initial_state2,
 				"goal_position2" => goal_position2,
+				"initial_state3" => initial_state3,
+				"goal_position3" => goal_position3,
 				"total_solve_time_sec" => instance_total_solve_time_sec,
 			),
 		)
@@ -685,13 +835,17 @@ function demo(;
 					strategy = result.strategies,
 					θ1,
 					θ2,
+					θ3,
 					goal_position1,
 					goal_position2,
+					goal_position3,
+					collision_avoidance,
 				)
 				speed_fig, _ = speed_plot(;
 					strategy = result.strategies,
 					speed_limit = speed_limit,
 					dynamics_model,
+					speed_limit_players = 1:num_players,
 				)
 				control_fig, _ = control_plot(;
 					strategy = result.strategies,
@@ -700,6 +854,7 @@ function demo(;
 				)
 				distance_fig, _ = inter_player_distance_plot(;
 					strategy = result.strategies,
+					reference_distance = dₚ,
 				)
 
 				CairoMakie.save(
@@ -738,8 +893,11 @@ function demo(;
 						strategy = result.strategies,
 						θ1,
 						θ2,
+						θ3,
 						goal_position1,
 						goal_position2,
+						goal_position3,
+						collision_avoidance,
 					)
 				end
 			end
@@ -763,6 +921,9 @@ function demo(;
 				"epsilon_schedule" => epsilon_schedule,
 				"max_inner_iters_schedule" => max_inner_iters_schedule,
 				"speed_limit" => speed_limit,
+				"collision_avoidance" => collision_avoidance,
+				"child_initial_buffer" => child_initial_buffer,
+				"dₚ" => dₚ,
 				"perturbation_scale" => perturbation_scale,
 			),
 		)
@@ -787,8 +948,12 @@ function save_warmstart_visualizations(
 	lane_width,
 	θ1,
 	θ2,
+	θ3,
 	goal_position1,
 	goal_position2,
+	goal_position3,
+	collision_avoidance,
+	dₚ,
 	speed_limit,
 	control_bounds,
 )
@@ -806,14 +971,18 @@ function save_warmstart_visualizations(
 		strategy = warmstart_strategies,
 		θ1,
 		θ2,
+		θ3,
 		goal_position1,
 		goal_position2,
+		goal_position3,
+		collision_avoidance,
 	)
 	warmstart_speed_fig, _ = speed_plot(
 		;
 		strategy = warmstart_strategies,
 		speed_limit = speed_limit,
 		dynamics_model = dynamics.model,
+		speed_limit_players = 1:num_players,
 	)
 	warmstart_control_fig, _ = control_plot(
 		;
@@ -824,6 +993,7 @@ function save_warmstart_visualizations(
 	warmstart_distance_fig, _ = inter_player_distance_plot(
 		;
 		strategy = warmstart_strategies,
+		reference_distance = dₚ,
 	)
 
 	CairoMakie.save(
@@ -950,12 +1120,56 @@ function evaluate_preferences_at_solution(problem, x, θ)
 	end
 end
 
-function build_instance_parameters(
-	flatten_parameters,
+function planar_distance(a, b)
+	sqrt((a[1] - b[1])^2 + (a[2] - b[2])^2)
+end
+
+function choose_child_initial_and_goal(
 	initial_state1,
 	initial_state2,
 	goal_position1,
 	goal_position2,
+	collision_avoidance,
+	;
+	child_initial_buffer = 1.2,
+)
+	start_center = 0.5 .* (initial_state1 .+ initial_state2)
+	goal_center = 0.5 .* (goal_position1 .+ goal_position2)
+	path_xy = goal_center[1:2] .- start_center[1:2]
+	path_norm = sqrt(sum(abs2, path_xy))
+	path_norm > 0 || error("Cannot place child for a degenerate robot delivery path.")
+
+	# Put the child on the side of the nominal pot path, then aim its nominal
+	# ground-level warm start toward the delivery corridor. This starts outside
+	# the initial safety radius while naturally intercepting the robots' route.
+	side_xy = [path_xy[2], -path_xy[1]] ./ path_norm
+	initial_offset = collision_avoidance + child_initial_buffer
+	goal_offset = 0.25 * collision_avoidance
+
+	child_initial_xy = start_center[1:2] .+ 0.35 .* path_xy .+ initial_offset .* side_xy
+	child_goal_xy = start_center[1:2] .+ 0.80 .* path_xy .+ goal_offset .* side_xy
+	child_initial = [child_initial_xy[1], child_initial_xy[2], 0.0]
+	child_goal = [child_goal_xy[1], child_goal_xy[2], 0.0]
+
+	initial_clearance = min(
+		planar_distance(child_initial, initial_state1),
+		planar_distance(child_initial, initial_state2),
+	)
+	if initial_clearance <= collision_avoidance
+		child_initial[1:2] .+= (collision_avoidance - initial_clearance + 0.5) .* side_xy
+	end
+
+	(child_initial, child_goal)
+end
+
+function build_instance_parameters(
+	flatten_parameters,
+	initial_state1,
+	initial_state2,
+	initial_state3,
+	goal_position1,
+	goal_position2,
+	goal_position3,
 	obstacle_position,
 )
 	θ1 = flatten_parameters(;
@@ -968,28 +1182,42 @@ function build_instance_parameters(
 		goal_position = goal_position2,
 		obstacle_position = obstacle_position,
 	)
-	(; θ1, θ2, θ = [θ1..., θ2...])
+	θ3 = flatten_parameters(;
+		initial_state = initial_state3,
+		goal_position = goal_position3,
+		obstacle_position = obstacle_position,
+	)
+	(; θ1, θ2, θ3, θ = [θ1..., θ2..., θ3...])
 end
 
 function build_default_warmstart(
 	planning_horizon,
 	dynamics,
 	initial_state1,
-	initial_state2;
+	initial_state2,
+	initial_state3,
+	goal_position3;
 	speed_limit = 1.5,
 )
 	player1_warmstart = build_constant_control_warmstart(
 		planning_horizon,
 		dynamics,
 		initial_state1,
-		[0.0, 0.0, 0.5],
+		[0.0, -1.0, 1.0],
 	)
 
 	player2_warmstart = build_constant_control_warmstart(
 		planning_horizon,
 		dynamics,
 		initial_state2,
-		[0.0, 0.0, 0.5],
+		[0.0, -1.0, 1.0],
+	)
+
+	player3_warmstart = build_ground_line_warmstart(
+		planning_horizon,
+		dynamics,
+		initial_state3,
+		goal_position3,
 	)
 
 	# player2_vx_profile = fill(0.0, planning_horizon)
@@ -1004,8 +1232,8 @@ function build_default_warmstart(
 
 	warmstart_solution = flatten_warmstart_solution(
 		planning_horizon,
-		[player1_warmstart.xs, player2_warmstart.xs],
-		[player1_warmstart.us, player2_warmstart.us],
+		[player1_warmstart.xs, player2_warmstart.xs, player3_warmstart.xs],
+		[player1_warmstart.us, player2_warmstart.us, player3_warmstart.us],
 	)
 	(; warmstart_solution)
 end
@@ -1027,6 +1255,26 @@ function build_constant_control_warmstart(planning_horizon, dynamics, initial_st
 	us = [collect(constant_control)]
 	for t in 1:(planning_horizon-1)
 		push!(xs, dynamics.step(xs[t], us[1], t))
+		push!(us, copy(us[1]))
+	end
+	us[end] = zeros(dynamics.control_dimension)
+	(; xs, us)
+end
+
+function build_ground_line_warmstart(planning_horizon, dynamics, initial_state, goal_position)
+	length(initial_state) == dynamics.state_dimension || error("Initial state dimension mismatch.")
+	length(goal_position) == dynamics.state_dimension || error("Goal position dimension mismatch.")
+	planning_horizon >= 2 || error("Ground-line warm start requires at least two time steps.")
+
+	total_time = dynamics.Δt * (planning_horizon - 1)
+	constant_control = (goal_position .- initial_state) ./ total_time
+	constant_control[3] = 0.0
+
+	xs = [collect(initial_state)]
+	us = [collect(constant_control)]
+	for t in 1:(planning_horizon-1)
+		push!(xs, dynamics.step(xs[t], us[1], t))
+		xs[end][3] = 0.0
 		push!(us, copy(us[1]))
 	end
 	us[end] = zeros(dynamics.control_dimension)
