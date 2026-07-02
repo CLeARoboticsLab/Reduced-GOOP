@@ -80,8 +80,27 @@ function get_setup(
 		function (z, θ)
 			(; xs, us) = trajectory(z; player)
 			(; goal_position) = unflatten_parameters(θ[Block(player)])
-			goal_deviation = xs[end][1:position_dimension] .- goal_position
+			goal_deviation = xs[end] .- goal_position
 			sum(goal_deviation .^ 2)
+		end
+	end
+
+	function control_objective(; player)
+		function (z, _)
+			(; xs, us) = trajectory(z; player)
+			sum(sum(u .^ 2) for u in us)
+		end
+	end
+
+	function control_bound_inequality(; player)
+		function (z, _)
+			(; lb, ub) = control_bounds
+			lb_mask = findall(!isinf, lb)
+			ub_mask = findall(!isinf, ub)
+			(; xs, us) = trajectory(z; player)
+			mapreduce(vcat, us) do u
+				vcat(u[lb_mask] - lb[lb_mask], ub[ub_mask] - u[ub_mask])
+			end
 		end
 	end
 
@@ -91,17 +110,19 @@ function get_setup(
 			lb_mask = findall(!isinf, lb)
 			ub_mask = findall(!isinf, ub)
 			(; xs, us) = trajectory(z; player = i)
-			(; initial_state) = unflatten_parameters(θ[Block(i)])
+			(; initial_state, goal_position) = unflatten_parameters(θ[Block(i)])
 
 			initial_state_constraint = xs[1] - initial_state
 			dynamics_constraints = mapreduce(vcat, 1:(length(xs)-1)) do t
 				# xs[t] - dynamics(xs[t-1], us[t-1], t)
 				dynamics.residual(z[Block(i)], t)
 			end
+			terminal_state_constraint = xs[end][position_dimension] - goal_position[position_dimension]
 
 			vcat(
 				initial_state_constraint,
 				dynamics_constraints,
+				terminal_state_constraint
 			)
 		end for i in 1:num_players
 	]
@@ -142,8 +163,8 @@ function get_setup(
 
 	preferences = [
 		[
-			# Minimize control effort 
-			# control_objective(; player = 2),
+			# Control bound
+			# control_bound_inequality(; player = 1),
 
 			# Reach the goal
 			goal_objective(; player = 1),
@@ -152,8 +173,8 @@ function get_setup(
 			load_balance_objective,
 		],
 		[
-			# Minimize control effort
-			# control_objective(; player = 2),
+			# Control bound
+			# control_bound_inequality(; player = 2),
 
 			# Reach the goal
 			goal_objective(; player = 2),
@@ -284,7 +305,7 @@ function demo(;
 
 	# ── Problem parameters ─────────────────────────────────────────────────────
 	num_players         = 2
-	planning_horizon    = 5
+	planning_horizon    = 30
 	collision_avoidance = 1.5
 	speed_limit         = 2.0
 	num_instances       = 1
@@ -298,10 +319,10 @@ function demo(;
 
 	# ── Scenario ───────────────────────────────────────────────────────────────
 	# Single Integrator 3D: state = [px, py, pz]
-	base_initial_state1 = [-1.0, 6.0, 0.0]
-	base_initial_state2 = [ 1.0, 6.0, 0.0]
-	goal_position1      = [5.0, -5.0, 5.0]
-	goal_position2      = [5.0, -7.0, 5.0]
+	base_initial_state1 = [-1.0,  6.0, 0.0]
+	base_initial_state2 = [ 1.0,  6.0, 0.0]
+	goal_position1      = [-1.0, -5.0, 5.0]
+	goal_position2      = [ 1.0, -5.0, 5.0]
 	obstacle_position   = [0.25, 0.15, 0.0]   # placeholder
 
 	# ── Build dynamics and problem ─────────────────────────────────────────────
@@ -369,7 +390,7 @@ function demo(;
 		options = @timeit TO "solver options construction" if solver isa ReducedGOOP.InteriorPoint
 			ReducedGOOP.InteriorPointOptions(;
 				tol = 1e-3, #1e-4
-				η₀ = 5e-5, # 5e-5, 0.0 to turn off Tikhonov
+				η₀ = 1e-5, # 5e-5, 0.0 to turn off Tikhonov
 				ϵ₀,
 				max_inner_iters,
 				max_outer_iters = 1,

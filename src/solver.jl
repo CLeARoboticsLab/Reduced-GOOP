@@ -288,7 +288,7 @@ function solve(
 					Fᵣ = Uᵣ * (Uᵣ' * F)
 					F_perp = F - Fᵣ
 					# Compute newton step using Fᵣ
-					use_range_step = (kkt_error < 1e-1) && (norm(F_perp, 2) / norm(F, 2)) > 0.3
+					use_range_step = (kkt_error < 1e-3) && (norm(F_perp, 2) / norm(F, 2)) > 0.3
 				end
 				verbose && printstyled("|F_perp|| / ||F|| = $(norm(F_perp, 2) / F_z)\n", color = :green) # large is > 0.3
 				if use_range_step
