@@ -236,13 +236,14 @@ function get_setup(
 	]
 
 	# Load balance objective
-	function load_balance_objective(z, θ)
+	function load_balance_objective(z, θ; allowance = 0.01)
 		(; xs, us) = trajectory(z; player = 1)
 		xs1 = copy(xs)
 		(; xs, us) = trajectory(z; player = 2)
 		xs2 = copy(xs)
 		sum(eachindex(xs1)) do t
-    		(xs1[t][position_dimension] - xs2[t][position_dimension])^2
+    		balance = (xs1[t][position_dimension] - xs2[t][position_dimension])^2
+			ifelse(balance < allowance^2, 0.0, balance - allowance^2)
 		end
 	end
 
@@ -274,25 +275,26 @@ function get_setup(
 			# control_objective(; player = 1),
 			goal_objective(; player = 1),
 			load_balance_objective,
-			negative_pot_approach_objective,
-			robot_arm_speed_inequality(; player = 1)
+			# negative_pot_approach_objective,
+			robot_child_safety_inequality(; player = 1)
 		],
 		[
 			# control_objective(; player = 2),
 			# goal_objective(; player = 2),
 			goal_objective(; player = 2),
 			load_balance_objective,
-			negative_pot_approach_objective,
-			robot_arm_speed_inequality(; player = 2)
+			# negative_pot_approach_objective,
+			robot_child_safety_inequality(; player = 2)
 		],
 		[
 			pot_approach_objective,
-			child_ground_speed_inequality
+			# negative_load_balance_objective,
+			# child_ground_speed_inequality
 		],
 	]
 
 	# Preference hierarchy: [lowest priority, ..., highest priority]
-	is_prioritized_constraint = [[false, false, false, true], [false,false, false, true], [false, true]]
+	is_prioritized_constraint = [[false, false, true], [false, false, true], [false]]
 
 	function build_goop_problem()
 		@timeit TO "ParametricGOOP construction" begin
@@ -409,7 +411,7 @@ function demo(;
 	@timeit TO "experiment setup" Random.seed!(rng_seed)
 
 	# ── Settings ───────────────────────────────────────────────────────────────
-	run_id = "Robotic_arm"
+	run_id = "Robotic_arm_test"
 	dynamics_model = Robotic_arm.SingleIntegrator3D()
 	goop_version = :reduced               # :complete | :reduced | :quasi
 	solver = ReducedGOOP.InteriorPoint() # ReducedGOOP.InteriorPoint() | ReducedGOOP.PATHSolver()
@@ -418,7 +420,7 @@ function demo(;
 
 	# ── Problem parameters ─────────────────────────────────────────────────────
 	num_players          = 3
-	planning_horizon     = 20
+	planning_horizon     = 10
 	collision_avoidance  = 2.0
 	child_initial_buffer = 4.0
 	arm_speed_limit		 = 3.0
@@ -507,8 +509,8 @@ function demo(;
 	function solve_game_instance(θ; z₀, ϵ₀, max_inner_iters)
 		options = @timeit TO "solver options construction" if solver isa ReducedGOOP.InteriorPoint
 			ReducedGOOP.InteriorPointOptions(;
-				tol = 1e-2, #1e-4
-				η₀ = 5e-5, # 5e-5, 0.0 to turn off Tikhonov
+				tol = 4e-2, #1e-4
+				η₀ = 2e-5, # 5e-5, 0.0 to turn off Tikhonov
 				ϵ₀,
 				max_inner_iters,
 				max_outer_iters = 1,
