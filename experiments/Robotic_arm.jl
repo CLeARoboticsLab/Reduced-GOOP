@@ -25,7 +25,8 @@ function get_setup(
 	planning_horizon = 10,
 	dₚ = 2.0,
 	collision_avoidance = 1.0,
-	speed_limit = 1.5,
+	arm_speed_limit = 3.0,
+	child_speed_limit = 1.5,
 	map_end = 10,
 	lane_width = 2,
 	use_scalarized_baseline = false,
@@ -200,7 +201,7 @@ function get_setup(
 			(; us) = trajectory(z; player)
 
 			mapreduce(vcat, us) do u
-				[speed_limit^2 - sum(abs2, u[1:position_dimension])]
+				[arm_speed_limit^2 - sum(abs2, u[1:position_dimension])]
 			end
 		end
 	end
@@ -224,7 +225,7 @@ function get_setup(
 		# safety constraints remain robot-only; Player 3 is merely limited to a
 		# plausible ground speed so it cannot teleport into the pot center.
 		mapreduce(vcat, us) do u
-			[(speed_limit/2)^2 - sum(abs2, u[1:2])]
+			[(child_speed_limit)^2 - sum(abs2, u[1:2])]
 		end
 	end
 
@@ -264,28 +265,34 @@ function get_setup(
 			sum(abs2, xs3[t] .- pot_center)
 		end
 	end
+	function negative_pot_approach_objective(z, θ)
+		-pot_approach_objective(z, θ)
+	end
 
 	preferences = [
 		[
 			# control_objective(; player = 1),
 			goal_objective(; player = 1),
 			load_balance_objective,
-			# goal_objective(; player = 1),
+			negative_pot_approach_objective,
+			robot_arm_speed_inequality(; player = 1)
 		],
 		[
 			# control_objective(; player = 2),
 			# goal_objective(; player = 2),
-			load_balance_objective,
 			goal_objective(; player = 2),
+			load_balance_objective,
+			negative_pot_approach_objective,
+			robot_arm_speed_inequality(; player = 2)
 		],
 		[
-			negative_load_balance_objective,
 			pot_approach_objective,
+			child_ground_speed_inequality
 		],
 	]
 
 	# Preference hierarchy: [lowest priority, ..., highest priority]
-	is_prioritized_constraint = [[false, false], [false, false], [false, false]]
+	is_prioritized_constraint = [[false, false, false, true], [false,false, false, true], [false, true]]
 
 	function build_goop_problem()
 		@timeit TO "ParametricGOOP construction" begin
@@ -295,7 +302,7 @@ function get_setup(
 				preferences = use_scalarized_baseline ? scalarized_preferences : preferences,
 				is_prioritized_constraint = use_scalarized_baseline ? scalarized_is_prioritized_constraint : is_prioritized_constraint,
 				equality_constraints,
-				inequality_constraints,
+				inequality_constraints = [nothing, nothing, nothing],
 				shared_equality_constraint = nothing,
 				shared_inequality_constraint = nothing,
 			)
@@ -414,7 +421,8 @@ function demo(;
 	planning_horizon     = 20
 	collision_avoidance  = 2.0
 	child_initial_buffer = 4.0
-	speed_limit          = 3.0
+	arm_speed_limit		 = 3.0
+	child_speed_limit    = 1.0
 	num_instances        = 1
 	perturbation_scale   = 0.3
 	dₚ                   = 2.0
@@ -450,7 +458,8 @@ function demo(;
 			planning_horizon,
 			dₚ,
 			collision_avoidance,
-			speed_limit,
+			arm_speed_limit,
+			child_speed_limit,
 			map_end,
 			lane_width,
 			use_scalarized_baseline,
@@ -600,6 +609,8 @@ function demo(;
 			"kkt_error_history" => kkt_error_history,
 			"condition_number_history" => condition_number_history,
 			"eta_history" => eta_history,
+			"arm_speed_limit" => arm_speed_limit,
+			"child_speed_limit" => child_speed_limit,
 		)
 
 		(; strategies, solution_dict)
@@ -681,7 +692,8 @@ function demo(;
 				initial_state2,
 				initial_state3,
 				goal_position3;
-				speed_limit,
+				arm_speed_limit,
+				child_speed_limit,
 			)
 		else
 			(;
@@ -707,7 +719,8 @@ function demo(;
 				goal_position3,
 				collision_avoidance,
 				dₚ,
-				speed_limit,
+				arm_speed_limit,
+				child_speed_limit,
 				control_bounds,
 			)
 		end
@@ -778,6 +791,8 @@ function demo(;
 				"goal_position2" => goal_position2,
 				"initial_state3" => initial_state3,
 				"goal_position3" => goal_position3,
+				"arm_speed_limit" => arm_speed_limit,
+				"child_speed_limit" => child_speed_limit,
 				"total_solve_time_sec" => instance_total_solve_time_sec,
 			),
 		)
@@ -822,9 +837,10 @@ function demo(;
 				)
 				speed_fig, _ = speed_plot(;
 					strategy = result.strategies,
-					speed_limit = speed_limit,
+					speed_limit = arm_speed_limit,
 					dynamics_model,
-					speed_limit_players = 1:num_players,
+					speed_limit_players = 1:2,
+					additional_speed_limits = [(; limit = child_speed_limit, players = 3)],
 				)
 				control_fig, _ = control_plot(;
 					strategy = result.strategies,
@@ -906,7 +922,8 @@ function demo(;
 				"show_interactive_trajectory" => show_interactive_trajectory,
 				"epsilon_schedule" => epsilon_schedule,
 				"max_inner_iters_schedule" => max_inner_iters_schedule,
-				"speed_limit" => speed_limit,
+				"arm_speed_limit" => arm_speed_limit,
+				"child_speed_limit" => child_speed_limit,
 				"collision_avoidance" => collision_avoidance,
 				"child_initial_buffer" => child_initial_buffer,
 				"dₚ" => dₚ,
@@ -940,7 +957,8 @@ function save_warmstart_visualizations(
 	goal_position3,
 	collision_avoidance,
 	dₚ,
-	speed_limit,
+	arm_speed_limit,
+	child_speed_limit,
 	control_bounds,
 )
 	warmstart_strategies = extract_player_strategies(
@@ -966,9 +984,10 @@ function save_warmstart_visualizations(
 	warmstart_speed_fig, _ = speed_plot(
 		;
 		strategy = warmstart_strategies,
-		speed_limit = speed_limit,
+		speed_limit = arm_speed_limit,
 		dynamics_model = dynamics.model,
-		speed_limit_players = 1:num_players,
+		speed_limit_players = 1:2,
+		additional_speed_limits = [(; limit = child_speed_limit, players = 3)],
 	)
 	warmstart_control_fig, _ = control_plot(
 		;
@@ -1176,6 +1195,16 @@ function build_instance_parameters(
 	(; θ1, θ2, θ3, θ = [θ1..., θ2..., θ3...])
 end
 
+function limit_control_speed(control, speed_limit, speed_indices)
+	speed_limit >= 0 || error("Speed limit must be nonnegative.")
+	bounded_control = collect(control)
+	control_speed = sqrt(sum(abs2, bounded_control[speed_indices]))
+	if control_speed > speed_limit && control_speed > 0
+		bounded_control[speed_indices] .= bounded_control[speed_indices] .* (speed_limit / control_speed)
+	end
+	bounded_control
+end
+
 function build_default_warmstart(
 	planning_horizon,
 	dynamics,
@@ -1183,31 +1212,38 @@ function build_default_warmstart(
 	initial_state2,
 	initial_state3,
 	goal_position3;
-	speed_limit = 1.5,
+	arm_speed_limit = 3.0,
+	child_speed_limit = 1.5,
 )
+	robot_warmstart_control = limit_control_speed(
+		[0.0, -1.0, 1.0],
+		arm_speed_limit,
+		1:dynamics.control_dimension,
+	)
 	player1_warmstart = build_constant_control_warmstart(
 		planning_horizon,
 		dynamics,
 		initial_state1,
-		[0.0, -1.0, 1.0],
+		robot_warmstart_control,
 	)
 
 	player2_warmstart = build_constant_control_warmstart(
 		planning_horizon,
 		dynamics,
 		initial_state2,
-		[0.0, -1.0, 1.0],
+		robot_warmstart_control,
 	)
 
 	player3_warmstart = build_ground_line_warmstart(
 		planning_horizon,
 		dynamics,
 		initial_state3,
-		goal_position3,
+		goal_position3;
+		ground_speed_limit = child_speed_limit,
 	)
 
 	# player2_vx_profile = fill(0.0, planning_horizon)
-	# player2_vy_profile = vcat(1.0, fill(speed_limit, planning_horizon - 1))
+	# player2_vy_profile = vcat(1.0, fill(arm_speed_limit, planning_horizon - 1))
 	# player2_warmstart = build_planar_di_speed_profile_warmstart(
 	# 	planning_horizon,
 	# 	dynamics,
@@ -1247,7 +1283,13 @@ function build_constant_control_warmstart(planning_horizon, dynamics, initial_st
 	(; xs, us)
 end
 
-function build_ground_line_warmstart(planning_horizon, dynamics, initial_state, goal_position)
+function build_ground_line_warmstart(
+	planning_horizon,
+	dynamics,
+	initial_state,
+	goal_position;
+	ground_speed_limit = Inf,
+)
 	length(initial_state) == dynamics.state_dimension || error("Initial state dimension mismatch.")
 	length(goal_position) == dynamics.state_dimension || error("Goal position dimension mismatch.")
 	planning_horizon >= 2 || error("Ground-line warm start requires at least two time steps.")
@@ -1255,6 +1297,7 @@ function build_ground_line_warmstart(planning_horizon, dynamics, initial_state, 
 	total_time = dynamics.Δt * (planning_horizon - 1)
 	constant_control = (goal_position .- initial_state) ./ total_time
 	constant_control[3] = 0.0
+	constant_control = limit_control_speed(constant_control, ground_speed_limit, 1:2)
 
 	xs = [collect(initial_state)]
 	us = [collect(constant_control)]

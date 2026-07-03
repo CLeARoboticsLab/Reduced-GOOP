@@ -261,11 +261,56 @@ function speed_limit_label(speed_limit, speed_limit_players)
 	"$(player_text) Speed Limit [$(speed_limit) m/s]"
 end
 
+function _additional_speed_limit_spec(spec, spec_idx)
+	default_colors = (:gray35, :gray55, :gray70)
+	default_linestyles = (:dot, :dashdot, :dashdotdot)
+	default_color = default_colors[mod1(spec_idx, length(default_colors))]
+	default_linestyle = default_linestyles[mod1(spec_idx, length(default_linestyles))]
+
+	if spec isa NamedTuple
+		limit = haskey(spec, :limit) ? spec.limit :
+			haskey(spec, :speed_limit) ? spec.speed_limit :
+			error("Additional speed limit specs require a `limit` or `speed_limit` field.")
+		players = haskey(spec, :players) ? spec.players :
+			haskey(spec, :speed_limit_players) ? spec.speed_limit_players :
+			nothing
+		color = haskey(spec, :color) ? spec.color : default_color
+		linestyle = haskey(spec, :linestyle) ? spec.linestyle : default_linestyle
+		return (; limit, players, color, linestyle)
+	elseif spec isa Pair
+		return (; limit = first(spec), players = last(spec), color = default_color, linestyle = default_linestyle)
+	elseif spec isa Tuple && length(spec) == 2
+		return (; limit = spec[1], players = spec[2], color = default_color, linestyle = default_linestyle)
+	end
+
+	error("Additional speed limit specs must be NamedTuples, Pairs, or `(limit, players)` tuples.")
+end
+
+function speed_limit_specs(speed_limit, speed_limit_players, additional_speed_limits)
+	specs = Any[]
+	if !isnothing(speed_limit)
+		push!(
+			specs,
+			(;
+				limit = speed_limit,
+				players = speed_limit_players,
+				color = :black,
+				linestyle = :dash,
+			),
+		)
+	end
+	for (spec_idx, spec) in enumerate(additional_speed_limits)
+		push!(specs, _additional_speed_limit_spec(spec, spec_idx))
+	end
+	specs
+end
+
 function speed_plot(;
 	strategy,
 	speed_limit = 1.5,
 	dynamics_model = PlanarDoubleIntegrator(),
 	speed_limit_players = nothing,
+	additional_speed_limits = (),
 )
 	if length(strategy) < 2
 		error("speed_plot expects strategies for at least two players.")
@@ -283,6 +328,7 @@ function speed_plot(;
 
 	horizon_steps = 0:(trajectory_len-1)
 	speed_limit_profile = fill(speed_limit, trajectory_len)
+	limit_specs = speed_limit_specs(speed_limit, speed_limit_players, additional_speed_limits)
 
 	figure = serif_figure(size = (1000, 650))
 	model = dynamics_model isa NamedTuple ? dynamics_model.model : dynamics_model
@@ -330,19 +376,25 @@ function speed_plot(;
 			push!(player_handles, player_handle)
 			push!(player_labels, "Player $(player)")
 		end
-		speed_limit_line = CairoMakie.lines!(
-			ax,
-			horizon_steps,
-			speed_limit_profile;
-			color = :black,
-			linestyle = :dash,
-			label = speed_limit_label(speed_limit, speed_limit_players),
-			linewidth = 2,
-		)
+		speed_limit_handles = Any[]
+		speed_limit_labels = String[]
+		for spec in limit_specs
+			speed_limit_line = CairoMakie.lines!(
+				ax,
+				horizon_steps,
+				fill(spec.limit, length(horizon_steps));
+				color = spec.color,
+				linestyle = spec.linestyle,
+				label = speed_limit_label(spec.limit, spec.players),
+				linewidth = 2,
+			)
+			push!(speed_limit_handles, speed_limit_line)
+			push!(speed_limit_labels, speed_limit_label(spec.limit, spec.players))
+		end
 		CairoMakie.Legend(
 			figure[1, 2],
-			vcat(player_handles, Any[speed_limit_line]),
-			vcat(player_labels, [speed_limit_label(speed_limit, speed_limit_players)]);
+			vcat(player_handles, speed_limit_handles),
+			vcat(player_labels, speed_limit_labels);
 			framevisible = false,
 			labelsize = legend_label_fontsize,
 			orientation = :vertical,
