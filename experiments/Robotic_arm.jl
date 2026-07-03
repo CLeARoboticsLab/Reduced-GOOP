@@ -425,6 +425,18 @@ function demo(;
 	epsilon_schedule         = [0.1]
 	max_inner_iters_schedule = fill(1000, length(epsilon_schedule))
 
+	# ── Cache paths ───────────────────────────────────────────────────────────
+	root_path           = joinpath(@__DIR__, "data", run_id)
+	kkt_cache_file      = joinpath(root_path, "cache_kkt_system.jld2")
+	solution_cache_file = joinpath(root_path, "cache_solution.jld2")
+
+	# Disable plotting, saving, and interactive trajectory if cache exists
+	if isfile(kkt_cache_file)
+		plot = false
+		save = false
+		show_interactive_trajectory = false
+	end
+
 	# ── Scenario ───────────────────────────────────────────────────────────────
 	# Single Integrator 3D: state = [px, py, pz]
 	base_initial_state1 = [-1.0,  6.0, 0.0]
@@ -477,10 +489,15 @@ function demo(;
 	@info "Building KKT system for $(goop_version) GOOP formulation and $(solver) solver..."
 	# Check if problem is not an instance of GOOPKKTSystem. Otherwise, build GOOPKKTSystem.
 	GOOP_kkt_system = @timeit TO "KKT construction" begin
-		if problem isa ReducedGOOP.GOOPKKTSystem
+		if isfile(kkt_cache_file)
+			@info "Loading cached KKT system from $(kkt_cache_file)"
+			JLD2.load_object(kkt_cache_file)
+		elseif problem isa ReducedGOOP.GOOPKKTSystem
 			problem
 		else
-			GOOP_kkt_generator(problem)
+			kkt = GOOP_kkt_generator(problem)
+			JLD2.save_object(kkt_cache_file, kkt)
+			kkt
 		end
 	end
 
@@ -617,7 +634,7 @@ function demo(;
 		control_plots_dir,
 		distance_plots_dir,
 		warmstart_plots_dir,
-	) = @timeit TO "output directory setup" prepare_robotic_arm_output_dirs(run_id; debug)
+	) = @timeit TO "output directory setup" prepare_robotic_arm_output_dirs(root_path; debug)
 
 	# ── Main solve loop ────────────────────────────────────────────────────────
 	instance_problem_data = Dict{String, Any}[]
@@ -724,7 +741,16 @@ function demo(;
 
 		for (ϵ₀, max_inner_iters) in zip(epsilon_schedule, max_inner_iters_schedule)
 			result = try
-				solve_game_instance(θ; z₀ = stage_warmstart, ϵ₀, max_inner_iters)
+				if isfile(solution_cache_file)
+					@info "Loading cached solution from $(solution_cache_file)"
+					cached_dict = JLD2.load_object(solution_cache_file)
+					cached_strategies = extract_player_strategies(cached_dict["x"], num_players, primal_dimension, dynamics)
+					(; strategies = cached_strategies, solution_dict = cached_dict)
+				else
+					r = solve_game_instance(θ; z₀ = stage_warmstart, ϵ₀, max_inner_iters)
+					isnothing(r) || JLD2.save_object(solution_cache_file, r.solution_dict)
+					r
+				end
 			catch err
 				rethrow(err)
 			end
@@ -1030,11 +1056,11 @@ function save_warmstart_visualizations(
 	)
 end
 
-function prepare_robotic_arm_output_dirs(run_id; debug)
+function prepare_robotic_arm_output_dirs(root_path; debug)
 	run_dir = if debug
-		joinpath("data", "robotic_arm_open_loop", "debug", run_id)
+		joinpath(root_path, "debug")
 	else
-		joinpath("data", "robotic_arm_open_loop", "runs", run_id)
+		joinpath(root_path, "runs")
 	end
 
 	data_dir              = joinpath(run_dir, "data")

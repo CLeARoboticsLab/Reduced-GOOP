@@ -11,7 +11,7 @@ To set up the Julia environment and run the ICRA experiments, follow these steps
 
 ```julia
 # pkg
-add Revise, Infiltrator, ProgressMeter, JLD2, Dates, BenchmarkTools, JuliaFormatter
+add Revise, Infiltrator, ProgressMeter, JLD2, Dates, BenchmarkTools, JuliaFormatter  # useful packages for development, only need to add once
 activate .; resolve; instantiate
 activate experiments/; resolve; instantiate
 # run
