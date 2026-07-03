@@ -388,9 +388,12 @@ end
 # ── Experiment entry point ─────────────────────────────────────────────────────
 
 function demo(;
+	planning_horizon = 20,
 	map_end = 10,
 	lane_width = 2,
 	verbose = false,
+	plot = false,
+	save = false,
 	rng_seed = 123,
 	random_initial_state = false,
 	debug = false,
@@ -411,14 +414,12 @@ function demo(;
 
 	# ── Problem parameters ─────────────────────────────────────────────────────
 	num_players          = 3
-	planning_horizon     = 20
 	collision_avoidance  = 2.0
 	child_initial_buffer = 4.0
 	speed_limit          = 3.0
 	num_instances        = 1
 	perturbation_scale   = 0.3
 	dₚ                   = 2.0
-
 
 	# ── Solver schedule ────────────────────────────────────────────────────────
 	epsilon_schedule         = [0.1]
@@ -623,6 +624,8 @@ function demo(;
 	solved_attempts       = 0
 	total_attempts        = 0
 
+	solution_dict = nothing
+
 	while solved_attempts < num_instances
 		total_attempts += 1
 		initial_state1, initial_state2 = if random_initial_state
@@ -688,28 +691,30 @@ function demo(;
 				warmstart_solution = load("experiments/solution_dict_instance_1_eps0.1.jld2")["single_stored_object"]["x"][1:(num_players*primal_dimension)],
 			)
 		end
-		@timeit TO "warmstart visualization" begin
-			save_warmstart_visualizations(
-				warmstart_solution,
-				warmstart_plots_dir,
-				total_attempts,
-				solved_attempts + 1,
-				num_players,
-				primal_dimension,
-				dynamics,
-				map_end,
-				lane_width,
-				θ1,
-				θ2,
-				θ3,
-				goal_position1,
-				goal_position2,
-				goal_position3,
-				collision_avoidance,
-				dₚ,
-				speed_limit,
-				control_bounds,
-			)
+		if plot
+			@timeit TO "warmstart visualization" begin
+				save_warmstart_visualizations(
+					warmstart_solution,
+					warmstart_plots_dir,
+					total_attempts,
+					solved_attempts + 1,
+					num_players,
+					primal_dimension,
+					dynamics,
+					map_end,
+					lane_width,
+					θ1,
+					θ2,
+					θ3,
+					goal_position1,
+					goal_position2,
+					goal_position3,
+					collision_avoidance,
+					dₚ,
+					speed_limit,
+					control_bounds,
+				)
+			end
 		end
 
 		epsilon_results = Pair{Float64, Any}[]
@@ -744,22 +749,24 @@ function demo(;
 
 		if !solve_sequence_succeeded
 			failed_instance_idx = solved_attempts + 1
-			for (ϵ₀, result) in epsilon_results
-				failed_suffix = "_attempt_$(total_attempts)_failed"
-				JLD2.save_object(
-					joinpath(
-						solution_data_dir,
-						"solution_dict_instance_$(failed_instance_idx)_eps$(ϵ₀)$(failed_suffix).jld2",
-					),
-					result.solution_dict,
-				)
-				save_convergence_diagnostics(
-					result.solution_dict,
-					convergence_plots_dir,
-					failed_instance_idx,
-					ϵ₀;
-					filename_suffix = failed_suffix,
-				)
+			if save
+				for (ϵ₀, result) in epsilon_results
+					failed_suffix = "_attempt_$(total_attempts)_failed"
+					JLD2.save_object(
+						joinpath(
+							solution_data_dir,
+							"solution_dict_instance_$(failed_instance_idx)_eps$(ϵ₀)$(failed_suffix).jld2",
+						),
+						result.solution_dict,
+					)
+					save_convergence_diagnostics(
+						result.solution_dict,
+						convergence_plots_dir,
+						failed_instance_idx,
+						ϵ₀;
+						filename_suffix = failed_suffix,
+					)
+				end
 			end
 			if !random_initial_state
 				println("solver failed for default initial states.")
@@ -788,136 +795,147 @@ function demo(;
 		)
 		println("instance $(solved_attempts) converged preference values by ϵ:")
 
-		@timeit TO "problem data save" begin
-			JLD2.save_object(
-				joinpath(problem_data_dir, "problem_data_instance_$(solved_attempts).jld2"),
-				instance_problem_data,
-			)
+		if save
+			@timeit TO "problem data save" begin
+				JLD2.save_object(
+					joinpath(problem_data_dir, "problem_data_instance_$(solved_attempts).jld2"),
+					instance_problem_data,
+				)
+			end
 		end
 
 		for (ϵ₀, result) in epsilon_results
 			solution_dict = result.solution_dict
+			
+			if save || plot
+				@timeit TO "solution output and plotting" begin
+					if save
+						JLD2.save_object(
+						joinpath(
+							solution_data_dir,
+							"solution_dict_instance_$(solved_attempts)_eps$(ϵ₀).jld2",
+							),
+							solution_dict,
+							)
+					end
+					if plot
+						trajectory_fig, _ = plot_single_integrator_3d_trajectories(
+							;
+							map_end,
+							lane_width,
+							strategy = result.strategies,
+							θ1,
+							θ2,
+							θ3,
+							goal_position1,
+							goal_position2,
+							goal_position3,
+							collision_avoidance,
+						)
+						speed_fig, _ = speed_plot(;
+							strategy = result.strategies,
+							speed_limit = speed_limit,
+							dynamics_model,
+							speed_limit_players = 1:num_players,
+						)
+						control_fig, _ = control_plot(;
+							strategy = result.strategies,
+							control_lb = control_bounds.lb,
+							control_ub = control_bounds.ub,
+						)
+						distance_fig, _ = inter_player_distance_plot(;
+							strategy = result.strategies,
+							reference_distance = dₚ,
+						)
 
-			@timeit TO "solution output and plotting" begin
-				JLD2.save_object(
-					joinpath(
-						solution_data_dir,
-						"solution_dict_instance_$(solved_attempts)_eps$(ϵ₀).jld2",
-					),
-					solution_dict,
-				)
-				save_convergence_diagnostics(solution_dict, convergence_plots_dir, solved_attempts, ϵ₀)
-				trajectory_fig, _ = plot_single_integrator_3d_trajectories(
-					;
-					map_end,
-					lane_width,
-					strategy = result.strategies,
-					θ1,
-					θ2,
-					θ3,
-					goal_position1,
-					goal_position2,
-					goal_position3,
-					collision_avoidance,
-				)
-				speed_fig, _ = speed_plot(;
-					strategy = result.strategies,
-					speed_limit = speed_limit,
-					dynamics_model,
-					speed_limit_players = 1:num_players,
-				)
-				control_fig, _ = control_plot(;
-					strategy = result.strategies,
-					control_lb = control_bounds.lb,
-					control_ub = control_bounds.ub,
-				)
-				distance_fig, _ = inter_player_distance_plot(;
-					strategy = result.strategies,
-					reference_distance = dₚ,
-				)
-
-				CairoMakie.save(
-					joinpath(
-						trajectory_plots_dir,
-						"trajectory_instance_$(solved_attempts)_eps$(ϵ₀).pdf",
-					),
-					trajectory_fig,
-				)
-				CairoMakie.save(
-					joinpath(
-						speed_plots_dir,
-						"speed_instance_$(solved_attempts)_eps$(ϵ₀).pdf",
-					),
-					speed_fig,
-				)
-				CairoMakie.save(
-					joinpath(
-						control_plots_dir,
-						"control_instance_$(solved_attempts)_eps$(ϵ₀).pdf",
-					),
-					control_fig,
-				)
-				CairoMakie.save(
-					joinpath(
-						distance_plots_dir,
-						"distance_instance_$(solved_attempts)_eps$(ϵ₀).pdf",
-					),
-					distance_fig,
-				)
-				if show_interactive_trajectory
-					interactive_trajectory_path = joinpath(
-						trajectory_plots_dir,
-						"trajectory_interactive_instance_$(solved_attempts)_eps$(ϵ₀).html",
-					)
-					plot_trajectory_3d_interactive(
-						;
-						map_end,
-						lane_width,
-						strategy = result.strategies,
-						θ1,
-						θ2,
-						θ3,
-						goal_position1,
-						goal_position2,
-						goal_position3,
-						collision_avoidance,
-						display_figure = false,
-						save_path = interactive_trajectory_path,
-					)
-					println("saved interactive trajectory browser file: ", interactive_trajectory_path)
+						CairoMakie.save(
+							joinpath(
+								trajectory_plots_dir,
+								"trajectory_instance_$(solved_attempts)_eps$(ϵ₀).pdf",
+							),
+							trajectory_fig,
+						)
+						CairoMakie.save(
+							joinpath(
+								speed_plots_dir,
+								"speed_instance_$(solved_attempts)_eps$(ϵ₀).pdf",
+							),
+							speed_fig,
+						)
+						CairoMakie.save(
+							joinpath(
+								control_plots_dir,
+								"control_instance_$(solved_attempts)_eps$(ϵ₀).pdf",
+							),
+							control_fig,
+						)
+						CairoMakie.save(
+							joinpath(
+								distance_plots_dir,
+								"distance_instance_$(solved_attempts)_eps$(ϵ₀).pdf",
+							),
+							distance_fig,
+						)
+						if show_interactive_trajectory
+							interactive_trajectory_path = joinpath(
+								trajectory_plots_dir,
+								"trajectory_interactive_instance_$(solved_attempts)_eps$(ϵ₀).html",
+							)
+							plot_trajectory_3d_interactive(
+								;
+								map_end,
+								lane_width,
+								strategy = result.strategies,
+								θ1,
+								θ2,
+								θ3,
+								goal_position1,
+								goal_position2,
+								goal_position3,
+								collision_avoidance,
+								display_figure = false,
+								save_path = interactive_trajectory_path,
+							)
+							println("saved interactive trajectory browser file: ", interactive_trajectory_path)
+						end
+					end
 				end
 			end
 		end
 	end
 
-	@timeit TO "run metadata save" begin
-		JLD2.save_object(
-			joinpath(problem_data_dir, "run_metadata.jld2"),
-			Dict(
-				"run_id" => run_id,
-				"debug" => debug,
-				"run_dir" => run_dir,
-				"rng_seed" => rng_seed,
-				"dynamics_model" => dynamics_model_name(dynamics_model),
-				"num_instances" => num_instances,
-				"random_initial_state" => random_initial_state,
-				"use_scalarized_baseline" => use_scalarized_baseline,
-				"use_social_equilibrium_baseline" => use_social_equilibrium_baseline,
-				"show_interactive_trajectory" => show_interactive_trajectory,
-				"epsilon_schedule" => epsilon_schedule,
-				"max_inner_iters_schedule" => max_inner_iters_schedule,
-				"speed_limit" => speed_limit,
-				"collision_avoidance" => collision_avoidance,
-				"child_initial_buffer" => child_initial_buffer,
-				"dₚ" => dₚ,
-				"perturbation_scale" => perturbation_scale,
-			),
-		)
+	if save
+		@timeit TO "run metadata save" begin
+			JLD2.save_object(
+				joinpath(problem_data_dir, "run_metadata.jld2"),
+				Dict(
+					"run_id" => run_id,
+					"debug" => debug,
+					"run_dir" => run_dir,
+					"rng_seed" => rng_seed,
+					"dynamics_model" => dynamics_model_name(dynamics_model),
+					"num_instances" => num_instances,
+					"random_initial_state" => random_initial_state,
+					"use_scalarized_baseline" => use_scalarized_baseline,
+					"use_social_equilibrium_baseline" => use_social_equilibrium_baseline,
+					"show_interactive_trajectory" => show_interactive_trajectory,
+					"epsilon_schedule" => epsilon_schedule,
+					"max_inner_iters_schedule" => max_inner_iters_schedule,
+					"speed_limit" => speed_limit,
+					"collision_avoidance" => collision_avoidance,
+					"child_initial_buffer" => child_initial_buffer,
+					"dₚ" => dₚ,
+					"perturbation_scale" => perturbation_scale,
+				),
+			)
+		end
 	end
 
 	println("\nTiming summary:")
 	show(TO)
 	println()
+
+	return solution_dict;
 end
 
 # ── Output / plotting helpers ──────────────────────────────────────────────────
