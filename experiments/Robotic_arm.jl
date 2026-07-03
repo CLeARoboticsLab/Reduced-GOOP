@@ -400,6 +400,12 @@ function demo(;
 	use_scalarized_baseline = false,
 	use_social_equilibrium_baseline = false,
 	show_interactive_trajectory = false,
+	# ── Real-world simulation kwargs (pass from Python after grip) ──────────
+	# When provided the solver operates in MuJoCo world-frame (metres).
+	sim_eef0 = nothing,          # robot0 EEF position [x, y, z] (world frame)
+	sim_eef1 = nothing,          # robot1 EEF position [x, y, z] (world frame)
+	sim_eef2 = nothing,          # robot2/GR1 EEF position [x, y, z] (world frame)
+	sim_lift_height = 0.35,      # target lift height above grip position (metres)
 )
 	reset_timer!(TO)
 	@timeit TO "experiment setup" Random.seed!(rng_seed)
@@ -412,23 +418,33 @@ function demo(;
 	linesearch = :backtracking          # :backtracking | :fraction_to_boundary
 	compute_warmstart = true # Whether to compute a warmstart trajectory via rollout (true) or load from file (false)
 
+	# ── World-frame mode detection ────────────────────────────────────────────
+	# When sim_eef0/1/2 are provided (from Python after grip), the solver uses
+	# MuJoCo world-frame metres. Otherwise abstract coordinates are used.
+	use_world_frame = !isnothing(sim_eef0) && !isnothing(sim_eef1)
+
 	# ── Problem parameters ─────────────────────────────────────────────────────
 	num_players          = 3
-	collision_avoidance  = 2.0
-	child_initial_buffer = 4.0
-	speed_limit          = 3.0
+	# World-frame values are realistic physical quantities (metres, m/s).
+	# Abstract values are the legacy standalone-test scale.
+	collision_avoidance  = use_world_frame ? 0.25 : 2.0   # safety sphere radius
+	child_initial_buffer = use_world_frame ? 0.5  : 4.0
+	speed_limit          = use_world_frame ? 0.5  : 3.0   # m/s (world) or abstract
 	num_instances        = 1
-	perturbation_scale   = 0.3
-	dₚ                   = 2.0
+	perturbation_scale   = use_world_frame ? 0.01 : 0.3
+	dₚ                   = use_world_frame ? 0.34 : 2.0   # handle separation (m)
 
 	# ── Solver schedule ────────────────────────────────────────────────────────
 	epsilon_schedule         = [0.1]
 	max_inner_iters_schedule = fill(1000, length(epsilon_schedule))
 
 	# ── Cache paths ───────────────────────────────────────────────────────────
+	# Use separate cache files for world-frame vs abstract-coordinate modes so the
+	# two parameter sets (different dₚ, speed_limit, etc.) don't share a KKT cache.
 	root_path           = joinpath(@__DIR__, "data", run_id)
-	kkt_cache_file      = joinpath(root_path, "cache_kkt_system.jld2")
-	solution_cache_file = joinpath(root_path, "cache_solution.jld2")
+	cache_suffix        = use_world_frame ? "_world" : ""
+	kkt_cache_file      = joinpath(root_path, "cache_kkt_system$(cache_suffix).jld2")
+	solution_cache_file = joinpath(root_path, "cache_solution$(cache_suffix).jld2")
 
 	# Disable plotting, saving, and interactive trajectory if cache exists
 	if isfile(kkt_cache_file)
@@ -439,19 +455,36 @@ function demo(;
 
 	# ── Scenario ───────────────────────────────────────────────────────────────
 	# Single Integrator 3D: state = [px, py, pz]
-	base_initial_state1 = [-1.0,  6.0, 0.0]
-	base_initial_state2 = [ 1.0,  6.0, 0.0]
-	goal_position1      = [-1.0, -5.0, 5.0]
-	goal_position2      = [ 1.0, -5.0, 5.0]
-	initial_state3      = [-6.0, -1.0, 0.0]
-	goal_position3	    = [ 0.0,  0.0, 0.0]
+	if use_world_frame
+		# World-frame (metres): robot 0 on +y side, robot 1 on −y side, GR1 on −x side.
+		# Table surface z ≈ 0.8 m; handles at z ≈ 0.84 m, ±0.17 m from pot centre in y.
+		# Goals: lift the pot straight up by sim_lift_height while holding the handles.
+		base_initial_state1 = collect(Float64, sim_eef0)
+		base_initial_state2 = collect(Float64, sim_eef1)
+		goal_position1      = base_initial_state1 .+ [0.0, 0.0, sim_lift_height]
+		goal_position2      = base_initial_state2 .+ [0.0, 0.0, sim_lift_height]
+		initial_state3      = isnothing(sim_eef2) ? [-0.55, 0.0, 1.0] : collect(Float64, sim_eef2)
+		goal_position3      = 0.5 .* (base_initial_state1 .+ base_initial_state2)  # pot centre
+	else
+		# Abstract coordinates for standalone testing.
+		base_initial_state1 = [-1.0,  6.0, 0.0]
+		base_initial_state2 = [ 1.0,  6.0, 0.0]
+		goal_position1      = [-1.0, -5.0, 5.0]
+		goal_position2      = [ 1.0, -5.0, 5.0]
+		initial_state3      = [-6.0, -1.0, 0.0]
+		goal_position3      = [ 0.0,  0.0, 0.0]
+	end
 	obstacle_position   = [0.25, 0.15, 0.0]   # placeholder
 
 	# ── Build dynamics and problem ─────────────────────────────────────────────
 	state_dimension   = 3
 	control_dimension = 3
 	Δt                = 0.1
-	control_bounds    = (; lb = [-10.0, -10.0, -10.0], ub = [10.0, 10.0, 10.0])
+	# World-frame: control = velocity (m/s); ±1 m/s is realistic for a robot arm.
+	# Abstract: keep legacy large bounds.
+	control_bounds    = use_world_frame ?
+		(; lb = [-1.0, -1.0, -1.0], ub = [1.0, 1.0, 1.0]) :
+		(; lb = [-10.0, -10.0, -10.0], ub = [10.0, 10.0, 10.0])
 
 	dynamics = @timeit TO "dynamics construction" build_dynamics(dynamics_model; Δt, state_dimension, control_dimension)
 
@@ -694,6 +727,10 @@ function demo(;
 			)
 
 		(; warmstart_solution) = @timeit TO "warmstart construction" if compute_warmstart
+			# World-frame hint: lift straight up. Abstract: move in −y and +z.
+			robot_control_hint = use_world_frame ?
+				[0.0, 0.0, sim_lift_height / (Δt * (planning_horizon - 1))] :
+				[0.0, -1.0, 1.0]
 			build_default_warmstart(
 				planning_horizon,
 				dynamics,
@@ -702,6 +739,7 @@ function demo(;
 				initial_state3,
 				goal_position3;
 				speed_limit,
+				robot_control_hint,
 			)
 		else
 			(;
@@ -740,8 +778,9 @@ function demo(;
 		instance_total_solve_time_sec = 0.0
 
 		for (ϵ₀, max_inner_iters) in zip(epsilon_schedule, max_inner_iters_schedule)
+			loaded_from_cache = isfile(solution_cache_file)
 			result = try
-				if isfile(solution_cache_file)
+				if loaded_from_cache
 					@info "Loading cached solution from $(solution_cache_file)"
 					cached_dict = JLD2.load_object(solution_cache_file)
 					cached_strategies = extract_player_strategies(cached_dict["x"], num_players, primal_dimension, dynamics)
@@ -763,12 +802,16 @@ function demo(;
 			end
 			push!(epsilon_results, ϵ₀ => result)
 			instance_total_solve_time_sec += result.solution_dict["solve_time_sec"]
-			if result.solution_dict["status"] == :failed
+			# When loading from cache we always accept the result (it was accepted once already).
+			# Only treat a fresh solve as a failure if the solver didn't converge.
+			if !loaded_from_cache && result.solution_dict["status"] == :failed
 				println(
 					"attempt $(total_attempts): failed to converge for ϵ₀ = $(ϵ₀), saving diagnostics.",
 				)
 				solve_sequence_succeeded = false
 				break
+			elseif loaded_from_cache && result.solution_dict["status"] == :failed
+				@warn "Loaded cached solution has status :failed (solver did not converge on original run). Using it anyway."
 			end
 			stage_warmstart = warmstart_solution
 		end
@@ -960,6 +1003,29 @@ function demo(;
 	println("\nTiming summary:")
 	show(TO)
 	println()
+
+	# Attach scenario parameters to solution dict so Python can read them back.
+	if !isnothing(solution_dict)
+		merge!(solution_dict, Dict(
+			"initial_state1" => base_initial_state1,
+			"goal_position1" => goal_position1,
+			"initial_state2" => base_initial_state2,
+			"goal_position2" => goal_position2,
+			"initial_state3" => initial_state3,
+			"goal_position3" => goal_position3,
+			"use_world_frame" => use_world_frame,
+			"dp" => dₚ,
+		))
+		if use_world_frame
+			println("\n[world-frame] Planned trajectory summary:")
+			for (player_idx, strategy) in enumerate(solution_dict["strategies"])
+				println("  Player $(player_idx):")
+				for (t, x) in enumerate(strategy.xs)
+					println("    t=$(lpad(t-1, 2))  x=[$(round(x[1]; digits=4)), $(round(x[2]; digits=4)), $(round(x[3]; digits=4))]")
+				end
+			end
+		end
+	end
 
 	return solution_dict;
 end
@@ -1228,19 +1294,20 @@ function build_default_warmstart(
 	initial_state3,
 	goal_position3;
 	speed_limit = 1.5,
+	robot_control_hint = [0.0, -1.0, 1.0],
 )
 	player1_warmstart = build_constant_control_warmstart(
 		planning_horizon,
 		dynamics,
 		initial_state1,
-		[0.0, -1.0, 1.0],
+		robot_control_hint,
 	)
 
 	player2_warmstart = build_constant_control_warmstart(
 		planning_horizon,
 		dynamics,
 		initial_state2,
-		[0.0, -1.0, 1.0],
+		robot_control_hint,
 	)
 
 	player3_warmstart = build_ground_line_warmstart(
