@@ -236,7 +236,7 @@ function get_setup(
 	]
 
 	# Load balance objective
-	function load_balance_objective(z, θ; allowance = 0.01)
+	function load_balance_objective(z, θ; allowance = 0.1)
 		(; xs, us) = trajectory(z; player = 1)
 		xs1 = copy(xs)
 		(; xs, us) = trajectory(z; player = 2)
@@ -275,26 +275,24 @@ function get_setup(
 			# control_objective(; player = 1),
 			goal_objective(; player = 1),
 			load_balance_objective,
-			# negative_pot_approach_objective,
-			robot_child_safety_inequality(; player = 1)
+			robot_inequality(; player = 1),
 		],
 		[
 			# control_objective(; player = 2),
 			# goal_objective(; player = 2),
+			# goal_objective(; player = 2),
 			goal_objective(; player = 2),
 			load_balance_objective,
-			# negative_pot_approach_objective,
-			robot_child_safety_inequality(; player = 2)
+			robot_inequality(; player = 2),
 		],
 		[
 			pot_approach_objective,
-			# negative_load_balance_objective,
-			# child_ground_speed_inequality
+			child_ground_speed_inequality
 		],
 	]
 
 	# Preference hierarchy: [lowest priority, ..., highest priority]
-	is_prioritized_constraint = [[false, false, true], [false, false, true], [false]]
+	is_prioritized_constraint = [[false, false, true], [false, false, true], [false, true]]
 
 	function build_goop_problem()
 		@timeit TO "ParametricGOOP construction" begin
@@ -411,7 +409,7 @@ function demo(;
 	@timeit TO "experiment setup" Random.seed!(rng_seed)
 
 	# ── Settings ───────────────────────────────────────────────────────────────
-	run_id = "Robotic_arm_test"
+	run_id = "Robotic_arm_test2"
 	dynamics_model = Robotic_arm.SingleIntegrator3D()
 	goop_version = :reduced               # :complete | :reduced | :quasi
 	solver = ReducedGOOP.InteriorPoint() # ReducedGOOP.InteriorPoint() | ReducedGOOP.PATHSolver()
@@ -420,11 +418,11 @@ function demo(;
 
 	# ── Problem parameters ─────────────────────────────────────────────────────
 	num_players          = 3
-	planning_horizon     = 10
+	planning_horizon     = 20
 	collision_avoidance  = 2.0
 	child_initial_buffer = 4.0
-	arm_speed_limit		 = 3.0
-	child_speed_limit    = 1.0
+	arm_speed_limit		 = 5.0
+	child_speed_limit    = 3.0
 	num_instances        = 1
 	perturbation_scale   = 0.3
 	dₚ                   = 2.0
@@ -509,8 +507,8 @@ function demo(;
 	function solve_game_instance(θ; z₀, ϵ₀, max_inner_iters)
 		options = @timeit TO "solver options construction" if solver isa ReducedGOOP.InteriorPoint
 			ReducedGOOP.InteriorPointOptions(;
-				tol = 4e-2, #1e-4
-				η₀ = 2e-5, # 5e-5, 0.0 to turn off Tikhonov
+				tol = 4e-1, #1e-4
+				η₀ = 5e-5, # 5e-5, 0.0 to turn off Tikhonov
 				ϵ₀,
 				max_inner_iters,
 				max_outer_iters = 1,
@@ -692,6 +690,8 @@ function demo(;
 				dynamics,
 				initial_state1,
 				initial_state2,
+				goal_position1,
+				goal_position2,
 				initial_state3,
 				goal_position3;
 				arm_speed_limit,
@@ -1212,13 +1212,22 @@ function build_default_warmstart(
 	dynamics,
 	initial_state1,
 	initial_state2,
+	goal_position1,
+	goal_position2,
 	initial_state3,
 	goal_position3;
 	arm_speed_limit = 3.0,
 	child_speed_limit = 1.5,
 )
+	planning_horizon >= 2 || error("Robot warm start requires at least two time steps.")
+	length(goal_position1) == dynamics.state_dimension || error("Goal position 1 dimension mismatch.")
+	length(goal_position2) == dynamics.state_dimension || error("Goal position 2 dimension mismatch.")
+
+	total_time = dynamics.Δt * (planning_horizon - 1)
+	start_center = 0.5 .* (initial_state1 .+ initial_state2)
+	goal_center = 0.5 .* (goal_position1 .+ goal_position2)
 	robot_warmstart_control = limit_control_speed(
-		[0.0, -1.0, 1.0],
+		(goal_center .- start_center) ./ total_time,
 		arm_speed_limit,
 		1:dynamics.control_dimension,
 	)

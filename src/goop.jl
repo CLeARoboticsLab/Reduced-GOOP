@@ -144,7 +144,7 @@ function smooth_piecewise_preference_objective(
 	level;
 	ϵ = 0.0,
 )
-	ifelse(preference ≥ ϵ, 0.0, (ϵ - preference)^(2))
+	ifelse(preference ≥ ϵ, 0.0, (ϵ - preference)^(level + 2))
 end
 
 "Construct the Reduced KKT system corresponding to a ParametricGOOP."
