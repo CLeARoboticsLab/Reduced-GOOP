@@ -47,7 +47,19 @@
       "Bash(awk '{print NR, $NF}')",
       "Bash(awk '$2 >= 0.75')",
       "Bash(awk '$1 > 300 && $2 >= 0.75')",
-      "Bash(pkill -f \"run_verbose.jl\")"
+      "Bash(pkill -f \"run_verbose.jl\")",
+      "Read(//Users/dhl/.julia/packages/WGLMakie/**)",
+      "Bash(grep -rn \"FileFormat{format\\\\\"HTML\\\\\"}\\\\|format\\\\\"HTML\\\\\"\\\\|\\\\.html\" ~/.julia/packages/WGLMakie/WZWjB/src/*.jl | head; echo ---; grep -rn \"record_states\" ~/.julia/packages/Bonito/*/src/HTTPServer/*.jl ~/.julia/packages/Bonito/*/src/*.jl 2>/dev/null | head -15)",
+      "Read(//Users/dhl/.julia/packages/WGLMakie/WZWjB/src/**)",
+      "Read(//Users/dhl/.julia/packages/Bonito/**)",
+      "Bash(grep -rn \"html\" ~/.julia/packages/Makie/*/src/display.jl | head -10; echo ---; grep -rn \"function save\\\\|htmlexport\\\\|HTML\" ~/.julia/packages/Makie/*/src/ffmpeg-util.jl 2>/dev/null | head; grep -rn \"\\\\\"html\\\\\"\\\\|format\\\\\"HTML\\\\\"\" ~/.julia/packages/Makie/*/src/*.jl | head)",
+      "Read(//Users/dhl/.julia/packages/Makie/**)",
+      "Bash(grep -rn \"backend_show\\\\|record_states\\\\|exportable\" ~/.julia/packages/WGLMakie/WZWjB/src/display.jl | head -20)",
+      "Bash(grep -rn \"record_states\\\\|function export_static\\\\|text/html\" ~/.julia/packages/Bonito/OJTyF/src/export.jl ~/.julia/packages/Bonito/OJTyF/src/display.jl 2>/dev/null | head -20; ls ~/.julia/packages/Bonito/OJTyF/src/)",
+      "Read(//Users/dhl/.julia/packages/Bonito/OJTyF/src/**)",
+      "Bash(julia --project=experiments /private/tmp/claude-501/-Users-dhl-Documents-Reduced-GOOP/f48383b1-cee0-408a-9496-4f55fae9c1ab/scratchpad/test_slider.jl)",
+      "Bash(julia -e 'Meta.parseall\\(read\\(\"/Users/dhl/Documents/Reduced-GOOP/experiments/Robotic_arm.jl\", String\\)\\); println\\(\"parse OK\"\\)')",
+      "Bash(julia --project=experiments /private/tmp/claude-501/-Users-dhl-Documents-Reduced-GOOP/f48383b1-cee0-408a-9496-4f55fae9c1ab/scratchpad/test_distance_plot.jl)"
     ],
     "additionalDirectories": [
       "/private/tmp"

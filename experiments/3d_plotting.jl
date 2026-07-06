@@ -638,28 +638,33 @@ function _plot_single_integrator_3d_browser_trajectories(
 	)
 
 	player1_color, player2_color, player3_color = SINGLE_INTEGRATOR_3D_PLAYER_COLORS
+	time_horizon = length(x1) - 1
+	time_index = makie.Observable(0)
 	safety_handle = nothing
 	if has_child && !isnothing(collision_avoidance)
-		safety_stride = max(1, cld(length(x3), 6))
-		safety_indices = unique(vcat(collect(1:safety_stride:length(x3)), length(x3)))
-		for t in safety_indices
-			hemisphere_segments = _hemisphere_wireframe(
-				[x3[t], y3[t], z3[t]],
-				collision_avoidance,
+		# One hemisphere that follows the child position at the slider time;
+		# the origin-centered wireframe is computed once and only translated.
+		base_segments = _hemisphere_wireframe([0.0, 0.0, 0.0], collision_avoidance)
+		for (segment_x, segment_y, segment_z) in base_segments
+			segment_points = makie.lift(time_index) do t
+				i = clamp(t + 1, 1, length(x3))
+				[
+					makie.Point3f(
+						segment_x[k] + x3[i],
+						segment_y[k] + y3[i],
+						segment_z[k] + z3[i],
+					) for k in eachindex(segment_x)
+				]
+			end
+			current_safety = makie.lines!(
+				scene_axis,
+				segment_points;
+				color = (player3_color, 0.42),
+				linestyle = :dash,
+				linewidth = 2.0,
 			)
-			for (segment_x, segment_y, segment_z) in hemisphere_segments
-				current_safety = makie.lines!(
-					scene_axis,
-					segment_x,
-					segment_y,
-					segment_z;
-					color = (player3_color, 0.42),
-					linestyle = :dash,
-					linewidth = 2.0,
-				)
-				if isnothing(safety_handle)
-					safety_handle = current_safety
-				end
+			if isnothing(safety_handle)
+				safety_handle = current_safety
 			end
 		end
 	end
@@ -724,11 +729,17 @@ function _plot_single_integrator_3d_browser_trajectories(
 		strokecolor = :black,
 		strokewidth = 1,
 	) : nothing
+	current1_position = makie.lift(
+		t -> _agent_position_at_time(makie, t, x1, y1, z1),
+		time_index,
+	)
+	current2_position = makie.lift(
+		t -> _agent_position_at_time(makie, t, x2, y2, z2),
+		time_index,
+	)
 	current1_marker = makie.scatter!(
 		scene_axis,
-		[x1[end]],
-		[y1[end]],
-		[z1[end]];
+		current1_position;
 		marker = :diamond,
 		markersize = 30,
 		color = player1_color,
@@ -737,26 +748,30 @@ function _plot_single_integrator_3d_browser_trajectories(
 	)
 	current2_marker = makie.scatter!(
 		scene_axis,
-		[x2[end]],
-		[y2[end]],
-		[z2[end]];
+		current2_position;
 		marker = :diamond,
 		markersize = 30,
 		color = player2_color,
 		strokecolor = :black,
 		strokewidth = 1,
 	)
-	current3_marker = has_child ? makie.scatter!(
-		scene_axis,
-		[x3[end]],
-		[y3[end]],
-		[z3[end]];
-		marker = :diamond,
-		markersize = 30,
-		color = player3_color,
-		strokecolor = :black,
-		strokewidth = 1,
-	) : nothing
+	current3_marker = if has_child
+		current3_position = makie.lift(
+			t -> _agent_position_at_time(makie, t, x3, y3, z3),
+			time_index,
+		)
+		makie.scatter!(
+			scene_axis,
+			current3_position;
+			marker = :diamond,
+			markersize = 30,
+			color = player3_color,
+			strokecolor = :black,
+			strokewidth = 1,
+		)
+	else
+		nothing
+	end
 	goal1_marker = makie.scatter!(
 		scene_axis,
 		[goal1[1]],
@@ -815,7 +830,12 @@ function _plot_single_integrator_3d_browser_trajectories(
 	)
 	makie.center!(scene_axis.scene)
 
-	return figure, scene_axis
+	return figure, scene_axis, time_index, time_horizon
+end
+
+function _agent_position_at_time(makie, t, xs, ys, zs)
+	i = clamp(t + 1, 1, length(xs))
+	[makie.Point3f(xs[i], ys[i], zs[i])]
 end
 
 function plot_single_integrator_3d_trajectories(; kwargs...)
@@ -836,19 +856,56 @@ function plot_trajectory_3d_interactive(;
 	kwargs...,
 )
 	WGLMakie = _load_wglmakie()
+	Bonito = WGLMakie.Bonito
 	Base.invokelatest(WGLMakie.Page; exportable, offline)
 	Base.invokelatest(WGLMakie.activate!)
-	figure, ax = _plot_single_integrator_3d_browser_trajectories(
+	figure, ax, time_index, time_horizon = _plot_single_integrator_3d_browser_trajectories(
 		WGLMakie;
 		kwargs...,
 		figure_size,
 		legend_label_fontsize = 16,
 	)
+	app = Base.invokelatest(
+		_time_slider_app,
+		WGLMakie,
+		Bonito,
+		figure,
+		time_index,
+		time_horizon,
+	)
 	if !isnothing(save_path)
-		Base.invokelatest(WGLMakie.save, save_path, figure)
+		Base.invokelatest(Bonito.export_static, save_path, app)
+		# Recording the slider states leaves the time observable at the final
+		# step; reset so any subsequent display starts at t = 0 again.
+		time_index[] = 0
 	end
-	display_figure && Base.invokelatest(display, figure)
+	display_figure &&
+		Base.invokelatest(display, Base.invokelatest(Bonito.BrowserDisplay), app)
 	return figure, ax
+end
+
+# Wraps the WGLMakie figure in a Bonito app with an HTML "Time" slider.
+# `Bonito.record_states` pre-records the scene updates for every slider value,
+# so the slider stays functional in the static HTML export (where no Julia
+# process is available); camera interaction is client-side and unaffected.
+function _time_slider_app(makie, Bonito, figure, time_index, time_horizon)
+	Bonito.App(; title = "GOOP interactive 3D trajectory") do session
+		time_slider = Bonito.Slider(0:time_horizon; value = time_index[])
+		makie.on(time_slider.value) do t
+			time_index[] = t
+		end
+		time_readout = makie.map(t -> "t = $(t) / $(time_horizon)", time_slider.value)
+		slider_row = Bonito.DOM.div(
+			Bonito.DOM.span("Time"; style = "font-weight: 600; margin-right: 0.75em;"),
+			Bonito.DOM.div(time_slider; style = "flex: 1 1 auto; max-width: 640px;"),
+			Bonito.DOM.span(time_readout; style = "margin-left: 0.75em; min-width: 5em;");
+			style = "display: flex; align-items: center; justify-content: center; " *
+				"margin: 0.6em auto; width: 90%; font-family: Georgia, serif; " *
+				"font-size: 1.05rem;",
+		)
+		dom = Bonito.DOM.div(figure, slider_row)
+		return Bonito.record_states(session, dom)
+	end
 end
 
 function plot_single_integrator_3d_trajectories_interactive(; kwargs...)

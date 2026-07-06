@@ -616,6 +616,7 @@ end
 function inter_player_distance_plot(;
 	strategy,
 	reference_distance = nothing,
+	safety_distance = nothing,
 )
 	if length(strategy) < 2
 		error("inter_player_distance_plot expects strategies for at least two players.")
@@ -640,6 +641,20 @@ function inter_player_distance_plot(;
 		for k in 1:trajectory_len
 	]
 	vertical_differences = [abs(xs1[k][3] - xs2[k][3]) for k in 1:trajectory_len]
+
+	# Distance from the pot center c = (p₁ + p₂) / 2 to the child/pet (player 3),
+	# the quantity constrained by robot_child_safety_inequality.
+	pot_child_distances = nothing
+	if length(strategy) >= 3
+		xs3 = strategy[3].xs
+		pot_child_len = min(trajectory_len, length(xs3))
+		any(length(xs3[k]) < 3 for k in 1:pot_child_len) &&
+			error("inter_player_distance_plot expects at least 3D child states.")
+		pot_child_distances = [
+			sqrt(sum(abs2, 0.5 .* (xs1[k][1:3] .+ xs2[k][1:3]) .- xs3[k][1:3]))
+			for k in 1:pot_child_len
+		]
+	end
 
 	axis_label_fontsize = 24
 	tick_label_fontsize = 22
@@ -678,6 +693,30 @@ function inter_player_distance_plot(;
 		)
 		push!(legend_elements, reference_handle)
 		push!(legend_labels, "Reference Distance [$(reference_distance) m]")
+	end
+	if !isnothing(pot_child_distances)
+		pot_child_handle = CairoMakie.scatterlines!(
+			distance_ax,
+			0:(length(pot_child_distances)-1),
+			pot_child_distances;
+			color = :darkorange,
+			linewidth = 3,
+			markersize = 7,
+		)
+		push!(legend_elements, pot_child_handle)
+		push!(legend_labels, "Pot Center–Child Distance")
+		if !isnothing(safety_distance)
+			safety_handle = CairoMakie.lines!(
+				distance_ax,
+				0:(length(pot_child_distances)-1),
+				fill(safety_distance, length(pot_child_distances));
+				color = :darkorange,
+				linestyle = :dot,
+				linewidth = 2,
+			)
+			push!(legend_elements, safety_handle)
+			push!(legend_labels, "Safety Distance [$(safety_distance) m]")
+		end
 	end
 
 	CairoMakie.Legend(

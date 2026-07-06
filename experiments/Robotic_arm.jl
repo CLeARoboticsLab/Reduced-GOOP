@@ -179,17 +179,16 @@ function get_setup(
 	function robot_child_safety_inequality(; player)
 		player in (1, 2) || error("Robot-child safety constraints belong only to robot players 1 and 2.")
 		function (z, θ)
-			(; xs) = trajectory(z; player)
-			robot_xs = copy(xs)
+			(; xs) = trajectory(z; player = 1)
+			xs1 = copy(xs)
+			(; xs) = trajectory(z; player = 2)
+			xs2 = copy(xs)
 			(; xs) = trajectory(z; player = 3)
 			child_xs = copy(xs)
 
-			# The child/pet is not constrained by this residual. Instead, each robot
-			# player must keep its gripper outside the child-centered safety sphere.
-			# This is the proof-of-concept Zero-Sum GOOP coupling: Player 3's curious
-			# motion restricts the feasible robot motions indirectly through safety.
-			mapreduce(vcat, eachindex(robot_xs)) do t
-				separation = robot_xs[t] .- child_xs[t]
+			mapreduce(vcat, eachindex(child_xs)) do t
+				pot_center = 0.5 .* (xs1[t] .+ xs2[t])
+				separation = pot_center .- child_xs[t]
 				[sum(abs2, separation) - collision_avoidance^2]
 			end
 		end
@@ -507,7 +506,7 @@ function demo(;
 	function solve_game_instance(θ; z₀, ϵ₀, max_inner_iters)
 		options = @timeit TO "solver options construction" if solver isa ReducedGOOP.InteriorPoint
 			ReducedGOOP.InteriorPointOptions(;
-				tol = 0.0001, #1e-4
+				tol = 0.005, #1e-4
 				η₀ = 1.0e-6, # 5e-5, 0.0 to turn off Tikhonov
 				ϵ₀,
 				max_inner_iters,
@@ -852,6 +851,7 @@ function demo(;
 				distance_fig, _ = inter_player_distance_plot(;
 					strategy = result.strategies,
 					reference_distance = dₚ,
+					safety_distance = collision_avoidance,
 				)
 
 				CairoMakie.save(
@@ -1001,6 +1001,7 @@ function save_warmstart_visualizations(
 		;
 		strategy = warmstart_strategies,
 		reference_distance = dₚ,
+		safety_distance = collision_avoidance,
 	)
 
 	CairoMakie.save(
