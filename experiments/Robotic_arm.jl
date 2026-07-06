@@ -379,7 +379,7 @@ function demo(;
 	# ── Problem parameters ─────────────────────────────────────────────────────
 	# Player 1: combined two-arm agent, Player 2: child/pet.
 	num_players          = 2
-	planning_horizon     = 12
+	planning_horizon     = 15
 	collision_avoidance  = 2.0
 	child_initial_buffer = 4.0
 	arm_speed_limit		 = 5.0
@@ -822,28 +822,28 @@ function demo(;
 					safety_distance = collision_avoidance,
 				)
 
-				CairoMakie.save(
+				save_figure(
 					joinpath(
 						trajectory_plots_dir,
 						"trajectory_instance_$(solved_attempts)_eps$(ϵ₀).pdf",
 					),
 					trajectory_fig,
 				)
-				CairoMakie.save(
+				save_figure(
 					joinpath(
 						speed_plots_dir,
 						"speed_instance_$(solved_attempts)_eps$(ϵ₀).pdf",
 					),
 					speed_fig,
 				)
-				CairoMakie.save(
+				save_figure(
 					joinpath(
 						control_plots_dir,
 						"control_instance_$(solved_attempts)_eps$(ϵ₀).pdf",
 					),
 					control_fig,
 				)
-				CairoMakie.save(
+				save_figure(
 					joinpath(
 						distance_plots_dir,
 						"distance_instance_$(solved_attempts)_eps$(ϵ₀).pdf",
@@ -974,28 +974,28 @@ function save_warmstart_visualizations(
 		safety_distance = collision_avoidance,
 	)
 
-	CairoMakie.save(
+	save_figure(
 		joinpath(
 			warmstart_plots_dir,
 			"warmstart_attempt_$(total_attempts)_instance_$(instance_idx).pdf",
 		),
 		warmstart_fig,
 	)
-	CairoMakie.save(
+	save_figure(
 		joinpath(
 			warmstart_plots_dir,
 			"warmstart_speed_attempt_$(total_attempts)_instance_$(instance_idx).pdf",
 		),
 		warmstart_speed_fig,
 	)
-	CairoMakie.save(
+	save_figure(
 		joinpath(
 			warmstart_plots_dir,
 			"warmstart_control_attempt_$(total_attempts)_instance_$(instance_idx).pdf",
 		),
 		warmstart_control_fig,
 	)
-	CairoMakie.save(
+	save_figure(
 		joinpath(
 			warmstart_plots_dir,
 			"warmstart_distance_attempt_$(total_attempts)_instance_$(instance_idx).pdf",
@@ -1373,7 +1373,7 @@ function save_convergence_diagnostics(solution_dict, convergence_plots_dir, inst
 			kkt_error_history = safe_log10_history(kkt_error_history),
 			total_iters = solution_dict["total_iters"],
 		)
-		CairoMakie.save(
+		save_figure(
 			joinpath(
 				convergence_plots_dir,
 				"convergence_instance_$(instance_idx)_eps$(ϵ₀)$(filename_suffix).pdf",
@@ -1388,7 +1388,7 @@ function save_convergence_diagnostics(solution_dict, convergence_plots_dir, inst
 			condition_number_history = safe_log10_history(condition_number_history),
 			total_iters = solution_dict["total_iters"],
 		)
-		CairoMakie.save(
+		save_figure(
 			joinpath(
 				convergence_plots_dir,
 				"condition_number_instance_$(instance_idx)_eps$(ϵ₀)$(filename_suffix).pdf",
@@ -1403,7 +1403,7 @@ function save_convergence_diagnostics(solution_dict, convergence_plots_dir, inst
 			eta_history = safe_log10_history(eta_history),
 			total_iters = solution_dict["total_iters"],
 		)
-		CairoMakie.save(
+		save_figure(
 			joinpath(
 				convergence_plots_dir,
 				"eta_instance_$(instance_idx)_eps$(ϵ₀)$(filename_suffix).pdf",

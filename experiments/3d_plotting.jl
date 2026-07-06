@@ -1,11 +1,6 @@
 using CairoMakie: CairoMakie
 
 const SINGLE_INTEGRATOR_3D_PLAYER_COLORS = (:blue, :red, :darkorange)
-const WGLMAKIE_PKGID = Base.PkgId(Base.UUID("276b4fcb-3e11-5398-bf8b-a0c2d153d008"), "WGLMakie")
-
-function _load_wglmakie()
-	Base.require(WGLMAKIE_PKGID)
-end
 
 function _trajectory_xyz(xs; player)
 	isempty(xs) && error("Player $(player) trajectory is empty.")
@@ -527,10 +522,10 @@ function _plot_single_integrator_3d_trajectories(
 	)
 
 	legend_elements = Any[player1_path, player2_path]
-	legend_labels = ["Left gripper (P1)", "Right gripper (P2)"]
+	legend_labels = ["Left gripper (P1)", "Right gripper (P1)"]
 	if has_child
 		push!(legend_elements, player3_path)
-		push!(legend_labels, "Child/Pet (P3)")
+		push!(legend_labels, "Child/Pet (P2)")
 	end
 	append!(
 		legend_elements,
@@ -639,7 +634,13 @@ function _plot_single_integrator_3d_browser_trajectories(
 
 	player1_color, player2_color, player3_color = SINGLE_INTEGRATOR_3D_PLAYER_COLORS
 	time_horizon = length(x1) - 1
-	time_index = makie.Observable(0)
+	# Start at the final time step. Beyond matching the pre-slider look, this is
+	# required for the static HTML export: `Bonito.record_states` records the
+	# scene updates for slider values 0..T in order, and Makie's compute graph
+	# drops no-op updates — if the scene already sat at t = 0, the recorded
+	# entry for t = 0 would be empty and the exported slider could never return
+	# to the initial positions.
+	time_index = makie.Observable(time_horizon)
 	safety_handle = nothing
 	if has_child && !isnothing(collision_avoidance)
 		# One hemisphere that follows the child position at the slider time;
@@ -796,10 +797,10 @@ function _plot_single_integrator_3d_browser_trajectories(
 	)
 
 	legend_elements = Any[player1_path, player2_path]
-	legend_labels = ["Left gripper (P1)", "Right gripper (P2)"]
+	legend_labels = ["Left gripper (P1)", "Right gripper (P1)"]
 	if has_child
 		push!(legend_elements, player3_path)
-		push!(legend_labels, "Child/Pet (P3)")
+		push!(legend_labels, "Child/Pet (P2)")
 	end
 	append!(
 		legend_elements,
@@ -874,38 +875,16 @@ function plot_trajectory_3d_interactive(;
 		time_horizon,
 	)
 	if !isnothing(save_path)
-		Base.invokelatest(Bonito.export_static, save_path, app)
 		# Recording the slider states leaves the time observable at the final
-		# step; reset so any subsequent display starts at t = 0 again.
-		time_index[] = 0
+		# step, which matches the initial view — no reset needed.
+		_with_filesystem_retry(
+			() -> Base.invokelatest(Bonito.export_static, save_path, app);
+			description = "interactive trajectory export to $(save_path)",
+		)
 	end
 	display_figure &&
 		Base.invokelatest(display, Base.invokelatest(Bonito.BrowserDisplay), app)
 	return figure, ax
-end
-
-# Wraps the WGLMakie figure in a Bonito app with an HTML "Time" slider.
-# `Bonito.record_states` pre-records the scene updates for every slider value,
-# so the slider stays functional in the static HTML export (where no Julia
-# process is available); camera interaction is client-side and unaffected.
-function _time_slider_app(makie, Bonito, figure, time_index, time_horizon)
-	Bonito.App(; title = "GOOP interactive 3D trajectory") do session
-		time_slider = Bonito.Slider(0:time_horizon; value = time_index[])
-		makie.on(time_slider.value) do t
-			time_index[] = t
-		end
-		time_readout = makie.map(t -> "t = $(t) / $(time_horizon)", time_slider.value)
-		slider_row = Bonito.DOM.div(
-			Bonito.DOM.span("Time"; style = "font-weight: 600; margin-right: 0.75em;"),
-			Bonito.DOM.div(time_slider; style = "flex: 1 1 auto; max-width: 640px;"),
-			Bonito.DOM.span(time_readout; style = "margin-left: 0.75em; min-width: 5em;");
-			style = "display: flex; align-items: center; justify-content: center; " *
-				"margin: 0.6em auto; width: 90%; font-family: Georgia, serif; " *
-				"font-size: 1.05rem;",
-		)
-		dom = Bonito.DOM.div(figure, slider_row)
-		return Bonito.record_states(session, dom)
-	end
 end
 
 function plot_single_integrator_3d_trajectories_interactive(; kwargs...)

@@ -61,7 +61,20 @@
       "Bash(julia -e 'Meta.parseall\\(read\\(\"/Users/dhl/Documents/Reduced-GOOP/experiments/Robotic_arm.jl\", String\\)\\); println\\(\"parse OK\"\\)')",
       "Bash(julia --project=experiments /private/tmp/claude-501/-Users-dhl-Documents-Reduced-GOOP/f48383b1-cee0-408a-9496-4f55fae9c1ab/scratchpad/test_distance_plot.jl)",
       "Bash(julia --project=experiments /private/tmp/claude-501/-Users-dhl-Documents-Reduced-GOOP/f48383b1-cee0-408a-9496-4f55fae9c1ab/scratchpad/test_two_player_setup.jl)",
-      "Bash(julia --project=experiments /private/tmp/claude-501/-Users-dhl-Documents-Reduced-GOOP/f48383b1-cee0-408a-9496-4f55fae9c1ab/scratchpad/run_demo.jl)"
+      "Bash(julia --project=experiments /private/tmp/claude-501/-Users-dhl-Documents-Reduced-GOOP/f48383b1-cee0-408a-9496-4f55fae9c1ab/scratchpad/run_demo.jl)",
+      "Bash(julia --project=experiments /private/tmp/claude-501/-Users-dhl-Documents-Reduced-GOOP/f48383b1-cee0-408a-9496-4f55fae9c1ab/scratchpad/test_statemap.jl)",
+      "Bash(grep -rn \"evaljs\\\\|update_obs\\\\|register_obs\\\\|on\\(\" ~/.julia/packages/WGLMakie/WZWjB/src/three_plot.jl | head -15; echo ===; grep -rn \"ComputePipeline\\\\|register_computation\\\\|add_observer\" ~/.julia/packages/WGLMakie/WZWjB/src/serialization.jl | head -10)",
+      "Bash(julia --project=experiments /private/tmp/claude-501/-Users-dhl-Documents-Reduced-GOOP/f48383b1-cee0-408a-9496-4f55fae9c1ab/scratchpad/regen_interactive.jl)",
+      "Bash(ls ~/.julia/packages/WGLMakie/WZWjB/assets/ 2>/dev/null | head; grep -l \"wheel\\\\|zoom\" ~/.julia/packages/WGLMakie/WZWjB/assets/*.js 2>/dev/null | head -3)",
+      "Read(//Users/dhl/.julia/packages/WGLMakie/WZWjB/assets/**)",
+      "Bash(find ~/.julia/packages/WGLMakie/WZWjB -name \"*.js\" | head; echo ---; grep -rn \"attach_2d_camera\\\\|cam2d\\\\|Camera2D\" ~/.julia/packages/WGLMakie/WZWjB/src/three_plot.jl ~/.julia/packages/WGLMakie/WZWjB/js/* 2>/dev/null | head -8)",
+      "Read(//Users/dhl/.julia/packages/WGLMakie/WZWjB/**)",
+      "Bash(julia --project=experiments /private/tmp/claude-501/-Users-dhl-Documents-Reduced-GOOP/f48383b1-cee0-408a-9496-4f55fae9c1ab/scratchpad/test_intersection_slider.jl)",
+      "Bash(julia --project=experiments /private/tmp/claude-501/-Users-dhl-Documents-Reduced-GOOP/f48383b1-cee0-408a-9496-4f55fae9c1ab/scratchpad/test_intersection_statemap.jl)",
+      "Bash(julia --project=experiments /private/tmp/claude-501/-Users-dhl-Documents-Reduced-GOOP/f48383b1-cee0-408a-9496-4f55fae9c1ab/scratchpad/run_intersection_demo.jl)",
+      "Bash(kill 19267)",
+      "Bash(perl -pi -e 's/CairoMakie\\\\.save\\\\\\(/save_figure\\(/g' Intersection.jl Robotic_arm.jl)",
+      "Bash(julia -e 'for f in [\"experiments/Plotting.jl\", \"experiments/Intersection.jl\", \"experiments/Robotic_arm.jl\", \"experiments/3d_plotting.jl\"]; Meta.parseall\\(read\\(f, String\\)\\); end; println\\(\"parse OK\"\\)')"
     ],
     "additionalDirectories": [
       "/private/tmp"

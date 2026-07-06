@@ -18,6 +18,31 @@ function serif_figure(; kwargs...)
 	)
 end
 
+"""
+Run `f`, retrying on transient `SystemError`s such as the
+`close: Operation timed out` that iCloud-synced folders intermittently raise
+on freshly created files. Non-`SystemError`s and the final attempt rethrow.
+"""
+function _with_filesystem_retry(f; attempts = 3, description = "file write")
+	for attempt in 1:attempts
+		try
+			return f()
+		catch err
+			(err isa Base.SystemError && attempt < attempts) || rethrow()
+			@warn "$(description) hit a transient filesystem error; retrying" attempt exception = err
+			sleep(2.0^attempt)
+		end
+	end
+end
+
+"Save a Makie figure with retries on transient filesystem errors."
+function save_figure(path, figure)
+	_with_filesystem_retry(
+		() -> CairoMakie.save(path, figure);
+		description = "figure save to $(path)",
+	)
+end
+
 function draw_intersection_map!(ax; map_end, lane_width, offset = 0.2)
 	vertical_road_background = CairoMakie.Polygon(
 		CairoMakie.Point2f[
@@ -232,6 +257,230 @@ function plot_intersection_trajectories(;
 		margin = (100, 12, 12, 6),
 	)
 
+	return figure, ax
+end
+
+# ── Shared browser (WGLMakie/Bonito) helpers ────────────────────────────────────
+
+const WGLMAKIE_PKGID = Base.PkgId(Base.UUID("276b4fcb-3e11-5398-bf8b-a0c2d153d008"), "WGLMakie")
+
+function _load_wglmakie()
+	Base.require(WGLMAKIE_PKGID)
+end
+
+# Wraps the WGLMakie figure in a Bonito app with an HTML "Time" slider.
+# `Bonito.record_states` pre-records the scene updates for every slider value,
+# so the slider stays functional in the static HTML export (where no Julia
+# process is available); camera interaction is client-side and unaffected.
+function _time_slider_app(makie, Bonito, figure, time_index, time_horizon)
+	Bonito.App(; title = "GOOP interactive trajectory") do session
+		time_slider = Bonito.Slider(0:time_horizon; value = time_index[])
+		makie.on(time_slider.value) do t
+			time_index[] = t
+		end
+		time_readout = makie.map(t -> "t = $(t) / $(time_horizon)", time_slider.value)
+		slider_row = Bonito.DOM.div(
+			Bonito.DOM.span("Time"; style = "font-weight: 600; margin-right: 0.75em;"),
+			Bonito.DOM.div(time_slider; style = "flex: 1 1 auto; max-width: 640px;"),
+			Bonito.DOM.span(time_readout; style = "margin-left: 0.75em; min-width: 5em;");
+			style = "display: flex; align-items: center; justify-content: center; " *
+				"margin: 0.6em auto; width: 90%; font-family: Georgia, serif; " *
+				"font-size: 1.05rem;",
+		)
+		# Slider above the canvas so it stays visible regardless of figure height.
+		dom = Bonito.DOM.div(slider_row, figure)
+		return Bonito.record_states(session, dom)
+	end
+end
+
+function _plot_intersection_browser_trajectories(
+	makie;
+	map_end,
+	lane_width,
+	strategy,
+	θ1,
+	θ2,
+	goal_position1,
+	goal_position2,
+	figure_size = (950, 850),
+	legend_label_fontsize = 16,
+)
+	if length(strategy) < 2
+		error("interactive intersection plot expects strategies for at least two players.")
+	end
+	xs1 = strategy[1].xs
+	xs2 = strategy[2].xs
+	if isempty(xs1) || isempty(xs2)
+		error("interactive intersection plot expects non-empty player trajectories.")
+	end
+
+	figure = serif_figure(size = figure_size)
+	# Same 2D look as the static intersection plot. Note: 2D Axis pan/zoom is
+	# processed by a live Julia process, so the static HTML export has a fixed
+	# view; the time slider works regardless via the pre-recorded states.
+	ax = makie.Axis(
+		figure[1, 1];
+		aspect = 1,
+		xgridvisible = false,
+		ygridvisible = false,
+		backgroundcolor = :white,
+	)
+	makie.hidedecorations!(ax)
+	makie.hidespines!(ax)
+
+	draw_intersection_map!(ax; map_end, lane_width)
+	# The 2D map relies on painter's order; in WebGL coplanar elements
+	# z-fight, so lift each map element slightly according to its draw order.
+	for (draw_order, map_plot) in enumerate(ax.scene.plots)
+		makie.translate!(map_plot, 0, 0, 0.002 * draw_order)
+	end
+	z_paths = 0.1
+	z_markers = 0.2
+
+	player1_trajectory = makie.scatterlines!(
+		ax,
+		[x[1] for x in xs1],
+		[x[2] for x in xs1];
+		color = :blue,
+		linewidth = 2,
+	)
+	player2_trajectory = makie.scatterlines!(
+		ax,
+		[x[1] for x in xs2],
+		[x[2] for x in xs2];
+		color = :red,
+		linewidth = 2,
+	)
+	makie.translate!(player1_trajectory, 0, 0, z_paths)
+	makie.translate!(player2_trajectory, 0, 0, z_paths)
+
+	time_horizon = min(length(xs1), length(xs2)) - 1
+	# Start at the final time step. Beyond matching the static plot's look,
+	# this is required for the HTML export: `Bonito.record_states` records the
+	# scene updates for slider values 0..T in order, and Makie's compute graph
+	# drops no-op updates — if the scene already sat at t = 0, the recorded
+	# entry for t = 0 would be empty and the exported slider could never
+	# return to the initial positions.
+	time_index = makie.Observable(time_horizon)
+	position_at_time(xs, t) = begin
+		x = xs[clamp(t + 1, 1, length(xs))]
+		[makie.Point2f(x[1], x[2])]
+	end
+	current1_position = makie.lift(t -> position_at_time(xs1, t), time_index)
+	current2_position = makie.lift(t -> position_at_time(xs2, t), time_index)
+	current1_marker = makie.scatter!(
+		ax,
+		current1_position;
+		marker = :diamond,
+		markersize = 24,
+		color = :blue,
+		strokecolor = :black,
+		strokewidth = 1,
+	)
+	current2_marker = makie.scatter!(
+		ax,
+		current2_position;
+		marker = :diamond,
+		markersize = 24,
+		color = :red,
+		strokecolor = :black,
+		strokewidth = 1,
+	)
+
+	start1_marker = makie.scatter!(
+		ax,
+		[makie.Point2f(θ1[1], θ1[2])];
+		markersize = 20,
+		color = :blue,
+	)
+	start2_marker = makie.scatter!(
+		ax,
+		[makie.Point2f(θ2[1], θ2[2])];
+		markersize = 20,
+		color = :red,
+	)
+	goal1_marker = makie.scatter!(
+		ax,
+		[makie.Point2f(goal_position1[1], goal_position1[2])];
+		markersize = 20,
+		marker = :star5,
+		color = :blue,
+	)
+	goal2_marker = makie.scatter!(
+		ax,
+		[makie.Point2f(goal_position2[1], goal_position2[2])];
+		markersize = 20,
+		marker = :star5,
+		color = :red,
+	)
+	for marker_plot in (
+		current1_marker,
+		current2_marker,
+		start1_marker,
+		start2_marker,
+		goal1_marker,
+		goal2_marker,
+	)
+		makie.translate!(marker_plot, 0, 0, z_markers)
+	end
+
+	makie.Legend(
+		figure[1, 2],
+		[
+			player1_trajectory,
+			player2_trajectory,
+			start1_marker,
+			start2_marker,
+			current1_marker,
+			current2_marker,
+			goal1_marker,
+			goal2_marker,
+		],
+		["Player 1", "Player 2", "Start 1", "Start 2", "Current 1", "Current 2", "Goal 1", "Goal 2"];
+		framevisible = false,
+		labelsize = legend_label_fontsize,
+		orientation = :vertical,
+		halign = :left,
+		valign = :top,
+	)
+
+	return figure, ax, time_index, time_horizon
+end
+
+function plot_intersection_trajectories_interactive(;
+	display_figure = true,
+	save_path = nothing,
+	figure_size = (950, 850),
+	exportable = true,
+	offline = true,
+	kwargs...,
+)
+	WGLMakie = _load_wglmakie()
+	Bonito = WGLMakie.Bonito
+	Base.invokelatest(WGLMakie.Page; exportable, offline)
+	Base.invokelatest(WGLMakie.activate!)
+	figure, ax, time_index, time_horizon = Base.invokelatest(
+		_plot_intersection_browser_trajectories,
+		WGLMakie;
+		kwargs...,
+		figure_size,
+	)
+	app = Base.invokelatest(
+		_time_slider_app,
+		WGLMakie,
+		Bonito,
+		figure,
+		time_index,
+		time_horizon,
+	)
+	if !isnothing(save_path)
+		_with_filesystem_retry(
+			() -> Base.invokelatest(Bonito.export_static, save_path, app);
+			description = "interactive trajectory export to $(save_path)",
+		)
+	end
+	display_figure &&
+		Base.invokelatest(display, Base.invokelatest(Bonito.BrowserDisplay), app)
 	return figure, ax
 end
 

@@ -220,7 +220,10 @@ function get_setup(
 	end
 
 	equality_constraints = [
-		(z, θ) -> vcat(player_equality_constraints[i](z, θ), shared_equality_constraint(z, θ))
+		(z, θ) -> vcat(
+			player_equality_constraints[i](z, θ),
+			shared_equality_constraint(z, θ)
+		)
 		for i in 1:num_players
 	]
 
@@ -354,10 +357,11 @@ function demo(;
 	lane_width = 2,
 	verbose = false,
 	rng_seed = 123,
-	random_initial_state = true,
+	random_initial_state = false,
 	debug = false,
 	use_scalarized_baseline = false,
 	use_social_equilibrium_baseline = false,
+	show_interactive_trajectory = false,
 )
 	reset_timer!(TO)
 	@timeit TO "experiment setup" Random.seed!(rng_seed)
@@ -508,12 +512,12 @@ function demo(;
 		solver_status = :solved
 		elapsed_time = @elapsed begin
 			output = @timeit TO "solver invocation" ReducedGOOP.solve(
-					solver,
-					GOOP_kkt_system,
-					θ;
-					z₀,
-					options,
-				)
+				solver,
+				GOOP_kkt_system,
+				θ;
+				z₀,
+				options,
+			)
 			if solver isa ReducedGOOP.InteriorPoint
 				(;
 					status,
@@ -541,11 +545,11 @@ function demo(;
 		end
 
 		strategies = @timeit TO "solution postprocessing" extract_player_strategies(
-				x,
-				num_players,
-				primal_dimension,
-				dynamics,
-			)
+			x,
+			num_players,
+			primal_dimension,
+			dynamics,
+		)
 
 		solution_dict = Dict(
 			"strategies" => strategies,
@@ -611,13 +615,13 @@ function demo(;
 		println("goal_position2:", goal_position2)
 
 		(; θ1, θ2, θ) = @timeit TO "instance parameter construction" build_instance_parameters(
-				flatten_parameters,
-				initial_state1,
-				initial_state2,
-				goal_position1,
-				goal_position2,
-				obstacle_position,
-			)
+			flatten_parameters,
+			initial_state1,
+			initial_state2,
+			goal_position1,
+			goal_position2,
+			obstacle_position,
+		)
 
 		(; warmstart_solution) = @timeit TO "warmstart construction" if compute_warmstart
 			build_default_warmstart(
@@ -766,27 +770,46 @@ function demo(;
 					control_ub = control_bounds.ub,
 				)
 
-				CairoMakie.save(
+				save_figure(
 					joinpath(
 						trajectory_plots_dir,
 						"trajectory_instance_$(solved_attempts)_eps$(ϵ₀).pdf",
 					),
 					trajectory_fig,
 				)
-				CairoMakie.save(
+				save_figure(
 					joinpath(
 						speed_plots_dir,
 						"speed_instance_$(solved_attempts)_eps$(ϵ₀).pdf",
 					),
 					speed_fig,
 				)
-				CairoMakie.save(
+				save_figure(
 					joinpath(
 						control_plots_dir,
 						"control_instance_$(solved_attempts)_eps$(ϵ₀).pdf",
 					),
 					control_fig,
 				)
+				if show_interactive_trajectory
+					interactive_trajectory_path = joinpath(
+						trajectory_plots_dir,
+						"trajectory_interactive_instance_$(solved_attempts)_eps$(ϵ₀).html",
+					)
+					plot_intersection_trajectories_interactive(
+						;
+						map_end,
+						lane_width,
+						strategy = result.strategies,
+						θ1,
+						θ2,
+						goal_position1,
+						goal_position2,
+						display_figure = false,
+						save_path = interactive_trajectory_path,
+					)
+					println("saved interactive trajectory browser file: ", interactive_trajectory_path)
+				end
 			end
 		end
 	end
@@ -804,6 +827,7 @@ function demo(;
 				"random_initial_state" => random_initial_state,
 				"use_scalarized_baseline" => use_scalarized_baseline,
 				"use_social_equilibrium_baseline" => use_social_equilibrium_baseline,
+				"show_interactive_trajectory" => show_interactive_trajectory,
 				"epsilon_schedule" => epsilon_schedule,
 				"max_inner_iters_schedule" => max_inner_iters_schedule,
 				"speed_limit" => speed_limit,
@@ -866,21 +890,21 @@ function save_warmstart_visualizations(
 		control_ub = control_bounds.ub,
 	)
 
-	CairoMakie.save(
+	save_figure(
 		joinpath(
 			warmstart_plots_dir,
 			"warmstart_attempt_$(total_attempts)_instance_$(instance_idx).pdf",
 		),
 		warmstart_fig,
 	)
-	CairoMakie.save(
+	save_figure(
 		joinpath(
 			warmstart_plots_dir,
 			"warmstart_speed_attempt_$(total_attempts)_instance_$(instance_idx).pdf",
 		),
 		warmstart_speed_fig,
 	)
-	CairoMakie.save(
+	save_figure(
 		joinpath(
 			warmstart_plots_dir,
 			"warmstart_control_attempt_$(total_attempts)_instance_$(instance_idx).pdf",
@@ -1190,7 +1214,7 @@ function save_convergence_diagnostics(solution_dict, convergence_plots_dir, inst
 			kkt_error_history = safe_log10_history(kkt_error_history),
 			total_iters = solution_dict["total_iters"],
 		)
-		CairoMakie.save(
+		save_figure(
 			joinpath(
 				convergence_plots_dir,
 				"convergence_instance_$(instance_idx)_eps$(ϵ₀)$(filename_suffix).pdf",
@@ -1205,7 +1229,7 @@ function save_convergence_diagnostics(solution_dict, convergence_plots_dir, inst
 			condition_number_history = safe_log10_history(condition_number_history),
 			total_iters = solution_dict["total_iters"],
 		)
-		CairoMakie.save(
+		save_figure(
 			joinpath(
 				convergence_plots_dir,
 				"condition_number_instance_$(instance_idx)_eps$(ϵ₀)$(filename_suffix).pdf",
@@ -1220,7 +1244,7 @@ function save_convergence_diagnostics(solution_dict, convergence_plots_dir, inst
 			eta_history = safe_log10_history(eta_history),
 			total_iters = solution_dict["total_iters"],
 		)
-		CairoMakie.save(
+		save_figure(
 			joinpath(
 				convergence_plots_dir,
 				"eta_instance_$(instance_idx)_eps$(ϵ₀)$(filename_suffix).pdf",
