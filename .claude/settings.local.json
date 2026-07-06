@@ -59,7 +59,9 @@
       "Read(//Users/dhl/.julia/packages/Bonito/OJTyF/src/**)",
       "Bash(julia --project=experiments /private/tmp/claude-501/-Users-dhl-Documents-Reduced-GOOP/f48383b1-cee0-408a-9496-4f55fae9c1ab/scratchpad/test_slider.jl)",
       "Bash(julia -e 'Meta.parseall\\(read\\(\"/Users/dhl/Documents/Reduced-GOOP/experiments/Robotic_arm.jl\", String\\)\\); println\\(\"parse OK\"\\)')",
-      "Bash(julia --project=experiments /private/tmp/claude-501/-Users-dhl-Documents-Reduced-GOOP/f48383b1-cee0-408a-9496-4f55fae9c1ab/scratchpad/test_distance_plot.jl)"
+      "Bash(julia --project=experiments /private/tmp/claude-501/-Users-dhl-Documents-Reduced-GOOP/f48383b1-cee0-408a-9496-4f55fae9c1ab/scratchpad/test_distance_plot.jl)",
+      "Bash(julia --project=experiments /private/tmp/claude-501/-Users-dhl-Documents-Reduced-GOOP/f48383b1-cee0-408a-9496-4f55fae9c1ab/scratchpad/test_two_player_setup.jl)",
+      "Bash(julia --project=experiments /private/tmp/claude-501/-Users-dhl-Documents-Reduced-GOOP/f48383b1-cee0-408a-9496-4f55fae9c1ab/scratchpad/run_demo.jl)"
     ],
     "additionalDirectories": [
       "/private/tmp"

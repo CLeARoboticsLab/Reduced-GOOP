@@ -20,7 +20,7 @@ include(joinpath(@__DIR__, "dynamics.jl"))
 
 function get_setup(
 	num_players;
-	dynamics = build_dynamics(SingleIntegrator()),
+	dynamics,
 	control_bounds = (; lb = [-10.0, -10.0, -10.0], ub = [10.0, 10.0, 10.0]),
 	planning_horizon = 10,
 	dₚ = 2.0,
@@ -32,31 +32,39 @@ function get_setup(
 	use_scalarized_baseline = false,
 	use_social_equilibrium_baseline = false,
 )
-	num_players == 3 || error("robotic_arm Zero-Sum GOOP setup expects exactly three players.")
+	num_players == 2 || error("robotic_arm Zero-Sum GOOP setup expects exactly two players (two-arm robot and child).")
+	length(dynamics) == num_players || error("Expected one dynamics entry per player.")
 
-	state_dimension = dynamics.state_dimension
-	control_dimension = dynamics.control_dimension
-	dynamics_dimension = state_dimension + control_dimension
 	position_dimension = 3
+	# Player 1 is the combined two-arm agent: state/control stack both arms as
+	# [arm1; arm2]. Player 2 is the child/pet on the ground.
+	arm1_range = 1:position_dimension
+	arm2_range = (position_dimension+1):(2*position_dimension)
 
-	primals_per_player = dynamics_dimension * planning_horizon
-	primal_dimensions = fill(primals_per_player, num_players)
-	parameter_dimensions = fill(state_dimension + 2 * position_dimension, num_players) # (state, 3D goal, 3D obstacle)
+	primal_dimensions = [
+		(dyn.state_dimension + dyn.control_dimension) * planning_horizon for dyn in dynamics
+	]
+	# Per player: (initial state, goal of same length as the state, 3D obstacle).
+	parameter_dimensions = [
+		2 * dyn.state_dimension + position_dimension for dyn in dynamics
+	]
 
 	dummy_primals = BlockArray(zeros(sum(primal_dimensions)), primal_dimensions)
 	dummy_parameters = BlockArray(zeros(sum(parameter_dimensions)), parameter_dimensions)
 
-	unflatten_parameters = function (θ)
+	unflatten_parameters = function (θ; player)
+		state_dimension = dynamics[player].state_dimension
 		θ_iter = Iterators.Stateful(θ)
 		initial_state = first(θ_iter, state_dimension)
-		goal_position = first(θ_iter, position_dimension)
+		goal_position = first(θ_iter, state_dimension)
 		obstacle_position = first(θ_iter, position_dimension)
 		(; initial_state, goal_position, obstacle_position)
 	end
 
-	function flatten_parameters(; initial_state, goal_position, obstacle_position)
+	function flatten_parameters(; player, initial_state, goal_position, obstacle_position)
+		state_dimension = dynamics[player].state_dimension
 		length(initial_state) == state_dimension || error("Expected initial_state length $(state_dimension), got $(length(initial_state)).")
-		length(goal_position) == position_dimension || error("Expected 3D goal_position, got length $(length(goal_position)).")
+		length(goal_position) == state_dimension || error("Expected goal_position length $(state_dimension), got $(length(goal_position)).")
 		length(obstacle_position) == position_dimension || error("Expected 3D obstacle_position, got length $(length(obstacle_position)).")
 		vcat(initial_state, goal_position, obstacle_position)
 	end
@@ -74,24 +82,22 @@ function get_setup(
 		ifelse(preference ≥ ϵ, 0.0, (ϵ - preference)^(level + 2))
 	end
 
-	trajectory(z; player) =
-		unflatten_trajectory(z[Block(player)], state_dimension, control_dimension)
+	trajectory(z; player) = unflatten_trajectory(
+		z[Block(player)],
+		dynamics[player].state_dimension,
+		dynamics[player].control_dimension,
+	)
 
-	function goal_objective(; player)
-		player in (1, 2) || error("Center goal objective belongs only to robot players 1 and 2.")
-		function (z, θ)
-			(; xs) = trajectory(z; player = 1)
-			xs1 = copy(xs)
-			(; xs) = trajectory(z; player = 2)
-			xs2 = copy(xs)
-			params1 = unflatten_parameters(θ[Block(1)])
-			params2 = unflatten_parameters(θ[Block(2)])
+	function goal_objective(z, θ)
+		# The two-arm agent delivers the pot center to the center of the two
+		# per-arm goals; both quantities are recovered from the stacked state.
+		(; xs) = trajectory(z; player = 1)
+		(; goal_position) = unflatten_parameters(θ[Block(1)]; player = 1)
 
-			center_position = 0.5 .* (xs1[end] .+ xs2[end])
-			center_goal_position = 0.5 .* (params1.goal_position .+ params2.goal_position)
-			goal_deviation = center_position .- center_goal_position
-			sum(goal_deviation .^ 2)
-		end
+		center_position = 0.5 .* (xs[end][arm1_range] .+ xs[end][arm2_range])
+		center_goal_position = 0.5 .* (goal_position[arm1_range] .+ goal_position[arm2_range])
+		goal_deviation = center_position .- center_goal_position
+		sum(goal_deviation .^ 2)
 	end
 
 	function control_objective(; player)
@@ -103,7 +109,9 @@ function get_setup(
 
 	function control_bound_inequality(; player)
 		function (z, _)
-			(; lb, ub) = control_bounds
+			# The combined two-arm agent tiles the single-arm bounds over both arms.
+			lb = player == 1 ? vcat(control_bounds.lb, control_bounds.lb) : control_bounds.lb
+			ub = player == 1 ? vcat(control_bounds.ub, control_bounds.ub) : control_bounds.ub
 			lb_mask = findall(!isinf, lb)
 			ub_mask = findall(!isinf, ub)
 			(; xs, us) = trajectory(z; player)
@@ -115,110 +123,83 @@ function get_setup(
 
 	player_equality_constraints = [
 		function (z, θ)
-			(; lb, ub) = control_bounds
-			lb_mask = findall(!isinf, lb)
-			ub_mask = findall(!isinf, ub)
 			(; xs, us) = trajectory(z; player = i)
-			(; initial_state, goal_position) = unflatten_parameters(θ[Block(i)])
+			(; initial_state) = unflatten_parameters(θ[Block(i)]; player = i)
 
 			initial_state_constraint = xs[1] - initial_state
 			dynamics_constraints = mapreduce(vcat, 1:(length(xs)-1)) do t
 				# xs[t] - dynamics(xs[t-1], us[t-1], t)
-				dynamics.residual(z[Block(i)], t)
+				dynamics[i].residual(z[Block(i)], t)
 			end
 			empty_constraint = similar(initial_state_constraint, 0)
 
-			# The robot grippers carry the pot to a raised delivery height. The child/pet
-			# stays on the ground and does not receive this terminal height constraint.
-			terminal_state_constraint = i <= 2 ?
-				[xs[end][position_dimension] - goal_position[position_dimension]] :
+			# The two arms jointly carry the hot pot. This hard handle-grasp
+			# constraint keeps the two grippers separated by the fixed 3D handle
+			# distance dₚ at all times. It is internal to the combined two-arm
+			# player; the child never directly manipulates the pot.
+			handle_grasp_constraint = i == 1 ?
+				mapreduce(vcat, eachindex(xs)) do t
+					gripper_separation = xs[t][arm1_range] .- xs[t][arm2_range]
+					[sum(abs2, gripper_separation) - dₚ^2]
+				end :
 				empty_constraint
-			terminal_state_constraint = empty_constraint
 
-			# Player 3 is modeled with the same 3D single-integrator dynamics, but its
+			# The child is modeled with the same 3D single-integrator dynamics, but its
 			# vertical velocity is fixed to zero. Since its initial z is zero, the child
 			# remains on the ground for the full trajectory.
-			child_ground_constraint = i == 3 ?
+			child_ground_constraint = i == 2 ?
 				mapreduce(u -> [u[position_dimension]], vcat, us) :
 				empty_constraint
 
 			vcat(
 				initial_state_constraint,
 				dynamics_constraints,
-				terminal_state_constraint,
+				handle_grasp_constraint,
 				child_ground_constraint,
 			)
 		end for i in 1:num_players
 	]
 
-	shared_equality_constraint = function (z, θ)
-		# Players 1 and 2 jointly carry the hot pot. This hard handle-grasp
-		# constraint keeps the two robot grippers separated by the fixed 3D handle
-		# distance dₚ at all times. Player 3 never directly manipulates the pot and
-		# is deliberately excluded from this equality constraint.
-		(; xs, us) = trajectory(z; player = 1)
-		xs1 = copy(xs)
-		(; xs, us) = trajectory(z; player = 2)
-		xs2 = copy(xs)
-		mapreduce(vcat, eachindex(xs1)) do t
-			gripper_separation = xs1[t].- xs2[t]
-			sum(abs2, gripper_separation) - dₚ^2
+	equality_constraints = player_equality_constraints
+
+	function robot_child_safety_inequality(z, θ)
+		arm_trajectory = trajectory(z; player = 1)
+		child_trajectory = trajectory(z; player = 2)
+
+		# The child/pet is not constrained by this residual. Instead, the two-arm
+		# player must keep the pot center c = (p₁ + p₂) / 2 outside the
+		# child-centered safety sphere. This is the proof-of-concept Zero-Sum
+		# GOOP coupling: the child's curious motion restricts the feasible robot
+		# motions indirectly through safety.
+		mapreduce(vcat, eachindex(child_trajectory.xs)) do t
+			arm_state = arm_trajectory.xs[t]
+			pot_center = 0.5 .* (arm_state[arm1_range] .+ arm_state[arm2_range])
+			separation = pot_center .- child_trajectory.xs[t]
+			[sum(abs2, separation) - collision_avoidance^2]
 		end
 	end
 
-	equality_constraints = [
-		i <= 2 ?
-			((z, θ) -> vcat(
-				player_equality_constraints[i](z, θ),
-				shared_equality_constraint(z, θ),
-			)) :
-			player_equality_constraints[i]
-		for i in 1:num_players
-	]
+	function robot_arm_speed_inequality(z, θ)
+		(; us) = trajectory(z; player = 1)
 
-	function robot_child_safety_inequality(; player)
-		player in (1, 2) || error("Robot-child safety constraints belong only to robot players 1 and 2.")
-		function (z, θ)
-			(; xs) = trajectory(z; player = 1)
-			xs1 = copy(xs)
-			(; xs) = trajectory(z; player = 2)
-			xs2 = copy(xs)
-			(; xs) = trajectory(z; player = 3)
-			child_xs = copy(xs)
-
-			mapreduce(vcat, eachindex(child_xs)) do t
-				pot_center = 0.5 .* (xs1[t] .+ xs2[t])
-				separation = pot_center .- child_xs[t]
-				[sum(abs2, separation) - collision_avoidance^2]
-			end
+		# Each arm individually respects the same speed limit as before.
+		mapreduce(vcat, us) do u
+			[
+				arm_speed_limit^2 - sum(abs2, u[arm1_range]),
+				arm_speed_limit^2 - sum(abs2, u[arm2_range]),
+			]
 		end
 	end
 
-	function robot_arm_speed_inequality(; player)
-		player in (1, 2) || error("Robot arm speed constraints belong only to robot players 1 and 2.")
-		function (z, θ)
-			(; us) = trajectory(z; player)
-
-			mapreduce(vcat, us) do u
-				[arm_speed_limit^2 - sum(abs2, u[1:position_dimension])]
-			end
-		end
-	end
-
-	function robot_inequality(; player)
-		safety_inequality = robot_child_safety_inequality(; player)
-		speed_inequality = robot_arm_speed_inequality(; player)
-
-		function (z, θ)
-			vcat(
-				safety_inequality(z, θ),
-				speed_inequality(z, θ),
-			)
-		end
+	function robot_inequality(z, θ)
+		vcat(
+			robot_child_safety_inequality(z, θ),
+			robot_arm_speed_inequality(z, θ),
+		)
 	end
 
 	function child_ground_speed_inequality(z, θ)
-		(; us) = trajectory(z; player = 3)
+		(; us) = trajectory(z; player = 2)
 
 		# This is a physical child-motion bound, not a robot safety constraint. The
 		# safety constraints remain robot-only; Player 3 is merely limited to a
@@ -229,19 +210,15 @@ function get_setup(
 	end
 
 	inequality_constraints = [
-		robot_inequality(; player = 1),
-		robot_inequality(; player = 2),
+		robot_inequality,
 		child_ground_speed_inequality,
 	]
 
 	# Load balance objective
 	function load_balance_objective(z, θ; allowance = 0.1)
-		(; xs, us) = trajectory(z; player = 1)
-		xs1 = copy(xs)
-		(; xs, us) = trajectory(z; player = 2)
-		xs2 = copy(xs)
-		sum(eachindex(xs1)) do t
-    		balance = (xs1[t][position_dimension] - xs2[t][position_dimension])^2
+		(; xs) = trajectory(z; player = 1)
+		sum(eachindex(xs)) do t
+			balance = (xs[t][arm1_range[end]] - xs[t][arm2_range[end]])^2
 			ifelse(balance < allowance^2, 0.0, balance - allowance^2)
 		end
 	end
@@ -251,18 +228,15 @@ function get_setup(
 	end
 
 	function pot_approach_objective(z, θ)
-		(; xs) = trajectory(z; player = 1)
-		xs1 = copy(xs)
-		(; xs) = trajectory(z; player = 2)
-		xs2 = copy(xs)
-		(; xs) = trajectory(z; player = 3)
-		xs3 = copy(xs)
+		arm_trajectory = trajectory(z; player = 1)
+		child_trajectory = trajectory(z; player = 2)
 
 		# The child/pet is curious, not physically coupled to the pot.
 		# Approach the pot center c = (p₁ + p₂) / 2.
-		sum(eachindex(xs3)) do t
-			pot_center = 0.5 .* (xs1[t] .+ xs2[t])
-			sum(abs2, xs3[t] .- pot_center)
+		sum(eachindex(child_trajectory.xs)) do t
+			arm_state = arm_trajectory.xs[t]
+			pot_center = 0.5 .* (arm_state[arm1_range] .+ arm_state[arm2_range])
+			sum(abs2, child_trajectory.xs[t] .- pot_center)
 		end
 	end
 	function negative_pot_approach_objective(z, θ)
@@ -272,17 +246,9 @@ function get_setup(
 	preferences = [
 		[
 			# control_objective(; player = 1),
-			goal_objective(; player = 1),
+			goal_objective,
 			load_balance_objective,
-			robot_inequality(; player = 1),
-		],
-		[
-			# control_objective(; player = 2),
-			# goal_objective(; player = 2),
-			# goal_objective(; player = 2),
-			goal_objective(; player = 2),
-			load_balance_objective,
-			robot_inequality(; player = 2),
+			robot_inequality,
 		],
 		[
 			pot_approach_objective,
@@ -291,7 +257,7 @@ function get_setup(
 	]
 
 	# Preference hierarchy: [lowest priority, ..., highest priority]
-	is_prioritized_constraint = [[false, false, true], [false, false, true], [false, true]]
+	is_prioritized_constraint = [[false, false, true], [false, true]]
 
 	function build_goop_problem()
 		@timeit TO "ParametricGOOP construction" begin
@@ -301,7 +267,7 @@ function get_setup(
 				preferences = use_scalarized_baseline ? scalarized_preferences : preferences,
 				is_prioritized_constraint = use_scalarized_baseline ? scalarized_is_prioritized_constraint : is_prioritized_constraint,
 				equality_constraints,
-				inequality_constraints = [nothing, nothing, nothing],
+				inequality_constraints = [nothing, nothing],
 				shared_equality_constraint = nothing,
 				shared_inequality_constraint = nothing,
 			)
@@ -350,17 +316,12 @@ function get_setup(
 		accumulated_objective
 	end
 	equality_constraint = function (z, θ)
-		vcat(
-			mapreduce(f -> f(z, θ), vcat, player_equality_constraints),
-			shared_equality_constraint(z, θ),
-		)
+		mapreduce(f -> f(z, θ), vcat, player_equality_constraints)
 	end
-	inequality_constraint = nothing
 	inequality_constraint = function (z, θ)
 		vcat(
 			inequality_constraints[1](z, θ),
 			inequality_constraints[2](z, θ),
-			inequality_constraints[3](z, θ),
 		)
 	end
 	primal_dimension = sum(primal_dimensions)
@@ -408,7 +369,7 @@ function demo(;
 	@timeit TO "experiment setup" Random.seed!(rng_seed)
 
 	# ── Settings ───────────────────────────────────────────────────────────────
-	run_id = "Robotic_arm_test2_paramtune"
+	run_id = "Robotic_arm_single_robot_agent"
 	dynamics_model = Robotic_arm.SingleIntegrator3D()
 	goop_version = :reduced               # :complete | :reduced | :quasi
 	solver = ReducedGOOP.InteriorPoint() # ReducedGOOP.InteriorPoint() | ReducedGOOP.PATHSolver()
@@ -416,7 +377,8 @@ function demo(;
 	compute_warmstart = true # Whether to compute a warmstart trajectory via rollout (true) or load from file (false)
 
 	# ── Problem parameters ─────────────────────────────────────────────────────
-	num_players          = 3
+	# Player 1: combined two-arm agent, Player 2: child/pet.
+	num_players          = 2
 	planning_horizon     = 12
 	collision_avoidance  = 2.0
 	child_initial_buffer = 4.0
@@ -447,7 +409,12 @@ function demo(;
 	Δt                = 0.1
 	control_bounds    = (; lb = [-10.0, -10.0, -10.0], ub = [10.0, 10.0, 10.0])
 
-	dynamics = @timeit TO "dynamics construction" build_dynamics(dynamics_model; Δt, state_dimension, control_dimension)
+	# Per-player dynamics: the combined two-arm agent stacks both arms into one
+	# 6D single integrator; the child keeps the plain 3D single integrator.
+	dynamics = @timeit TO "dynamics construction" [
+		build_two_arm_dynamics(dynamics_model; Δt),
+		build_dynamics(dynamics_model; Δt, state_dimension, control_dimension),
+	]
 
 	@timeit TO "problem setup" begin
 		(; problem, flatten_parameters) = get_setup(
@@ -499,8 +466,9 @@ function demo(;
 		println("[PATH] Variable Dimension: ", length(GOOP_kkt_system.lower_bounds))
 	end
 
-	dynamics_dimension = dynamics.state_dimension + dynamics.control_dimension
-	primal_dimension   = dynamics_dimension * planning_horizon
+	primal_dimensions = [
+		(dyn.state_dimension + dyn.control_dimension) * planning_horizon for dyn in dynamics
+	]
 
 	# ── Per-instance solver ────────────────────────────────────────────────────
 	function solve_game_instance(θ; z₀, ϵ₀, max_inner_iters)
@@ -584,15 +552,14 @@ function demo(;
 				@show status
 				Int(status) != 1 && return nothing
 				kkt_error = info.residual
-				x = z[1:(num_players*primal_dimension)]
+				x = z[1:sum(primal_dimensions)]
 				solver_status = :solved
 			end
 		end
 
 		strategies = @timeit TO "solution postprocessing" extract_player_strategies(
 				x,
-				num_players,
-				primal_dimension,
+				primal_dimensions,
 				dynamics,
 			)
 
@@ -640,13 +607,13 @@ function demo(;
 				sample_initial_state(
 					dynamics_model,
 					base_initial_state1,
-					dynamics.state_dimension,
+					state_dimension,
 					perturbation_scale,
 				),
 				sample_initial_state(
 					dynamics_model,
 					base_initial_state2,
-					dynamics.state_dimension,
+					state_dimension,
 					perturbation_scale,
 				),
 			)
@@ -698,7 +665,7 @@ function demo(;
 			)
 		else
 			(;
-				warmstart_solution = load("experiments/solution_dict_instance_1_eps0.1.jld2")["single_stored_object"]["x"][1:(num_players*primal_dimension)],
+				warmstart_solution = load("experiments/solution_dict_instance_1_eps0.1.jld2")["single_stored_object"]["x"][1:sum(primal_dimensions)],
 			)
 		end
 		@timeit TO "warmstart visualization" begin
@@ -707,8 +674,7 @@ function demo(;
 				warmstart_plots_dir,
 				total_attempts,
 				solved_attempts + 1,
-				num_players,
-				primal_dimension,
+				primal_dimensions,
 				dynamics,
 				map_end,
 				lane_width,
@@ -823,11 +789,13 @@ function demo(;
 					solution_dict,
 				)
 				save_convergence_diagnostics(solution_dict, convergence_plots_dir, solved_attempts, ϵ₀)
+				# Plots keep the per-arm view of the combined two-arm agent.
+				plot_strategies = split_arm_strategies(result.strategies)
 				trajectory_fig, _ = plot_single_integrator_3d_trajectories(
 					;
 					map_end,
 					lane_width,
-					strategy = result.strategies,
+					strategy = plot_strategies,
 					θ1,
 					θ2,
 					θ3,
@@ -837,19 +805,19 @@ function demo(;
 					collision_avoidance,
 				)
 				speed_fig, _ = speed_plot(;
-					strategy = result.strategies,
+					strategy = plot_strategies,
 					speed_limit = arm_speed_limit,
 					dynamics_model,
 					speed_limit_players = 1:2,
 					additional_speed_limits = [(; limit = child_speed_limit, players = 3)],
 				)
 				control_fig, _ = control_plot(;
-					strategy = result.strategies,
+					strategy = plot_strategies,
 					control_lb = control_bounds.lb,
 					control_ub = control_bounds.ub,
 				)
 				distance_fig, _ = inter_player_distance_plot(;
-					strategy = result.strategies,
+					strategy = plot_strategies,
 					reference_distance = dₚ,
 					safety_distance = collision_avoidance,
 				)
@@ -891,7 +859,7 @@ function demo(;
 						;
 						map_end,
 						lane_width,
-						strategy = result.strategies,
+						strategy = plot_strategies,
 						θ1,
 						θ2,
 						θ3,
@@ -946,8 +914,7 @@ function save_warmstart_visualizations(
 	warmstart_plots_dir,
 	total_attempts,
 	instance_idx,
-	num_players,
-	primal_dimension,
+	primal_dimensions,
 	dynamics,
 	map_end,
 	lane_width,
@@ -963,11 +930,14 @@ function save_warmstart_visualizations(
 	child_speed_limit,
 	control_bounds,
 )
-	warmstart_strategies = extract_player_strategies(
-		warmstart_solution,
-		num_players,
-		primal_dimension,
-		dynamics,
+	# Plots keep the per-arm view: split the combined two-arm strategy back
+	# into [arm1, arm2, child].
+	warmstart_strategies = split_arm_strategies(
+		extract_player_strategies(
+			warmstart_solution,
+			primal_dimensions,
+			dynamics,
+		),
 	)
 
 	warmstart_fig, _ = plot_single_integrator_3d_trajectories(
@@ -987,7 +957,7 @@ function save_warmstart_visualizations(
 		;
 		strategy = warmstart_strategies,
 		speed_limit = arm_speed_limit,
-		dynamics_model = dynamics.model,
+		dynamics_model = dynamics[1].model,
 		speed_limit_players = 1:2,
 		additional_speed_limits = [(; limit = child_speed_limit, players = 3)],
 	)
@@ -1096,6 +1066,20 @@ function build_dynamics(
 	(; model, residual, step, Δt, state_dimension, control_dimension)
 end
 
+"""
+Two 3D single-integrator arms stacked into one joint agent with state
+[p₁; p₂] ∈ R⁶ and control [u₁; u₂] ∈ R⁶. The single-integrator residual and
+step are dimension-generic, so the stacked agent reuses them directly.
+"""
+function build_two_arm_dynamics(model::SingleIntegrator3D; Δt = 0.5)
+	state_dimension = 6
+	control_dimension = 6
+
+	residual(z, t) = single_integrator_3d(z, t; Δt, state_dimension, control_dimension)
+	step(x, u, t) = single_integrator_3d_step(x, u; Δt)
+	(; model, residual, step, Δt, state_dimension, control_dimension)
+end
+
 function dynamics_model_name(::SingleIntegrator3D)
 	"single_integrator_3d"
 end
@@ -1103,19 +1087,37 @@ end
 
 function extract_player_strategies(
 	primal_solution,
-	num_players,
-	primal_dimension,
+	primal_dimensions,
 	dynamics,
 )
-	map(1:num_players) do player_idx
-		start_idx = primal_dimension * (player_idx - 1) + 1
-		end_idx   = start_idx + primal_dimension - 1
+	offsets = cumsum(vcat(0, primal_dimensions[1:(end-1)]))
+	map(eachindex(primal_dimensions)) do player_idx
+		start_idx = offsets[player_idx] + 1
+		end_idx   = offsets[player_idx] + primal_dimensions[player_idx]
 		unflatten_trajectory(
 			primal_solution[start_idx:end_idx],
-			dynamics.state_dimension,
-			dynamics.control_dimension,
+			dynamics[player_idx].state_dimension,
+			dynamics[player_idx].control_dimension,
 		)
 	end
+end
+
+"""
+Split the combined two-arm strategy (player 1) into per-arm 3D strategies so
+the existing per-arm plotting code can be reused unchanged. Returns
+[arm1, arm2, child, ...] in the layout the plots expect.
+"""
+function split_arm_strategies(strategies; position_dimension = 3)
+	combined = strategies[1]
+	arm1 = (;
+		xs = [x[1:position_dimension] for x in combined.xs],
+		us = [u[1:position_dimension] for u in combined.us],
+	)
+	arm2 = (;
+		xs = [x[(position_dimension+1):(2*position_dimension)] for x in combined.xs],
+		us = [u[(position_dimension+1):(2*position_dimension)] for u in combined.us],
+	)
+	vcat([arm1, arm2], strategies[2:end])
 end
 
 function evaluate_preferences_at_solution(problem, x, θ)
@@ -1180,22 +1182,27 @@ function build_instance_parameters(
 	goal_position3,
 	obstacle_position,
 )
-	θ1 = flatten_parameters(;
-		initial_state = initial_state1,
-		goal_position = goal_position1,
+	# Solver-facing parameter blocks: player 1 stacks both arms, player 2 is the child.
+	θ_arms = flatten_parameters(;
+		player = 1,
+		initial_state = vcat(initial_state1, initial_state2),
+		goal_position = vcat(goal_position1, goal_position2),
 		obstacle_position = obstacle_position,
 	)
-	θ2 = flatten_parameters(;
-		initial_state = initial_state2,
-		goal_position = goal_position2,
-		obstacle_position = obstacle_position,
-	)
-	θ3 = flatten_parameters(;
+	θ_child = flatten_parameters(;
+		player = 2,
 		initial_state = initial_state3,
 		goal_position = goal_position3,
 		obstacle_position = obstacle_position,
 	)
-	(; θ1, θ2, θ3, θ = [θ1..., θ2..., θ3...])
+
+	# Per-arm 3D blocks kept in the legacy layout purely for plotting, which
+	# reads the initial position from the first three entries.
+	θ1 = vcat(initial_state1, goal_position1, obstacle_position)
+	θ2 = vcat(initial_state2, goal_position2, obstacle_position)
+	θ3 = copy(θ_child)
+
+	(; θ1, θ2, θ3, θ = [θ_arms..., θ_child...])
 end
 
 function limit_control_speed(control, speed_limit, speed_indices)
@@ -1220,54 +1227,40 @@ function build_default_warmstart(
 	arm_speed_limit = 3.0,
 	child_speed_limit = 1.5,
 )
+	arm_dynamics, child_dynamics = dynamics
 	planning_horizon >= 2 || error("Robot warm start requires at least two time steps.")
-	length(goal_position1) == dynamics.state_dimension || error("Goal position 1 dimension mismatch.")
-	length(goal_position2) == dynamics.state_dimension || error("Goal position 2 dimension mismatch.")
+	length(goal_position1) == child_dynamics.state_dimension || error("Goal position 1 dimension mismatch.")
+	length(goal_position2) == child_dynamics.state_dimension || error("Goal position 2 dimension mismatch.")
 
-	total_time = dynamics.Δt * (planning_horizon - 1)
+	total_time = arm_dynamics.Δt * (planning_horizon - 1)
 	start_center = 0.5 .* (initial_state1 .+ initial_state2)
 	goal_center = 0.5 .* (goal_position1 .+ goal_position2)
+	# Same 3D constant control for both arms (as before), stacked into the
+	# combined agent's 6D control.
 	robot_warmstart_control = limit_control_speed(
 		(goal_center .- start_center) ./ total_time,
 		arm_speed_limit,
-		1:dynamics.control_dimension,
+		1:child_dynamics.control_dimension,
 	)
-	player1_warmstart = build_constant_control_warmstart(
+	arms_warmstart = build_constant_control_warmstart(
 		planning_horizon,
-		dynamics,
-		initial_state1,
-		robot_warmstart_control,
-	)
-
-	player2_warmstart = build_constant_control_warmstart(
-		planning_horizon,
-		dynamics,
-		initial_state2,
-		robot_warmstart_control,
+		arm_dynamics,
+		vcat(initial_state1, initial_state2),
+		vcat(robot_warmstart_control, robot_warmstart_control),
 	)
 
-	player3_warmstart = build_ground_line_warmstart(
+	child_warmstart = build_ground_line_warmstart(
 		planning_horizon,
-		dynamics,
+		child_dynamics,
 		initial_state3,
 		goal_position3;
 		ground_speed_limit = child_speed_limit,
 	)
 
-	# player2_vx_profile = fill(0.0, planning_horizon)
-	# player2_vy_profile = vcat(1.0, fill(arm_speed_limit, planning_horizon - 1))
-	# player2_warmstart = build_planar_di_speed_profile_warmstart(
-	# 	planning_horizon,
-	# 	dynamics,
-	# 	initial_state2;
-	# 	vx_profile = player2_vx_profile,
-	# 	vy_profile = player2_vy_profile,
-	# )
-
 	warmstart_solution = flatten_warmstart_solution(
 		planning_horizon,
-		[player1_warmstart.xs, player2_warmstart.xs, player3_warmstart.xs],
-		[player1_warmstart.us, player2_warmstart.us, player3_warmstart.us],
+		[arms_warmstart.xs, child_warmstart.xs],
+		[arms_warmstart.us, child_warmstart.us],
 	)
 	(; warmstart_solution)
 end
