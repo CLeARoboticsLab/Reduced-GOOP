@@ -409,7 +409,7 @@ function demo(;
 	@timeit TO "experiment setup" Random.seed!(rng_seed)
 
 	# ── Settings ───────────────────────────────────────────────────────────────
-	run_id = "Robotic_arm_test2"
+	run_id = "Robotic_arm_test2_paramtune"
 	dynamics_model = Robotic_arm.SingleIntegrator3D()
 	goop_version = :reduced               # :complete | :reduced | :quasi
 	solver = ReducedGOOP.InteriorPoint() # ReducedGOOP.InteriorPoint() | ReducedGOOP.PATHSolver()
@@ -418,7 +418,7 @@ function demo(;
 
 	# ── Problem parameters ─────────────────────────────────────────────────────
 	num_players          = 3
-	planning_horizon     = 20
+	planning_horizon     = 12
 	collision_avoidance  = 2.0
 	child_initial_buffer = 4.0
 	arm_speed_limit		 = 5.0
@@ -430,7 +430,7 @@ function demo(;
 
 	# ── Solver schedule ────────────────────────────────────────────────────────
 	epsilon_schedule         = [0.1]
-	max_inner_iters_schedule = fill(1000, length(epsilon_schedule))
+	max_inner_iters_schedule = fill(500, length(epsilon_schedule))
 
 	# ── Scenario ───────────────────────────────────────────────────────────────
 	# Single Integrator 3D: state = [px, py, pz]
@@ -507,8 +507,8 @@ function demo(;
 	function solve_game_instance(θ; z₀, ϵ₀, max_inner_iters)
 		options = @timeit TO "solver options construction" if solver isa ReducedGOOP.InteriorPoint
 			ReducedGOOP.InteriorPointOptions(;
-				tol = 4e-1, #1e-4
-				η₀ = 5e-5, # 5e-5, 0.0 to turn off Tikhonov
+				tol = 0.0001, #1e-4
+				η₀ = 1.0e-6, # 5e-5, 0.0 to turn off Tikhonov
 				ϵ₀,
 				max_inner_iters,
 				max_outer_iters = 1,
