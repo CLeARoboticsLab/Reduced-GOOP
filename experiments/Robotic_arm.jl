@@ -135,7 +135,7 @@ function get_setup(
 
 		# Normalized by the horizon so the tracking term stays commensurate
 		# with the terminal objective regardless of planning_horizon.
-		terminal_objective # + (tracking_weight / planning_horizon) * tracking_objective
+		terminal_objective + (tracking_weight / planning_horizon) * tracking_objective
 	end
 
 	function control_objective(; player)
