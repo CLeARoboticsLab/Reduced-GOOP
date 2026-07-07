@@ -574,6 +574,7 @@ function _plot_single_integrator_3d_browser_trajectories(
 	goal_position2,
 	goal_position3 = nothing,
 	collision_avoidance = nothing,
+	reference_distance = nothing,
 	map_end = nothing,
 	lane_width = nothing,
 	workspace_margin = 0.75,
@@ -820,7 +821,7 @@ function _plot_single_integrator_3d_browser_trajectories(
 	end
 
 	makie.Legend(
-		figure[1, 2],
+		figure[1, 3],
 		legend_elements,
 		legend_labels;
 		framevisible = false,
@@ -830,6 +831,110 @@ function _plot_single_integrator_3d_browser_trajectories(
 		valign = :top,
 	)
 	makie.center!(scene_axis.scene)
+
+	# ── Distance panel driven by the same time index as the 3D view ───────────
+	# Placed to the right of the trajectory so both are visible side-by-side.
+	# Mirrors the static inter_player_distance_plot: gripper separation against
+	# the handle reference distance, and pot-center-to-child distance against
+	# the safety radius. A slider-linked cursor and moving markers let the user
+	# inspect the distances at the currently selected time step.
+	horizon_steps = collect(0:time_horizon)
+	time_cursor = makie.lift(t -> [Float64(clamp(t, 0, time_horizon))], time_index)
+	distance_axis = makie.Axis(
+		figure[1, 2];
+		xlabel = "time step",
+		ylabel = "distance [m]",
+		xlabelsize = 18,
+		ylabelsize = 18,
+	)
+
+	gripper_distances = [
+		sqrt((x1[k] - x2[k])^2 + (y1[k] - y2[k])^2 + (z1[k] - z2[k])^2)
+		for k in 1:(time_horizon+1)
+	]
+	makie.lines!(
+		distance_axis,
+		horizon_steps,
+		gripper_distances;
+		color = :dodgerblue,
+		linewidth = 3,
+		label = "Gripper separation",
+	)
+	if !isnothing(reference_distance)
+		makie.hlines!(
+			distance_axis,
+			[reference_distance];
+			color = :black,
+			linestyle = :dash,
+			linewidth = 2,
+			label = "Handle distance [$(reference_distance) m]",
+		)
+	end
+
+	pot_child_distances = nothing
+	if has_child
+		pot_child_len = min(time_horizon + 1, length(x3))
+		pot_child_distances = [
+			sqrt(
+				(0.5 * (x1[k] + x2[k]) - x3[k])^2 +
+				(0.5 * (y1[k] + y2[k]) - y3[k])^2 +
+				(0.5 * (z1[k] + z2[k]) - z3[k])^2,
+			)
+			for k in 1:pot_child_len
+		]
+		makie.lines!(
+			distance_axis,
+			0:(pot_child_len-1),
+			pot_child_distances;
+			color = :darkorange,
+			linewidth = 3,
+			label = "Pot center–child distance",
+		)
+		if !isnothing(collision_avoidance)
+			makie.hlines!(
+				distance_axis,
+				[collision_avoidance];
+				color = :darkorange,
+				linestyle = :dot,
+				linewidth = 2,
+				label = "Safety distance [$(collision_avoidance) m]",
+			)
+		end
+	end
+
+	makie.vlines!(distance_axis, time_cursor; color = (:gray, 0.7), linewidth = 2)
+	current_marker_at_time(values) = makie.lift(
+		t -> [makie.Point2f(
+			clamp(t, 0, length(values) - 1),
+			values[clamp(t + 1, 1, length(values))],
+		)],
+		time_index,
+	)
+	makie.scatter!(
+		distance_axis,
+		current_marker_at_time(gripper_distances);
+		marker = :diamond,
+		markersize = 18,
+		color = :dodgerblue,
+		strokecolor = :black,
+		strokewidth = 1,
+	)
+	if !isnothing(pot_child_distances)
+		makie.scatter!(
+			distance_axis,
+			current_marker_at_time(pot_child_distances);
+			marker = :diamond,
+			markersize = 18,
+			color = :darkorange,
+			strokecolor = :black,
+			strokewidth = 1,
+		)
+	end
+	makie.axislegend(distance_axis; position = :rt, framevisible = false, labelsize = 13)
+	# Trajectory on the left stays dominant; the distance panel sits beside it
+	# and the legend takes the remaining right-hand column.
+	makie.colsize!(figure.layout, 1, makie.Relative(0.52))
+	makie.colsize!(figure.layout, 2, makie.Relative(0.30))
 
 	return figure, scene_axis, time_index, time_horizon
 end
@@ -851,7 +956,7 @@ end
 function plot_trajectory_3d_interactive(;
 	display_figure = true,
 	save_path = nothing,
-	figure_size = (1100, 850),
+	figure_size = (1600, 850),
 	exportable = true,
 	offline = true,
 	kwargs...,

@@ -113,7 +113,8 @@ function get_setup(
 		function (z, _)
 			(; xs) = trajectory(z; player)
 			mapreduce(vcat, 1:length(xs)) do t
-				speed_limit_constraints(dynamics.model, xs[t]; speed_limit)
+				# speed_limit_constraints(dynamics.model, xs[t]; speed_limit)
+				[speed_limit^2 - sum(abs2, xs[t][3:4])] 
 			end
 		end
 	end
@@ -140,37 +141,21 @@ function get_setup(
 		end
 	end
 
+	# Safety constraints (speed limit + collision avoidance). Each player carries
+	# its own copy, so both players have an avoidance gradient in their own
+	# decision block while the game stays non-cooperative.
+	function safety_constraints(; player)
+		function (z, θ)
+			vcat(
+				speed_limit_preference(; player)(z, θ),
+				shared_collision_avoidance(z, θ),
+			)
+		end
+	end
+
 	inequality_constraints = [
-		function (z, θ)
-			(; lb, ub) = control_bounds
-			lb_mask = findall(!isinf, lb)
-			ub_mask = findall(!isinf, ub)
-			(; xs, us) = trajectory(z; player = 1)
-			vcat(
-				# mapreduce(vcat, us) do u
-				# 	vcat(u[lb_mask] - lb[lb_mask], ub[ub_mask] - u[ub_mask])
-				# end,
-				# mapreduce(vcat, 1:length(xs)) do t
-				# 	lane_bounds(xs[t]; player = 1)
-				# end,
-				shared_collision_avoidance(z, θ),
-			)
-		end,
-		function (z, θ)
-			(; lb, ub) = control_bounds
-			lb_mask = findall(!isinf, lb)
-			ub_mask = findall(!isinf, ub)
-			(; xs, us) = trajectory(z; player = 2)
-			vcat(
-				# mapreduce(vcat, us) do u
-				# 	vcat(u[lb_mask] - lb[lb_mask], ub[ub_mask] - u[ub_mask])
-				# end,
-				# mapreduce(vcat, 1:length(xs)) do t
-				# 	lane_bounds(xs[t]; player = 2)
-				# end,
-				shared_collision_avoidance(z, θ),
-			)
-		end,
+		safety_constraints(; player = 1),
+		safety_constraints(; player = 2),
 	]
 
 	player_equality_constraints = [
@@ -222,42 +207,30 @@ function get_setup(
 	equality_constraints = [
 		(z, θ) -> vcat(
 			player_equality_constraints[i](z, θ),
-			shared_equality_constraint(z, θ)
+			# shared_equality_constraint(z, θ)
 		)
 		for i in 1:num_players
 	]
 
 	preferences = [
 		[
-			# Minimize control effort 
+			# Minimize control effort (lowest priority)
 			control_objective(; player = 1),
 
-			# # Drive under speed limit
-			speed_limit_preference(; player = 1),
-
-			# Reach the goal (highest priority for P1)
+			# Reach the goal (highest priority)
 			goal_objective(; player = 1),
-
-			# Lane bounds + collision avoidance (constraint, both players)
-			# inequality_constraints[1],
 		],
 		[
-			# Minimize control effort
+			# Minimize control effort (lowest priority)
 			control_objective(; player = 2),
 
-			# Reach the goal
+			# Reach the goal (highest priority)
 			goal_objective(; player = 2),
-
-			# Drive under speed limit (highest priority for P2)
-			speed_limit_preference(; player = 2),
-
-			# Lane bounds + collision avoidance (constraint, both players)
-			# inequality_constraints[2],
 		],
 	]
 
 	# Preference hierarchy: [lowest priority, ..., highest priority]
-	is_prioritized_constraint = [[false, true, false], [false, false, true]]
+	is_prioritized_constraint = [[false, false], [false, false]]
 
 	function build_goop_problem()
 		@timeit TO "ParametricGOOP construction" begin
@@ -267,7 +240,7 @@ function get_setup(
 				preferences = use_scalarized_baseline ? scalarized_preferences : preferences,
 				is_prioritized_constraint = use_scalarized_baseline ? scalarized_is_prioritized_constraint : is_prioritized_constraint,
 				equality_constraints,
-				inequality_constraints = [nothing, nothing],
+				inequality_constraints,
 				shared_equality_constraint = nothing,
 				shared_inequality_constraint = nothing,
 			)
@@ -359,6 +332,10 @@ function demo(;
 	rng_seed = 123,
 	random_initial_state = false,
 	debug = false,
+	run_id = "0_IP_test_cleanup_p1_faster",
+	eta_0 = 2e-5,
+	tightening_rate = 1.2,
+	loosening_rate = 3.0,
 	use_scalarized_baseline = false,
 	use_social_equilibrium_baseline = false,
 	show_interactive_trajectory = false,
@@ -367,29 +344,29 @@ function demo(;
 	@timeit TO "experiment setup" Random.seed!(rng_seed)
 
 	# ── Settings ───────────────────────────────────────────────────────────────
-	run_id = "0_IP_test_cleanup"
 	dynamics_model = Intersection.PlanarDoubleIntegrator()
 	goop_version = :reduced                    # :complete | :reduced | :quasi
 	solver = ReducedGOOP.InteriorPoint() # ReducedGOOP.InteriorPoint() | ReducedGOOP.PATHSolver()
 	linesearch = :backtracking          # :backtracking | :fraction_to_boundary
 	compute_warmstart = true # Whether to compute a warmstart trajectory via rollout (true) or load from file (false)
+	use_marquardt_scaling = true
 
 	# ── Problem parameters ─────────────────────────────────────────────────────
 	num_players         = 2
 	planning_horizon    = 12
 	collision_avoidance = 1.5
-	speed_limit         = 2.0
+	speed_limit         = 3.0
 	num_instances       = 1
 	perturbation_scale  = 0.3
 
 	# ── Solver schedule ────────────────────────────────────────────────────────
-	epsilon_schedule         = [0.1]
+	epsilon_schedule         = [0.3, 0.1]
 	max_inner_iters_schedule = fill(1000, length(epsilon_schedule))
 
 	# ── Scenario ───────────────────────────────────────────────────────────────
 	# Planar double integrator: state = [px, py, vx, vy]
-	base_initial_state1 = [-4.0, -1.0, 3.0, 0.0]
-	base_initial_state2 = [1.0, -5.0, 0.0, 1.5]
+	base_initial_state1 = [-4.0, -1.0, 2.7, 0.0]
+	base_initial_state2 = [1.0, -5.5, 0.0, 1.3]
 	# Unicycle: state = [px, py, speed, heading] — uncomment to switch
 	# base_initial_state1 = [-6.0, -1.0, 0.0, 0.0]
 	# base_initial_state2 = [1.0, -6.0, 1.3, π/2]
@@ -462,12 +439,12 @@ function demo(;
 		options = @timeit TO "solver options construction" if solver isa ReducedGOOP.InteriorPoint
 			ReducedGOOP.InteriorPointOptions(;
 				tol = 1e-3, #1e-4
-				η₀ = 2e-5, # 5e-5, 0.0 to turn off Tikhonov
+				η₀ = eta_0, # 5e-5, 0.0 to turn off Tikhonov
 				ϵ₀,
 				max_inner_iters,
 				max_outer_iters = 1,
-				tightening_rate = 1.2, # high => weak decrease in η
-				loosening_rate = 3.0, # low => strong increase in η
+				tightening_rate, # high => weak decrease in η
+				loosening_rate, # low => strong increase in η
 				min_stepsize = 1e-20,
 				linesearch,
 				linear_solve_algorithm = ReducedGOOP.LinearSolve.KrylovJL_LSMR(),
@@ -479,7 +456,7 @@ function demo(;
 				stagnation_rtol = 1e-1,
 				perturbation_scale = 1e-6,
 				tsvd_threshold = 0.0, # 0.0: pure Tikhonov, > 0 and η = 0: pure TSVD
-				use_marquardt_scaling = true,
+				use_marquardt_scaling,
 				verbose,
 			)
 		else
@@ -683,7 +660,9 @@ function demo(;
 				solve_sequence_succeeded = false
 				break
 			end
-			stage_warmstart = warmstart_solution
+			# Chain stages: warmstart the next (tighter) ϵ stage from this stage's
+			# primal solution instead of the initial rollout.
+			stage_warmstart = result.solution_dict["x"][1:(num_players*primal_dimension)]
 		end
 
 		if !solve_sequence_succeeded
@@ -805,6 +784,8 @@ function demo(;
 						θ2,
 						goal_position1,
 						goal_position2,
+						speed_limit,
+						collision_avoidance,
 						display_figure = false,
 						save_path = interactive_trajectory_path,
 					)
@@ -828,12 +809,16 @@ function demo(;
 				"use_scalarized_baseline" => use_scalarized_baseline,
 				"use_social_equilibrium_baseline" => use_social_equilibrium_baseline,
 				"show_interactive_trajectory" => show_interactive_trajectory,
-				"epsilon_schedule" => epsilon_schedule,
-				"max_inner_iters_schedule" => max_inner_iters_schedule,
-				"speed_limit" => speed_limit,
-				"perturbation_scale" => perturbation_scale,
-			),
-		)
+					"epsilon_schedule" => epsilon_schedule,
+					"max_inner_iters_schedule" => max_inner_iters_schedule,
+					"eta_0" => eta_0,
+					"tightening_rate" => tightening_rate,
+					"loosening_rate" => loosening_rate,
+					"use_marquardt_scaling" => use_marquardt_scaling,
+					"speed_limit" => speed_limit,
+					"perturbation_scale" => perturbation_scale,
+				),
+			)
 	end
 
 	println("\nTiming summary:")
@@ -1009,12 +994,9 @@ end
 
 function speed_limit_constraints(::PlanarDoubleIntegrator, x; speed_limit = 1.5)
 	vx, vy = x[3], x[4]
-	return vcat(
-		vx + speed_limit,
-		-vx + speed_limit,
-		vy + speed_limit,
-		-vy + speed_limit,
-	)
+	# Vehicle speed may not exceed the limit: vx² + vy² ≤ speed_limit².
+	# Kept squared so the residual stays smooth at zero velocity.
+	return [speed_limit^2 - (vx^2 + vy^2)]
 end
 
 function speed_limit_constraints(::Unicycle, x; speed_limit = 1.5)

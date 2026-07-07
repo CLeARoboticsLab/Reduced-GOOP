@@ -379,7 +379,7 @@ function demo(;
 	# ── Problem parameters ─────────────────────────────────────────────────────
 	# Player 1: combined two-arm agent, Player 2: child/pet.
 	num_players          = 2
-	planning_horizon     = 15
+	planning_horizon     = 12
 	collision_avoidance  = 2.0
 	child_initial_buffer = 4.0
 	arm_speed_limit		 = 5.0
@@ -867,6 +867,7 @@ function demo(;
 						goal_position2,
 						goal_position3,
 						collision_avoidance,
+						reference_distance = dₚ,
 						display_figure = false,
 						save_path = interactive_trajectory_path,
 					)

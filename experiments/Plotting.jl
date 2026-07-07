@@ -302,7 +302,9 @@ function _plot_intersection_browser_trajectories(
 	θ2,
 	goal_position1,
 	goal_position2,
-	figure_size = (950, 850),
+	speed_limit = nothing,
+	collision_avoidance = nothing,
+	figure_size = (1500, 850),
 	legend_label_fontsize = 16,
 )
 	if length(strategy) < 2
@@ -319,7 +321,7 @@ function _plot_intersection_browser_trajectories(
 	# processed by a live Julia process, so the static HTML export has a fixed
 	# view; the time slider works regardless via the pre-recorded states.
 	ax = makie.Axis(
-		figure[1, 1];
+		figure[1:2, 1];
 		aspect = 1,
 		xgridvisible = false,
 		ygridvisible = false,
@@ -425,7 +427,7 @@ function _plot_intersection_browser_trajectories(
 	end
 
 	makie.Legend(
-		figure[1, 2],
+		figure[1:2, 2],
 		[
 			player1_trajectory,
 			player2_trajectory,
@@ -444,13 +446,122 @@ function _plot_intersection_browser_trajectories(
 		valign = :top,
 	)
 
+	# ── Speed and distance panels driven by the same time index ──────────────
+	horizon_steps = collect(0:time_horizon)
+	time_cursor = makie.lift(t -> [Float64(t)], time_index)
+	axis_label_fontsize = 18
+
+	has_velocity = length(xs1[1]) >= 4 && length(xs2[1]) >= 4
+	if has_velocity
+		speeds = [
+			[sqrt(xs[k][3]^2 + xs[k][4]^2) for k in 1:(time_horizon+1)]
+			for xs in (xs1, xs2)
+		]
+		speed_ax = makie.Axis(
+			figure[1, 3];
+			xlabel = "",
+			ylabel = "speed [m/s]",
+			xlabelsize = axis_label_fontsize,
+			ylabelsize = axis_label_fontsize,
+		)
+		makie.lines!(
+			speed_ax,
+			horizon_steps,
+			speeds[1];
+			color = :blue,
+			linewidth = 3,
+			label = "Player 1",
+		)
+		makie.lines!(
+			speed_ax,
+			horizon_steps,
+			speeds[2];
+			color = :red,
+			linewidth = 3,
+			label = "Player 2",
+		)
+		if !isnothing(speed_limit)
+			makie.hlines!(
+				speed_ax,
+				[speed_limit];
+				color = :black,
+				linestyle = :dash,
+				linewidth = 2,
+				label = "Speed limit [$(speed_limit) m/s]",
+			)
+		end
+		makie.vlines!(speed_ax, time_cursor; color = (:gray, 0.7), linewidth = 2)
+		for (player_speeds, player_color) in zip(speeds, (:blue, :red))
+			current_speed = makie.lift(
+				t -> [makie.Point2f(t, player_speeds[clamp(t + 1, 1, length(player_speeds))])],
+				time_index,
+			)
+			makie.scatter!(
+				speed_ax,
+				current_speed;
+				marker = :diamond,
+				markersize = 18,
+				color = player_color,
+				strokecolor = :black,
+				strokewidth = 1,
+			)
+		end
+		makie.axislegend(speed_ax; position = :rb, framevisible = false, labelsize = 13)
+	end
+
+	distances = [
+		sqrt((xs1[k][1] - xs2[k][1])^2 + (xs1[k][2] - xs2[k][2])^2)
+		for k in 1:(time_horizon+1)
+	]
+	distance_ax = makie.Axis(
+		figure[2, 3];
+		xlabel = "time step",
+		ylabel = "inter-vehicle distance [m]",
+		xlabelsize = axis_label_fontsize,
+		ylabelsize = axis_label_fontsize,
+	)
+	makie.lines!(
+		distance_ax,
+		horizon_steps,
+		distances;
+		color = :dodgerblue,
+		linewidth = 3,
+		label = "Distance",
+	)
+	if !isnothing(collision_avoidance)
+		makie.hlines!(
+			distance_ax,
+			[collision_avoidance];
+			color = :black,
+			linestyle = :dash,
+			linewidth = 2,
+			label = "Collision avoidance [$(collision_avoidance) m]",
+		)
+	end
+	makie.vlines!(distance_ax, time_cursor; color = (:gray, 0.7), linewidth = 2)
+	current_distance = makie.lift(
+		t -> [makie.Point2f(t, distances[clamp(t + 1, 1, length(distances))])],
+		time_index,
+	)
+	makie.scatter!(
+		distance_ax,
+		current_distance;
+		marker = :diamond,
+		markersize = 18,
+		color = :dodgerblue,
+		strokecolor = :black,
+		strokewidth = 1,
+	)
+	makie.axislegend(distance_ax; position = :rt, framevisible = false, labelsize = 13)
+	has_velocity && makie.linkxaxes!(speed_ax, distance_ax)
+
 	return figure, ax, time_index, time_horizon
 end
 
 function plot_intersection_trajectories_interactive(;
 	display_figure = true,
 	save_path = nothing,
-	figure_size = (950, 850),
+	figure_size = (1500, 850),
 	exportable = true,
 	offline = true,
 	kwargs...,
@@ -595,6 +706,16 @@ function speed_plot(;
 		speed_limit_profile = fill(speed_limit, speed_len)
 		speed_profiles = [
 			[first_three_norm(us_by_player[player][k], "Player $(player) control") for k in 1:speed_len]
+			for player in 1:num_players
+		]
+	elseif model_symbol in (:PlanarDoubleIntegrator, :planar_double_integrator)
+		# Vehicle speed ‖(vx, vy)‖ — the quantity bounded by the speed-limit
+		# preference (vx² + vy² ≤ speed_limit²).
+		speed_profiles = [
+			[
+				sqrt(xs_by_player[player][k][3]^2 + xs_by_player[player][k][4]^2)
+				for k in 1:trajectory_len
+			]
 			for player in 1:num_players
 		]
 	else
