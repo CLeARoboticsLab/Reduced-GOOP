@@ -84,7 +84,10 @@
       "Bash(julia --project=experiments -e 'include\\(\"experiments/Intersection.jl\"\\); Intersection.demo\\(run_id = \"1_symmetric_safety_first\"\\)')",
       "Bash(julia --project=experiments -e 'include\\(\"experiments/Intersection.jl\"\\); Intersection.demo\\(run_id = \"2_safety_first_eps_continuation\"\\)')",
       "Bash(julia --project=experiments /private/tmp/claude-501/-Users-dhl-Documents-Reduced-GOOP/c972cdcc-e9a6-402f-99c4-17ff55c67e06/scratchpad/diag_residual.jl)",
-      "Bash(julia --project=experiments -e 'include\\(\"experiments/Intersection.jl\"\\); Intersection.demo\\(run_id = \"3_hard_safety_ineq\"\\)')"
+      "Bash(julia --project=experiments -e 'include\\(\"experiments/Intersection.jl\"\\); Intersection.demo\\(run_id = \"3_hard_safety_ineq\"\\)')",
+      "Bash(julia --project=. -e 'using Pkg; Pkg.test\\(\\)')",
+      "Bash(awk -F_ '{print $1}')",
+      "Bash(julia --project=. -e 'include\\(\"src/ReducedGOOP.jl\"\\); println\\(\"SYNTAX OK\"\\)')"
     ],
     "additionalDirectories": [
       "/private/tmp"

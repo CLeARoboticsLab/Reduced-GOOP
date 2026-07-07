@@ -25,12 +25,14 @@ function get_setup(
 	planning_horizon = 10,
 	dₚ = 2.0,
 	collision_avoidance = 1.0,
+	safety_buffer_margin = 1.0,
 	arm_speed_limit = 3.0,
 	child_speed_limit = 1.5,
 	map_end = 10,
 	lane_width = 2,
 	use_scalarized_baseline = false,
 	use_social_equilibrium_baseline = false,
+	tracking_weight = 1.0,
 )
 	num_players == 2 || error("robotic_arm Zero-Sum GOOP setup expects exactly two players (two-arm robot and child).")
 	length(dynamics) == num_players || error("Expected one dynamics entry per player.")
@@ -45,8 +47,14 @@ function get_setup(
 		(dyn.state_dimension + dyn.control_dimension) * planning_horizon for dyn in dynamics
 	]
 	# Per player: (initial state, goal of same length as the state, 3D obstacle).
+	# Player 1 additionally carries a per-timestep reference trajectory for the
+	# stacked two-arm state. It enters as parameters (not symbolic decision
+	# variables), so the KKT system is generated once and MPC iterations only
+	# update parameter values.
 	parameter_dimensions = [
-		2 * dyn.state_dimension + position_dimension for dyn in dynamics
+		2 * dyn.state_dimension + position_dimension +
+		(i == 1 ? dyn.state_dimension * planning_horizon : 0)
+		for (i, dyn) in enumerate(dynamics)
 	]
 
 	dummy_primals = BlockArray(zeros(sum(primal_dimensions)), primal_dimensions)
@@ -58,15 +66,30 @@ function get_setup(
 		initial_state = first(θ_iter, state_dimension)
 		goal_position = first(θ_iter, state_dimension)
 		obstacle_position = first(θ_iter, position_dimension)
-		(; initial_state, goal_position, obstacle_position)
+		reference_trajectory = player == 1 ?
+			first(θ_iter, state_dimension * planning_horizon) : nothing
+		(; initial_state, goal_position, obstacle_position, reference_trajectory)
 	end
 
-	function flatten_parameters(; player, initial_state, goal_position, obstacle_position)
+	function flatten_parameters(;
+		player,
+		initial_state,
+		goal_position,
+		obstacle_position,
+		reference_trajectory = nothing,
+	)
 		state_dimension = dynamics[player].state_dimension
 		length(initial_state) == state_dimension || error("Expected initial_state length $(state_dimension), got $(length(initial_state)).")
 		length(goal_position) == state_dimension || error("Expected goal_position length $(state_dimension), got $(length(goal_position)).")
 		length(obstacle_position) == position_dimension || error("Expected 3D obstacle_position, got length $(length(obstacle_position)).")
-		vcat(initial_state, goal_position, obstacle_position)
+		if player != 1
+			return vcat(initial_state, goal_position, obstacle_position)
+		end
+		isnothing(reference_trajectory) &&
+			error("Player 1 requires a reference_trajectory parameter block.")
+		length(reference_trajectory) == state_dimension * planning_horizon ||
+			error("Expected reference_trajectory length $(state_dimension * planning_horizon), got $(length(reference_trajectory)).")
+		vcat(initial_state, goal_position, obstacle_position, reference_trajectory)
 	end
 
 	function squared_violation(h)
@@ -92,12 +115,27 @@ function get_setup(
 		# The two-arm agent delivers the pot center to the center of the two
 		# per-arm goals; both quantities are recovered from the stacked state.
 		(; xs) = trajectory(z; player = 1)
-		(; goal_position) = unflatten_parameters(θ[Block(1)]; player = 1)
+		(; goal_position, reference_trajectory) =
+			unflatten_parameters(θ[Block(1)]; player = 1)
 
 		center_position = 0.5 .* (xs[end][arm1_range] .+ xs[end][arm2_range])
 		center_goal_position = 0.5 .* (goal_position[arm1_range] .+ goal_position[arm2_range])
 		goal_deviation = center_position .- center_goal_position
-		sum(goal_deviation .^ 2)
+		terminal_objective = sum(goal_deviation .^ 2)
+
+		# Track the nominal straight-line motion toward the goal. The reference
+		# enters through θ, so it can be refreshed every MPC iteration without
+		# touching the compiled KKT system.
+		state_dimension = dynamics[1].state_dimension
+		tracking_objective = sum(eachindex(xs)) do t
+			reference_state =
+				reference_trajectory[((t-1)*state_dimension+1):(t*state_dimension)]
+			sum((xs[t] .- reference_state) .^ 2)
+		end
+
+		# Normalized by the horizon so the tracking term stays commensurate
+		# with the terminal objective regardless of planning_horizon.
+		terminal_objective # + (tracking_weight / planning_horizon) * tracking_objective
 	end
 
 	function control_objective(; player)
@@ -179,6 +217,25 @@ function get_setup(
 		end
 	end
 
+	function robot_child_buffer_inequality(z, θ)
+		arm_trajectory = trajectory(z; player = 1)
+		child_trajectory = trajectory(z; player = 2)
+
+		# Soft comfort clearance: the same coupling as
+		# robot_child_safety_inequality but with the enlarged radius
+		# collision_avoidance + safety_buffer_margin. As a prioritized
+		# (slack-relaxable) preference level it makes the robot trade goal
+		# progress for extra clearance whenever feasible, so the equilibrium no
+		# longer rides the hard safety boundary as the child approaches.
+		buffer_radius = collision_avoidance + safety_buffer_margin
+		mapreduce(vcat, eachindex(child_trajectory.xs)) do t
+			arm_state = arm_trajectory.xs[t]
+			pot_center = 0.5 .* (arm_state[arm1_range] .+ arm_state[arm2_range])
+			separation = pot_center .- child_trajectory.xs[t]
+			[sum(abs2, separation) - buffer_radius^2]
+		end
+	end
+
 	function robot_arm_speed_inequality(z, θ)
 		(; us) = trajectory(z; player = 1)
 
@@ -248,6 +305,7 @@ function get_setup(
 			# control_objective(; player = 1),
 			goal_objective,
 			load_balance_objective,
+			# robot_child_buffer_inequality,
 			robot_inequality,
 		],
 		[
@@ -521,6 +579,8 @@ function demo(;
 		kkt_error_history = Float64[]
 		condition_number_history = Float64[]
 		eta_history = Float64[]
+		alpha_history = Float64[]
+		rho_history = Float64[]
 		total_iters = 0
 		solver_status = :solved
 		elapsed_time = @elapsed begin
@@ -543,6 +603,8 @@ function demo(;
 					condition_number_history,
 				) = output
 				eta_history = hasproperty(output, :eta_history) ? output.eta_history : Float64[]
+				alpha_history = hasproperty(output, :alpha_history) ? output.alpha_history : Float64[]
+				rho_history = hasproperty(output, :rho_history) ? output.rho_history : Float64[]
 				if status == :failed
 					println("  [solver exit] total_iters=$(total_iters), kkt_error=$(round(kkt_error; sigdigits=4)), tol=$(options.tol)")
 				end
@@ -575,6 +637,8 @@ function demo(;
 			"kkt_error_history" => kkt_error_history,
 			"condition_number_history" => condition_number_history,
 			"eta_history" => eta_history,
+			"alpha_history" => alpha_history,
+			"rho_history" => rho_history,
 			"arm_speed_limit" => arm_speed_limit,
 			"child_speed_limit" => child_speed_limit,
 		)
@@ -648,6 +712,7 @@ function demo(;
 				goal_position2,
 				goal_position3,
 				obstacle_position,
+				planning_horizon,
 			)
 
 		(; warmstart_solution) = @timeit TO "warmstart construction" if compute_warmstart
@@ -1173,6 +1238,20 @@ function choose_child_initial_and_goal(
 	(child_initial, child_goal)
 end
 
+"""
+Straight-line interpolation from `initial_state` to `goal_position` over the
+planning horizon, flattened per timestep. This is the nominal motion the robot
+would follow with no approaching child or other disturbance (the initial warm
+start that simply carries the hot pot directly to the goal).
+"""
+function build_reference_trajectory(initial_state, goal_position, planning_horizon)
+	planning_horizon >= 2 || error("Reference trajectory requires at least two time steps.")
+	mapreduce(vcat, 0:(planning_horizon-1)) do t
+		τ = t / (planning_horizon - 1)
+		initial_state .+ τ .* (goal_position .- initial_state)
+	end
+end
+
 function build_instance_parameters(
 	flatten_parameters,
 	initial_state1,
@@ -1182,13 +1261,22 @@ function build_instance_parameters(
 	goal_position2,
 	goal_position3,
 	obstacle_position,
+	planning_horizon,
 )
 	# Solver-facing parameter blocks: player 1 stacks both arms, player 2 is the child.
+	# The tracking reference is rebuilt from the current initial state on every
+	# call, so each MPC iteration injects an updated reference through θ alone.
+	reference_trajectory = build_reference_trajectory(
+		vcat(initial_state1, initial_state2),
+		vcat(goal_position1, goal_position2),
+		planning_horizon,
+	)
 	θ_arms = flatten_parameters(;
 		player = 1,
 		initial_state = vcat(initial_state1, initial_state2),
 		goal_position = vcat(goal_position1, goal_position2),
 		obstacle_position = obstacle_position,
+		reference_trajectory,
 	)
 	θ_child = flatten_parameters(;
 		player = 2,
@@ -1410,6 +1498,36 @@ function save_convergence_diagnostics(solution_dict, convergence_plots_dir, inst
 				"eta_instance_$(instance_idx)_eps$(ϵ₀)$(filename_suffix).pdf",
 			),
 			eta_fig,
+		)
+	end
+
+	alpha_history = get(solution_dict, "alpha_history", Float64[])
+	if !isempty(alpha_history)
+		alpha_fig, _ = plot_alpha_plot(;
+			alpha_history,
+			total_iters = solution_dict["total_iters"],
+		)
+		save_figure(
+			joinpath(
+				convergence_plots_dir,
+				"alpha_instance_$(instance_idx)_eps$(ϵ₀)$(filename_suffix).pdf",
+			),
+			alpha_fig,
+		)
+	end
+
+	rho_history = get(solution_dict, "rho_history", Float64[])
+	if !isempty(rho_history)
+		rho_fig, _ = plot_rho_plot(;
+			rho_history,
+			total_iters = solution_dict["total_iters"],
+		)
+		save_figure(
+			joinpath(
+				convergence_plots_dir,
+				"rho_instance_$(instance_idx)_eps$(ϵ₀)$(filename_suffix).pdf",
+			),
+			rho_fig,
 		)
 	end
 end

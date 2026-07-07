@@ -1227,6 +1227,80 @@ function plot_eta_plot(;
 	return figure, ax
 end
 
+function plot_alpha_plot(;
+	alpha_history,
+	total_iters = nothing,
+	show_ylabel = true,
+)
+	axis_label_fontsize = 30
+	tick_label_fontsize = 22
+	ylabel_text = show_ylabel ? L"$\alpha$" : ""
+	figure = serif_figure()
+	ax = CairoMakie.Axis(
+		figure[1, 1];
+		xlabel = "Newton iteration",
+		ylabel = ylabel_text,
+		xlabelsize = axis_label_fontsize,
+		ylabelsize = axis_label_fontsize,
+		xticklabelsize = tick_label_fontsize,
+		yticklabelsize = tick_label_fontsize,
+	)
+
+	iteration_axis = collect(1:length(alpha_history))
+	if !isnothing(total_iters) && total_iters > 0 && total_iters < length(iteration_axis)
+		iteration_axis = iteration_axis[1:total_iters]
+		alpha_history = alpha_history[1:total_iters]
+	end
+	CairoMakie.lines!(ax, iteration_axis, alpha_history, color = :dodgerblue, linewidth = 4)
+
+	return figure, ax
+end
+
+function plot_rho_plot(;
+	rho_history,
+	total_iters = nothing,
+	rho_threshold = 0.75,
+	clamp_limits = (-2.0, 2.0),
+	show_ylabel = true,
+)
+	axis_label_fontsize = 30
+	tick_label_fontsize = 22
+	ylabel_text = show_ylabel ? L"$\rho$ (clamped)" : ""
+	figure = serif_figure()
+	ax = CairoMakie.Axis(
+		figure[1, 1];
+		xlabel = "Newton iteration",
+		ylabel = ylabel_text,
+		xlabelsize = axis_label_fontsize,
+		ylabelsize = axis_label_fontsize,
+		xticklabelsize = tick_label_fontsize,
+		yticklabelsize = tick_label_fontsize,
+	)
+
+	iteration_axis = collect(1:length(rho_history))
+	if !isnothing(total_iters) && total_iters > 0 && total_iters < length(iteration_axis)
+		iteration_axis = iteration_axis[1:total_iters]
+		rho_history = rho_history[1:total_iters]
+	end
+	clamped_rho = [
+		isfinite(value) ? clamp(value, clamp_limits...) :
+		(isnan(value) ? NaN : clamp_limits[value > 0 ? 2 : 1])
+		for value in rho_history
+	]
+	CairoMakie.lines!(ax, iteration_axis, clamped_rho, color = :darkorange, linewidth = 4)
+	if !isnothing(rho_threshold)
+		CairoMakie.hlines!(
+			ax,
+			[rho_threshold];
+			color = :black,
+			linestyle = :dash,
+			linewidth = 2,
+		)
+	end
+
+	return figure, ax
+end
+
 function plot_convergence_plot_aggregate(; kkt_error_histories, show_ylabel = true)
 	if isempty(kkt_error_histories)
 		error("kkt_error_histories must be non-empty.")

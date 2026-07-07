@@ -53,6 +53,7 @@ function demo(;
 	# Player 1: combined two-arm agent, Player 2: child/pet.
 	num_players         = 2
 	collision_avoidance = 3.0
+	safety_buffer_margin = 1.0
 	arm_speed_limit     = 5.0
 	child_speed_limit   = 3.0
 	dₚ                  = 2.0
@@ -87,6 +88,7 @@ function demo(;
 			planning_horizon,
 			dₚ,
 			collision_avoidance,
+			safety_buffer_margin,
 			arm_speed_limit,
 			child_speed_limit,
 			map_end,
@@ -115,12 +117,16 @@ function demo(;
 		max_outer_iters = 1,
 		tightening_rate = 1.2,
 		loosening_rate = 3.0,
+		eta_increase_factor = 2.0, 
+		eta_decrease_factor = 0.5,
 		min_stepsize = 1e-20,
 		linesearch,
 		linear_solve_algorithm = ReducedGOOP.LinearSolve.KrylovJL_LSMR(),
 		use_linsolve = false,
 		record_convergence = true,
 		record_condition_number,
+		η_min = 1e-12,
+		stagnation_eta_boost_enabled = false,
 		eta_retry_growth = 0.3,
 		perturbation_enabled = false,
 		stagnation_rtol = 1e-1,
@@ -170,6 +176,8 @@ function demo(;
 
 	# ── MPC loop ───────────────────────────────────────────────────────────────
 	for k in 1:num_mpc_steps
+		# Rebuilds the straight-line tracking reference from the current state;
+		# only parameter values change, the compiled KKT system is untouched.
 		(; θ1, θ2, θ3, θ) = @timeit TO "instance parameter construction" RA.build_instance_parameters(
 			flatten_parameters,
 			current_state1,
@@ -179,6 +187,7 @@ function demo(;
 			goal_position2,
 			goal_position3,
 			obstacle_position,
+			planning_horizon,
 		)
 		if k == 1
 			θ1_initial, θ2_initial, θ3_initial = θ1, θ2, θ3
@@ -261,6 +270,8 @@ function demo(;
 			"kkt_error_history" => output.kkt_error_history,
 			"condition_number_history" => output.condition_number_history,
 			"eta_history" => output.eta_history,
+			"alpha_history" => output.alpha_history,
+			"rho_history" => output.rho_history,
 			"arm_speed_limit" => arm_speed_limit,
 			"child_speed_limit" => child_speed_limit,
 		)
@@ -580,6 +591,22 @@ end
 
 # ── Output / plotting helpers ──────────────────────────────────────────────────
 
+"""
+Per-arm 3D point lists of the straight-line tracking reference (current
+initial position → goal), in the format the trajectory plots expect. `θ1`/`θ2`
+are the legacy per-arm parameter blocks whose first three entries hold the
+current initial position.
+"""
+function _reference_point_lists(θ1, θ2, goal_position1, goal_position2, num_points)
+	[
+		[
+			initial .+ (t / (num_points - 1)) .* (goal .- initial)
+			for t in 0:(num_points-1)
+		]
+		for (initial, goal) in ((θ1[1:3], goal_position1), (θ2[1:3], goal_position2))
+	]
+end
+
 function _add_title!(figure, title_text)
 	CairoMakie.Label(figure[0, :], title_text; fontsize = 20, tellwidth = false)
 end
@@ -617,6 +644,13 @@ function save_step_plots(
 	plot_strategies = RA.split_arm_strategies(strategies)
 	status_suffix = converged ? "" : "_notconverged"
 	title = _step_title(k, num_mpc_steps, converged, kkt_error)
+	reference_trajectories = _reference_point_lists(
+		θ1,
+		θ2,
+		goal_position1,
+		goal_position2,
+		length(plot_strategies[1].xs),
+	)
 
 	trajectory_fig, _ = RA.plot_single_integrator_3d_trajectories(
 		;
@@ -630,6 +664,7 @@ function save_step_plots(
 		goal_position2,
 		goal_position3,
 		collision_avoidance,
+		reference_trajectories,
 	)
 	_add_title!(trajectory_fig, title)
 	speed_fig, _ = RA.speed_plot(;
@@ -688,6 +723,7 @@ function save_step_plots(
 			goal_position3,
 			collision_avoidance,
 			reference_distance = dₚ,
+			reference_trajectories,
 			display_figure = false,
 			save_path = interactive_path,
 		)
@@ -721,6 +757,14 @@ function save_closed_loop_plots(
 	if !isempty(failed_steps)
 		title *= " — non-converged steps: $(join(failed_steps, ", "))"
 	end
+	# Initial-state tracking reference: the nominal straight-line delivery.
+	reference_trajectories = _reference_point_lists(
+		θ1,
+		θ2,
+		goal_position1,
+		goal_position2,
+		length(plot_strategies[1].xs),
+	)
 
 	trajectory_fig, _ = RA.plot_single_integrator_3d_trajectories(
 		;
@@ -734,6 +778,7 @@ function save_closed_loop_plots(
 		goal_position2,
 		goal_position3,
 		collision_avoidance,
+		reference_trajectories,
 	)
 	_add_title!(trajectory_fig, title)
 	speed_fig, _ = RA.speed_plot(;
@@ -789,6 +834,7 @@ function save_closed_loop_plots(
 			goal_position3,
 			collision_avoidance,
 			reference_distance = dₚ,
+			reference_trajectories,
 			display_figure = false,
 			save_path = interactive_path,
 		)
