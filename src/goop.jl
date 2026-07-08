@@ -305,12 +305,13 @@ function generate_slacked_reduced_kkt_system(
 
 				∇L, π_terms = if drop_higher_order_terms
 					lagrangian_terms = QuasiLagrangianTerm[]
-					_push_quasi_lagrangian_term!(lagrangian_terms, sum(preference_slack .^ 2))
-					_push_quasi_lagrangian_term!(
-						lagrangian_terms,
-						vcat(h .+ preference_slack, isnothing(P) ? symbolic_type[] : P),
-						γₚ,
-					)
+					# _push_quasi_lagrangian_term!(lagrangian_terms, sum(preference_slack .^ 2))
+					# _push_quasi_lagrangian_term!(
+					# 	lagrangian_terms,
+					# 	vcat(h .+ preference_slack, isnothing(P) ? symbolic_type[] : P),
+					# 	γₚ,
+					# )
+					_push_quasi_lagrangian_term!(lagrangian_terms, sum(smooth_piecewise_preference_objective.(h, level)))
 					_push_quasi_lagrangian_term!(lagrangian_terms, f, λ)
 					_push_quasi_lagrangian_term!(lagrangian_terms, g, γ)
 					_push_quasi_lagrangian_term!(lagrangian_terms, fₛ, λₛ)
@@ -474,12 +475,13 @@ function generate_slacked_reduced_kkt_system(
 
 			∇L, π_terms = if drop_higher_order_terms
 				lagrangian_terms = QuasiLagrangianTerm[]
-				_push_quasi_lagrangian_term!(lagrangian_terms, sum(preference_slack .^ 2))
-				_push_quasi_lagrangian_term!(
-					lagrangian_terms,
-					vcat(h .+ preference_slack, isnothing(P) ? symbolic_type[] : P),
-					γₚ,
-				)
+				# _push_quasi_lagrangian_term!(lagrangian_terms, sum(preference_slack .^ 2))
+				# _push_quasi_lagrangian_term!(
+				# 	lagrangian_terms,
+				# 	vcat(h .+ preference_slack, isnothing(P) ? symbolic_type[] : P),
+				# 	γₚ,
+				# )
+				_push_quasi_lagrangian_term!(lagrangian_terms, sum(smooth_piecewise_preference_objective.(h, level)))
 				_append_quasi_policy_terms!(lagrangian_terms, π_term_groups, ψ)
 				_push_quasi_lagrangian_term!(lagrangian_terms, f, λ)
 				_push_quasi_lagrangian_term!(lagrangian_terms, g, γ)

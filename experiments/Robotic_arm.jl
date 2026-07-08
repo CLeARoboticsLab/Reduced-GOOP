@@ -434,7 +434,7 @@ function demo(;
 	@timeit TO "experiment setup" Random.seed!(rng_seed)
 
 	# ── Settings ───────────────────────────────────────────────────────────────
-	run_id = "Robotic_arm_single_robot_agent"
+	run_id = "Robotic_arm_single_robot_agent_optimized_solver"
 	dynamics_model = Robotic_arm.SingleIntegrator3D()
 	goop_version = :reduced               # :complete | :reduced | :quasi
 	solver = ReducedGOOP.InteriorPoint() # ReducedGOOP.InteriorPoint() | ReducedGOOP.PATHSolver()
@@ -539,7 +539,7 @@ function demo(;
 	function solve_game_instance(θ; z₀, ϵ₀, max_inner_iters)
 		options = @timeit TO "solver options construction" if solver isa ReducedGOOP.InteriorPoint
 			ReducedGOOP.InteriorPointOptions(;
-				tol = 0.005, #1e-4
+				tol = 0.01, #1e-4
 				η₀ = 1.0e-6, # 5e-5, 0.0 to turn off Tikhonov
 				ϵ₀,
 				max_inner_iters,

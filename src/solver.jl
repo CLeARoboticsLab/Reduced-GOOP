@@ -230,267 +230,267 @@ function solve(
 
 		while inner_iters < max_inner_iters && (kkt_error > tol) # (!is_fraction_to_boundary_linesearch || kkt_error > tol)
 			@timeit TO "inner iteration loop" begin
-				total_iters += 1
-				# Compute the residual at the current iterate
-				@timeit TO "residual evaluation" mcp.F!(F, z; θ, ϵ, η = 0.0)
-				# @assert all(.!isnan.(F)) "Found NaN in F - aborting!"
-				verbose && println("inner iter $inner_iters")
-				condition_number = NaN
-				# Gain ratio of the accepted step; stays NaN on paths that do not
-				# compute it (fraction-to-boundary linesearch).
-				ρ = NaN
+			total_iters += 1
+			# Compute the residual at the current iterate
+			@timeit TO "residual evaluation" mcp.F!(F, z; θ, ϵ, η = 0.0)
+			# @assert all(.!isnan.(F)) "Found NaN in F - aborting!"
+			verbose && println("inner iter $inner_iters")
+			condition_number = NaN
+			# Gain ratio of the accepted step; stays NaN on paths that do not
+			# compute it (fraction-to-boundary linesearch).
+			ρ = NaN
 
-				if linesearch == :fraction_to_boundary
-					@timeit TO "Jacobian evaluation" mcp.∇F_z!(∇F, z; θ, ϵ, η = 0.0)
-					@timeit TO "KKT system assembly" _densify!(Jdense, ∇F, jacobian_scatter_indices)
-					Jsvd = @timeit TO "Newton step / linear solve" _robust_svd!(
-						Jdense,
-						A -> _densify!(A, ∇F, jacobian_scatter_indices),
-					)
-					condition_number = @timeit TO "condition number evaluation" begin
-						record_condition_number ? Jsvd.S[1] / Jsvd.S[end] : NaN
+			if linesearch == :fraction_to_boundary
+				@timeit TO "Jacobian evaluation" mcp.∇F_z!(∇F, z; θ, ϵ, η = 0.0)
+				@timeit TO "KKT system assembly" _densify!(Jdense, ∇F, jacobian_scatter_indices)
+				Jsvd = @timeit TO "Compute SVD" _robust_svd!(
+					Jdense,
+					A -> _densify!(A, ∇F, jacobian_scatter_indices),
+				)
+				condition_number = @timeit TO "condition number evaluation" begin
+					record_condition_number ? Jsvd.S[1] / Jsvd.S[end] : NaN
+				end
+
+				verbose && record_condition_number && println("condition number of ∇F: ", condition_number)
+				# Unified TSVD+Tikhonov step: modes below tsvd_threshold*σ₁ are zeroed (hard cutoff),
+				# remaining modes use the Tikhonov filter σ/(σ²+η). tsvd_threshold=0 → pure Tikhonov.
+				@timeit TO "Newton step / linear solve" begin
+					threshold_abs = tsvd_threshold * Jsvd.S[1]
+					@. svd_filters = ifelse(Jsvd.S >= threshold_abs, Jsvd.S / (Jsvd.S^2 + η), 0.0)
+					mul!(svd_coefficients, Jsvd.U', F)
+					svd_coefficients .*= svd_filters
+					mul!(δz, Jsvd.V, svd_coefficients, -1.0, false)
+				end
+
+				@timeit TO "line search" begin
+					α_σ = fraction_to_the_boundary_linesearch(σ, δσ; tol = min_stepsize)
+					α_γ = fraction_to_the_boundary_linesearch(γ, δγ; tol = min_stepsize)
+				end
+				verbose && println("fraction_to_boundary linesearch α_σ = $α_σ, α_γ = $α_γ")
+				if isnan(α_σ) || isnan(α_γ)
+					verbose && @warn "Fraction-to-boundary linesearch failed. Exiting prematurely."
+					status = :failed
+					break
+				end
+
+				# Update regularization parameter.
+				@timeit TO "regularization" begin
+					if min(α_σ, α_γ) == 1.0
+						verbose && printstyled("Full step taken... Decreasing η. ($η -> $(η * (1 - exp(-tightening_rate * inner_iters))))\n"; color = :blue)
+						η *= 1 - exp(-tightening_rate)
+					else
+						verbose && printstyled("Partial step (<1.0) taken... Increasing η. ($η -> $(η * (1 + exp(-loosening_rate * inner_iters))))\n"; color = :red)
+						η *= 1 + exp(-loosening_rate)
 					end
+				end
+			else
+				# Backtracking linesearch: if the line search exhausts at the current η,
+				# grow η and re-solve the Newton step rather than failing outright.
+				F_z = norm(F, 2)
+				eta_retries = 0
+				# J is fixed at this iterate; only η changes between retries, so compute SVD once.
+				@timeit TO "Jacobian evaluation" mcp.∇F_z!(∇F, z; θ, ϵ, η = 0.0)
+				@timeit TO "KKT system assembly" _densify!(Jdense, ∇F, jacobian_scatter_indices)
+				Jsvd = @timeit TO "Compute SVD" begin
+					if use_marquardt_scaling
+						# J̃ = JD^(-1/2), J is (m, n), d = diag(Jᵀ * J) is (n, 1), d : marquardt_scale
+						# Marquardt column scaling: normalize each Jacobian column by sqrt(diag(J'J)), with a small floor to avoid division by zero.
+						# The scaling is applied to the dense buffer in place. 
+						# On LAPACK-driver fallback the refill closure re-densifies and re-scales.
+						sum!(abs2, marquardt_scale_row, Jdense)
+						@. marquardt_scale = sqrt(max(marquardt_scale, 1e-16)) # prevent NaN or Inf entries
+						Jdense ./= marquardt_scale' # divides each column of Jdense by the corresponding scale. The transpose ' makes marquardt_scale behave like a row vector, so broadcasting works column-wise.
+						_robust_svd!(
+							Jdense,
+							A -> begin
+								_densify!(A, ∇F, jacobian_scatter_indices)
+								A ./= marquardt_scale'
+							end,
+						)
+					else
+						_robust_svd!(Jdense, A -> _densify!(A, ∇F, jacobian_scatter_indices))
+					end
+				end
+				# Check numerical rank of Jacobian. Full row rank <=> # nonzero singular values == # rows
+				verbose && println("Numerical rank of ∇F: $(count(σ -> σ > 1e-10 * Jsvd.S[1], Jsvd.S))) / $(mcp.kkt_dimension) rows)")
 
-					verbose && record_condition_number && println("condition number of ∇F: ", condition_number)
-					# Unified TSVD+Tikhonov step: modes below tsvd_threshold*σ₁ are zeroed (hard cutoff),
-					# remaining modes use the Tikhonov filter σ/(σ²+η). tsvd_threshold=0 → pure Tikhonov.
+				condition_number = @timeit TO "condition number evaluation" begin
+					record_condition_number ? Jsvd.S[1] / Jsvd.S[end] : NaN
+				end
+
+				# Check: current residual has components outside Range(∇F): F + α∇Fδz can only modify Fᵣ, the component of F in Range(∇F).
+				# Only relevant near the solution — use_range_step is false whenever
+				# kkt_error ≥ 1e-3, so the projection is skipped entirely there.
+				use_range_step = false
+				if kkt_error < 1e-3
+					@timeit TO "range-space residual projection" begin
+						τ = 1e-8 * maximum(Jsvd.S)
+						r = count(>(τ), Jsvd.S)
+						Uᵣ = @view Jsvd.U[:, 1:r]
+						range_coefficients_r = @view range_coefficients[1:r]
+						mul!(range_coefficients_r, Uᵣ', F)
+						mul!(F_range, Uᵣ, range_coefficients_r)
+						F_perp_norm = sqrt(_shifted_norm2(F, -1.0, F_range))
+						# Compute newton step using Fᵣ
+						use_range_step = (F_perp_norm / norm(F, 2)) > 0.3
+					end
+					verbose && printstyled("|F_perp|| / ||F|| = $(F_perp_norm / F_z)\n", color = :green) # large is > 0.3
+					if use_range_step
+						verbose && printstyled("Using range-space step (Fᵣ) instead of full-space step (F) because ||F_perp|| / ||F|| = $(F_perp_norm / norm(F, 2))\n", color = :yellow)
+					end
+				end
+
+				# if inner_iters > 20 && kkt_error < 5e-3
+				# 	η = 0.0
+				# end
+
+				local α, pred_reduction, actual_reduction
+				while true
 					@timeit TO "Newton step / linear solve" begin
-						threshold_abs = tsvd_threshold * Jsvd.S[1]
-						@. svd_filters = ifelse(Jsvd.S >= threshold_abs, Jsvd.S / (Jsvd.S^2 + η), 0.0)
-						mul!(svd_coefficients, Jsvd.U', F)
+						@. svd_filters = ifelse(
+							Jsvd.S >= tsvd_threshold,
+							(Jsvd.S / (Jsvd.S^2 + η)), 0.0, # max(η, 1e-8)
+						)
+						residual = use_range_step ? F_range : F
+						mul!(svd_coefficients, Jsvd.U', residual)
 						svd_coefficients .*= svd_filters
-						mul!(δz, Jsvd.V, svd_coefficients, -1.0, false)
+						mul!(δz, Jsvd.V, svd_coefficients, -1.0, false) # # Compute δz = -V * svd_coefficients in place, discarding the old δz.
+						# -pinv(Jmat; atol=1e-8, rtol = sqrt(eps(real(float(oneunit(eltype(Jmat))))))) * residual # minimum-norm solution
+						if use_marquardt_scaling
+							δz ./= marquardt_scale # undo the D^(-1/2) scaling
+						end
 					end
 
 					@timeit TO "line search" begin
-						α_σ = fraction_to_the_boundary_linesearch(σ, δσ; tol = min_stepsize)
-						α_γ = fraction_to_the_boundary_linesearch(γ, δγ; tol = min_stepsize)
-					end
-					verbose && println("fraction_to_boundary linesearch α_σ = $α_σ, α_γ = $α_γ")
-					if isnan(α_σ) || isnan(α_γ)
-						verbose && @warn "Fraction-to-boundary linesearch failed. Exiting prematurely."
-						status = :failed
-						break
-					end
-
-					# Update regularization parameter.
-					@timeit TO "regularization" begin
-						if min(α_σ, α_γ) == 1.0
-							verbose && printstyled("Full step taken... Decreasing η. ($η -> $(η * (1 - exp(-tightening_rate * inner_iters))))\n"; color = :blue)
-							η *= 1 - exp(-tightening_rate)
-						else
-							verbose && printstyled("Partial step (<1.0) taken... Increasing η. ($η -> $(η * (1 + exp(-loosening_rate * inner_iters))))\n"; color = :red)
-							η *= 1 + exp(-loosening_rate)
-						end
-					end
-				else
-					# Backtracking linesearch: if the line search exhausts at the current η,
-					# grow η and re-solve the Newton step rather than failing outright.
-					F_z = norm(F, 2)
-					eta_retries = 0
-					# J is fixed at this iterate; only η changes between retries, so compute SVD once.
-					@timeit TO "Jacobian evaluation" mcp.∇F_z!(∇F, z; θ, ϵ, η = 0.0)
-					@timeit TO "KKT system assembly" _densify!(Jdense, ∇F, jacobian_scatter_indices)
-					Jsvd = @timeit TO "Newton step / linear solve" begin
-						if use_marquardt_scaling
-							# J̃ = JD^(-1/2), J is (m, n), d = diag(Jᵀ * J) is (n, 1), d : marquardt_scale
-							# Marquardt column scaling: normalize each Jacobian column by sqrt(diag(J'J)), with a small floor to avoid division by zero.
-							# The scaling is applied to the dense buffer in place. 
-							# On LAPACK-driver fallback the refill closure re-densifies and re-scales.
-							sum!(abs2, marquardt_scale_row, Jdense)
-							@. marquardt_scale = sqrt(max(marquardt_scale, 1e-16)) # prevent NaN or Inf entries
-							Jdense ./= marquardt_scale' # Divide each column of Jdense by the corresponding scale. The transpose ' makes marquardt_scale behave like a row vector, so broadcasting works column-wise.
-							_robust_svd!(
-								Jdense,
-								A -> begin
-									_densify!(A, ∇F, jacobian_scatter_indices)
-									A ./= marquardt_scale'
-								end,
-							)
-						else
-							_robust_svd!(Jdense, A -> _densify!(A, ∇F, jacobian_scatter_indices))
-						end
-					end
-					# Check numerical rank of Jacobian. Full row rank <=> # nonzero singular values == # rows
-					verbose && println("Numerical rank of ∇F: $(count(σ -> σ > 1e-10 * Jsvd.S[1], Jsvd.S))) / $(mcp.kkt_dimension) rows)")
-
-					condition_number = @timeit TO "condition number evaluation" begin
-						record_condition_number ? Jsvd.S[1] / Jsvd.S[end] : NaN
-					end
-
-					# Check: current residual has components outside Range(∇F): F + α∇Fδz can only modify Fᵣ, the component of F in Range(∇F).
-					# Only relevant near the solution — use_range_step is false whenever
-					# kkt_error ≥ 1e-3, so the projection is skipped entirely there.
-					use_range_step = false
-					if kkt_error < 1e-3
-						@timeit TO "range-space residual projection" begin
-							τ = 1e-8 * maximum(Jsvd.S)
-							r = count(>(τ), Jsvd.S)
-							Uᵣ = @view Jsvd.U[:, 1:r]
-							range_coefficients_r = @view range_coefficients[1:r]
-							mul!(range_coefficients_r, Uᵣ', F)
-							mul!(F_range, Uᵣ, range_coefficients_r)
-							F_perp_norm = sqrt(_shifted_norm2(F, -1.0, F_range))
-							# Compute newton step using Fᵣ
-							use_range_step = (F_perp_norm / norm(F, 2)) > 0.3
-						end
-						verbose && printstyled("|F_perp|| / ||F|| = $(F_perp_norm / F_z)\n", color = :green) # large is > 0.3
-						if use_range_step
-							verbose && printstyled("Using range-space step (Fᵣ) instead of full-space step (F) because ||F_perp|| / ||F|| = $(F_perp_norm / norm(F, 2))\n", color = :yellow)
-						end
-					end
-
-					# if inner_iters > 20 && kkt_error < 5e-3
-					# 	η = 0.0
-					# end
-
-					local α, pred_reduction, actual_reduction
-					while true
-						@timeit TO "Newton step / linear solve" begin
-							@. svd_filters = ifelse(
-								Jsvd.S >= tsvd_threshold,
-								(Jsvd.S / (Jsvd.S^2 + η)), 0.0, # max(η, 1e-8)
-							)
-							residual = use_range_step ? F_range : F
-							mul!(svd_coefficients, Jsvd.U', residual)
-							svd_coefficients .*= svd_filters
-							mul!(δz, Jsvd.V, svd_coefficients, -1.0, false) # # Compute δz = -V * svd_coefficients in place, discarding the old δz.
-							# -pinv(Jmat; atol=1e-8, rtol = sqrt(eps(real(float(oneunit(eltype(Jmat))))))) * residual # minimum-norm solution
-							if use_marquardt_scaling
-								δz ./= marquardt_scale # undo the D^(-1/2) scaling
+						α = 1.0
+						@. z_trial = z + α * δz
+						@timeit TO "residual evaluation" mcp.F!(F_trial, z_trial; θ, ϵ, η = 0.0)
+						F_z_next = norm(F_trial, 2)
+						while (F_z_next >= 1.0 * F_z) ||
+							  _nonnegativity_violated(σ, δσ, α) ||
+							  _nonnegativity_violated(γ, δγ, α)
+							if α < min_stepsize
+								break # exhausted at this η — escalate below
 							end
-						end
 
-						@timeit TO "line search" begin
-							α = 1.0
+							α *= 0.5 # decay
 							@. z_trial = z + α * δz
 							@timeit TO "residual evaluation" mcp.F!(F_trial, z_trial; θ, ϵ, η = 0.0)
 							F_z_next = norm(F_trial, 2)
-							while (F_z_next >= 1.0 * F_z) ||
-									  _nonnegativity_violated(σ, δσ, α) ||
-									  _nonnegativity_violated(γ, δγ, α)
-								if α < min_stepsize
-									break # exhausted at this η — escalate below
-								end
-
-								α *= 0.5 # decay
-								@. z_trial = z + α * δz
-								@timeit TO "residual evaluation" mcp.F!(F_trial, z_trial; θ, ϵ, η = 0.0)
-								F_z_next = norm(F_trial, 2)
-							end
-						end
-
-						if α >= min_stepsize
-							@timeit TO "line search" begin
-								mul!(Jδz, ∇F, δz)
-								pred_reduction = F_z^2 - _shifted_norm2(F, α, Jδz)
-								actual_reduction = F_z^2 - F_z_next^2
-							end
-							break
-						end
-
-						@timeit TO "regularization" begin
-							eta_retries += 1
-							if eta_retries > max_eta_retries
-								verbose && @warn "Backtracking linesearch failed after $max_eta_retries η-retries. Exiting prematurely."
-								status = :failed
-								break
-							end
-							verbose && printstyled(
-								"Backtracking exhausted at η=$η. Retrying with $(eta_retry_growth >= 1 ? "larger" : "smaller") η ($η -> $(η * eta_retry_growth)), attempt $eta_retries/$max_eta_retries\n";
-								color = :yellow,
-							)
-							η = min(η * eta_retry_growth, η_max)
 						end
 					end
-					if status === :failed
+
+					if α >= min_stepsize
+						@timeit TO "line search" begin
+							mul!(Jδz, ∇F, δz)
+							pred_reduction = F_z^2 - _shifted_norm2(F, α, Jδz)
+							actual_reduction = F_z^2 - F_z_next^2
+						end
 						break
 					end
 
-					F .= F_trial
-
-					# Levenberg-Marquardt gain-ratio update for the next Newton iteration's η.
-					# https://www.cs.cornell.edu/courses/cs4220/2023sp/lec/2023-04-19.pdf
 					@timeit TO "regularization" begin
-						ρ = pred_reduction > 0 ? actual_reduction / pred_reduction : -Inf
-						full_step_taken = α ≥ 0.99
-						if ρ ≤ ρ_low || !full_step_taken
-							verbose && printstyled("Poor gain ratio or backtracked step (ρ = $ρ, α = $α)... Increasing η. ($η -> $(min(η * eta_increase_factor, η_max)))\n"; color = :red)
-							η = min(η * (1 + exp(-loosening_rate)), η_max) # 1 < (1 + e⁻ʳ) ≤ 2
-						elseif ρ > ρ_high
-							verbose && printstyled("Good gain ratio on full step (ρ = $ρ)... Decreasing η. ($η -> $(max(η * eta_decrease_factor, η_min)))\n"; color = :blue)
-							η = max(η * (1 - exp(-tightening_rate)), η_min) # 0 ≤ (1 - e⁻ʳ) < 1
-						else # ρ_low < ρ ≤ ρ_high on a full step: keep η
-							verbose && printstyled("Full step with moderate gain ratio (ρ = $ρ)... Keeping η = $η.\n", color = :green)
+						eta_retries += 1
+						if eta_retries > max_eta_retries
+							verbose && @warn "Backtracking linesearch failed after $max_eta_retries η-retries. Exiting prematurely."
+							status = :failed
+							break
 						end
+						verbose && printstyled(
+							"Backtracking exhausted at η=$η. Retrying with $(eta_retry_growth >= 1 ? "larger" : "smaller") η ($η -> $(η * eta_retry_growth)), attempt $eta_retries/$max_eta_retries\n";
+							color = :yellow,
+						)
+						η = min(η * eta_retry_growth, η_max)
 					end
-					verbose && println("backtracking linesearch α = $α, gain ratio ρ = $ρ")
-					α_σ = α
-					α_γ = α
+				end
+				if status === :failed
+					break
 				end
 
-				# Update variables accordingly.
-				@timeit TO "iterate update and bookkeeping" begin
-					@. x += α_σ * δx
-					@. s += α_σ * δs
-					@. σ += α_σ * δσ
-					@. γ += α_γ * δγ
+				F .= F_trial 
 
-					kkt_error = norm(F, 2)
-					if kkt_error < best_kkt_error * (1 - stagnation_rtol)
-						best_kkt_error = kkt_error
+				# Levenberg-Marquardt gain-ratio update for the next Newton iteration's η.
+				# https://www.cs.cornell.edu/courses/cs4220/2023sp/lec/2023-04-19.pdf
+				@timeit TO "regularization" begin
+					ρ = pred_reduction > 0 ? actual_reduction / pred_reduction : -Inf
+					full_step_taken = α ≥ 0.99
+					if ρ ≤ ρ_low || !full_step_taken
+						verbose && printstyled("Poor gain ratio or backtracked step (ρ = $ρ, α = $α)... Increasing η. ($η -> $(min(η * eta_increase_factor, η_max)))\n"; color = :red)
+						η = min(η * (1 + exp(-loosening_rate)), η_max) # 1 < (1 + e⁻ʳ) ≤ 2
+					elseif ρ > ρ_high
+						verbose && printstyled("Good gain ratio on full step (ρ = $ρ)... Decreasing η. ($η -> $(max(η * eta_decrease_factor, η_min)))\n"; color = :blue)
+						η = max(η * (1 - exp(-tightening_rate)), η_min) # 0 ≤ (1 - e⁻ʳ) < 1
+					else # ρ_low < ρ ≤ ρ_high on a full step: keep η
+						verbose && printstyled("Full step with moderate gain ratio (ρ = $ρ)... Keeping η = $η.\n", color = :green)
+					end
+				end
+				verbose && println("backtracking linesearch α = $α, gain ratio ρ = $ρ")
+				α_σ = α
+				α_γ = α
+			end
+
+			# Update variables accordingly.
+			@timeit TO "iterate update and bookkeeping" begin
+				@. x += α_σ * δx
+				@. s += α_σ * δs
+				@. σ += α_σ * δσ
+				@. γ += α_γ * δγ
+
+				kkt_error = norm(F, 2)
+				if kkt_error < best_kkt_error * (1 - stagnation_rtol)
+					best_kkt_error = kkt_error
+					iters_since_improvement = 0
+				else
+					iters_since_improvement += 1
+					verbose && println("No significant improvement in KKT error for $iters_since_improvement iterations (best_kkt_error = $best_kkt_error, current kkt_error = $kkt_error).")
+				end
+			end
+
+			if perturbation_enabled && kkt_error > tol &&
+			   iters_since_improvement >= stagnation_iters &&
+			   #    num_perturbations < max_perturbations &&
+			   kkt_error < 1.0
+
+				@timeit TO "perturbation" begin
+					verbose && println("Stagnation detected: perturbing x to escape local minimum (num_perturbations = $num_perturbations).")
+
+
+					z_trial .= z
+					z_trial[x_dims] .+= perturbation_scale .* randn(length(x))
+					@timeit TO "residual evaluation" mcp.F!(F_trial, z_trial; θ, ϵ, η = 0.0)
+					trial_kkt_error = norm(F_trial, 2)
+					num_perturbations += 1
+
+					if isfinite(trial_kkt_error) && all(isfinite, F_trial) &&
+					   trial_kkt_error <= 1.05 * kkt_error
+
+						z .= z_trial
+						F .= F_trial
+						kkt_error = trial_kkt_error
+						best_kkt_error = min(best_kkt_error, kkt_error)
 						iters_since_improvement = 0
+						verbose && printstyled("...Applied perturbation to x; KKT error = $kkt_error\n", color = :green)
 					else
-						iters_since_improvement += 1
-						verbose && println("No significant improvement in KKT error for $iters_since_improvement iterations (best_kkt_error = $best_kkt_error, current kkt_error = $kkt_error).")
+						verbose && println("...Rejected perturbation; trial KKT error = $trial_kkt_error")
 					end
 				end
+			end
 
-				if perturbation_enabled && kkt_error > tol &&
-				   iters_since_improvement >= stagnation_iters &&
-				   #    num_perturbations < max_perturbations &&
-				   kkt_error < 1.0
-
-					@timeit TO "perturbation" begin
-						verbose && println("Stagnation detected: perturbing x to escape local minimum (num_perturbations = $num_perturbations).")
-
-
-						z_trial .= z
-						z_trial[x_dims] .+= perturbation_scale .* randn(length(x))
-						@timeit TO "residual evaluation" mcp.F!(F_trial, z_trial; θ, ϵ, η = 0.0)
-						trial_kkt_error = norm(F_trial, 2)
-						num_perturbations += 1
-
-						if isfinite(trial_kkt_error) && all(isfinite, F_trial) &&
-						   trial_kkt_error <= 1.05 * kkt_error
-
-							z .= z_trial
-							F .= F_trial
-							kkt_error = trial_kkt_error
-							best_kkt_error = min(best_kkt_error, kkt_error)
-							iters_since_improvement = 0
-							verbose && printstyled("...Applied perturbation to x; KKT error = $kkt_error\n", color = :green)
-						else
-							verbose && println("...Rejected perturbation; trial KKT error = $trial_kkt_error")
-						end
-					end
+			@timeit TO "iterate update and bookkeeping" begin
+				if record_convergence
+					push!(kkt_error_history, kkt_error)
+					push!(eta_history, η)
+					push!(alpha_history, min(α_σ, α_γ))
+					push!(rho_history, ρ)
 				end
-
-				@timeit TO "iterate update and bookkeeping" begin
-					if record_convergence
-						push!(kkt_error_history, kkt_error)
-						push!(eta_history, η)
-						push!(alpha_history, min(α_σ, α_γ))
-						push!(rho_history, ρ)
-					end
-					if record_condition_number
-						push!(condition_number_history, condition_number)
-					end
+				if record_condition_number
+					push!(condition_number_history, condition_number)
 				end
+			end
 
-				verbose && println("KKT error = $kkt_error")
+			verbose && println("KKT error = $kkt_error")
 
-				inner_iters += 1
+			inner_iters += 1
 			end
 		end
 
