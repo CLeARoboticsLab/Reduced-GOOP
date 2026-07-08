@@ -1,9 +1,15 @@
 module Robotic_arm_receding
 
+# Forward BLAS/LAPACK to Apple Accelerate (AMX)
+@static if Sys.isapple()
+	using AppleAccelerate: AppleAccelerate
+end
+
 using CairoMakie: CairoMakie
 using JLD2, Random
 using Dates: Dates
 using Statistics: mean, median, std
+using ProgressMeter: ProgressMeter, @showprogress
 using ReducedGOOP
 using TimerOutputs: @timeit, reset_timer!
 
@@ -51,28 +57,28 @@ function demo(;
 
 	# ── Problem parameters (same scenario as the open-loop demo) ───────────────
 	# Player 1: combined two-arm agent, Player 2: child/pet.
-	num_players         = 2
+	num_players = 2
 	collision_avoidance = 3.0
 	safety_buffer_margin = 1.0
-	arm_speed_limit     = 5.0
-	child_speed_limit   = 3.0
-	dₚ                  = 2.0
-	ϵ₀                  = 0.1
-	max_inner_iters     = 500
+	arm_speed_limit = 5.0
+	child_speed_limit = 3.0
+	dₚ = 2.0
+	ϵ₀ = 0.1
+	max_inner_iters = 500
 
 	# ── Scenario ───────────────────────────────────────────────────────────────
-	base_initial_state1 = [-1.0,  6.0, 2.0]
-	base_initial_state2 = [ 1.0,  6.0, 2.0]
+	base_initial_state1 = [-1.0, 6.0, 2.0]
+	base_initial_state2 = [1.0, 6.0, 2.0]
 	goal_position1      = [-1.0, -5.0, 5.0]
-	goal_position2      = [ 1.0, -5.0, 5.0]
+	goal_position2      = [1.0, -5.0, 5.0]
 	initial_state3      = [-6.0, -1.0, 0.0]
-	goal_position3      = [ 0.0,  0.0, 0.0]
+	goal_position3      = [0.0, 0.0, 0.0]
 	obstacle_position   = [0.25, 0.15, 0.0]   # placeholder
 
 	# ── Build dynamics and problem ─────────────────────────────────────────────
 	state_dimension   = 3
 	control_dimension = 3
-	Δt                = 0.1
+	Δt               = 0.1
 	control_bounds    = (; lb = [-10.0, -10.0, -10.0], ub = [10.0, 10.0, 10.0])
 
 	dynamics = @timeit TO "dynamics construction" [
@@ -117,7 +123,7 @@ function demo(;
 		max_outer_iters = 1,
 		tightening_rate = 1.2,
 		loosening_rate = 3.0,
-		eta_increase_factor = 2.0, 
+		eta_increase_factor = 2.0,
 		eta_decrease_factor = 0.5,
 		min_stepsize = 1e-20,
 		linesearch,
@@ -126,7 +132,6 @@ function demo(;
 		record_convergence = true,
 		record_condition_number,
 		η_min = 1e-12,
-		stagnation_eta_boost_enabled = false,
 		eta_retry_growth = 0.3,
 		perturbation_enabled = false,
 		stagnation_rtol = 1e-1,
@@ -144,8 +149,8 @@ function demo(;
 	dirs = @timeit TO "output directory setup" prepare_receding_output_dirs(run_id; debug)
 
 	# ── MPC state ──────────────────────────────────────────────────────────────
-	current_state1     = copy(base_initial_state1)
-	current_state2     = copy(base_initial_state2)
+	current_state1 = copy(base_initial_state1)
+	current_state2 = copy(base_initial_state2)
 	current_state_child = copy(initial_state3)
 
 	closed_loop_xs = [
@@ -168,11 +173,11 @@ function demo(;
 	)
 	stage_warmstart = warmstart_solution
 
-	step_statuses     = Symbol[]
-	step_kkt_errors   = Float64[]
-	step_solve_times  = Float64[]
-	step_total_iters  = Int[]
-	θ1_initial = θ2_initial = θ3_initial = nothing
+	step_statuses    = Symbol[]
+	step_kkt_errors  = Float64[]
+	step_solve_times = Float64[]
+	step_total_iters = Int[]
+	θ1_initial      = θ2_initial = θ3_initial = nothing
 
 	# ── MPC loop ───────────────────────────────────────────────────────────────
 	for k in 1:num_mpc_steps
@@ -251,7 +256,7 @@ function demo(;
 			push!(closed_loop_us[player], collect(strategies[player].us[1]))
 			push!(closed_loop_xs[player], collect(strategies[player].xs[2]))
 		end
-		combined_arm_state = closed_loop_xs[1][end]
+		combined_arm_state  = closed_loop_xs[1][end]
 		current_state1      = combined_arm_state[1:state_dimension]
 		current_state2      = combined_arm_state[(state_dimension+1):(2*state_dimension)]
 		current_state_child = closed_loop_xs[2][end]
@@ -552,8 +557,8 @@ function save_solve_time_plots(step_solve_times, step_statuses, timing_plots_dir
 	exclude_first = num_steps > 2 && step_solve_times[1] > 3 * median(warm_times)
 	hist_times = exclude_first ? step_solve_times[2:end] : step_solve_times
 	hist_title = exclude_first ?
-		"Warm-solve times (step 1 excluded: $(round(step_solve_times[1]; digits = 1)) s incl. one-time JIT)" :
-		"Per-step solve times"
+				 "Warm-solve times (step 1 excluded: $(round(step_solve_times[1]; digits = 1)) s incl. one-time JIT)" :
+				 "Per-step solve times"
 	hist_fig = RA.serif_figure(size = (900, 600))
 	hist_ax = CairoMakie.Axis(
 		hist_fig[1, 1];

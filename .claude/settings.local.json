@@ -87,7 +87,12 @@
       "Bash(julia --project=experiments -e 'include\\(\"experiments/Intersection.jl\"\\); Intersection.demo\\(run_id = \"3_hard_safety_ineq\"\\)')",
       "Bash(julia --project=. -e 'using Pkg; Pkg.test\\(\\)')",
       "Bash(awk -F_ '{print $1}')",
-      "Bash(julia --project=. -e 'include\\(\"src/ReducedGOOP.jl\"\\); println\\(\"SYNTAX OK\"\\)')"
+      "Bash(julia --project=. -e 'include\\(\"src/ReducedGOOP.jl\"\\); println\\(\"SYNTAX OK\"\\)')",
+      "Bash(julia --project=experiments -e 'import Pkg; Pkg.add\\(\"AppleAccelerate\"\\); println\\(\"ADDED\"\\)')",
+      "Bash(julia --project=experiments /private/tmp/claude-501/-Users-dhl-Documents-Reduced-GOOP/4e23284e-a31b-42d4-ae58-9d47c64970c5/scratchpad/bench_solver.jl)",
+      "Bash(julia --project=experiments /private/tmp/claude-501/-Users-dhl-Documents-Reduced-GOOP/4e23284e-a31b-42d4-ae58-9d47c64970c5/scratchpad/bench_marquardt.jl)",
+      "Bash(julia --project=experiments -e 'import Pkg; Pkg.add\\(\"ProgressMeter\"\\); println\\(\"ADDED\"\\)')",
+      "Bash(awk -F: '{print $1\": \"$2}')"
     ],
     "additionalDirectories": [
       "/private/tmp"
