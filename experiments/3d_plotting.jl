@@ -1,6 +1,7 @@
 using CairoMakie: CairoMakie
 
 const SINGLE_INTEGRATOR_3D_PLAYER_COLORS = (:blue, :red, :darkorange)
+const SINGLE_INTEGRATOR_3D_POT_CENTER_COLOR = :purple
 
 function _trajectory_xyz(xs; player)
 	isempty(xs) && error("Player $(player) trajectory is empty.")
@@ -132,6 +133,8 @@ function _single_integrator_3d_plot_data(;
 	end
 	goal1 = _position3(goal_position1, "goal_position1")
 	goal2 = _position3(goal_position2, "goal_position2")
+	pot_start = 0.5 .* (start1 .+ start2)
+	pot_goal = 0.5 .* (goal1 .+ goal2)
 
 	all_x = vcat(x1, x2, start1[1], start2[1], goal1[1], goal2[1])
 	all_y = vcat(y1, y2, start1[2], start2[2], goal1[2], goal2[2])
@@ -178,6 +181,8 @@ function _single_integrator_3d_plot_data(;
 		start3,
 		goal1,
 		goal2,
+		pot_start,
+		pot_goal,
 		collision_avoidance,
 		xlims,
 		ylims,
@@ -323,6 +328,8 @@ function _plot_single_integrator_3d_trajectories(
 		start3,
 		goal1,
 		goal2,
+		pot_start,
+		pot_goal,
 		collision_avoidance,
 		xlims,
 		ylims,
@@ -520,12 +527,34 @@ function _plot_single_integrator_3d_trajectories(
 		strokecolor = :black,
 		strokewidth = 1,
 	)
+	pot_start_marker = makie.scatter!(
+		ax,
+		[pot_start[1]],
+		[pot_start[2]],
+		[pot_start[3]];
+		marker = :rect,
+		markersize = interactive ? 28 : 23,
+		color = SINGLE_INTEGRATOR_3D_POT_CENTER_COLOR,
+		strokecolor = :black,
+		strokewidth = 1,
+	)
+	pot_goal_marker = makie.scatter!(
+		ax,
+		[pot_goal[1]],
+		[pot_goal[2]],
+		[pot_goal[3]];
+		marker = :star5,
+		markersize = interactive ? 34 : 28,
+		color = SINGLE_INTEGRATOR_3D_POT_CENTER_COLOR,
+		strokecolor = :black,
+		strokewidth = 1,
+	)
 
 	legend_elements = Any[player1_path, player2_path]
 	legend_labels = ["Left gripper (P1)", "Right gripper (P1)"]
 	if has_child
 		push!(legend_elements, player3_path)
-		push!(legend_labels, "Child/Pet (P2)")
+		push!(legend_labels, "Child (P2)")
 	end
 	append!(
 		legend_elements,
@@ -535,9 +564,11 @@ function _plot_single_integrator_3d_trajectories(
 		legend_labels,
 		["Start 1", "Start 2", "Current 1", "Current 2", "Goal 1", "Goal 2"],
 	)
+	append!(legend_elements, Any[pot_start_marker, pot_goal_marker])
+	append!(legend_labels, ["Pot center initial", "Pot center goal"])
 	if has_child
 		append!(legend_elements, Any[start3_marker, current3_marker])
-		append!(legend_labels, ["Child/Pet Start", "Child/Pet Current"])
+		append!(legend_labels, ["Child Start", "Child Current"])
 	end
 	if !isnothing(safety_handle)
 		push!(legend_elements, safety_handle)
@@ -612,6 +643,8 @@ function _plot_single_integrator_3d_browser_trajectories(
 		start3,
 		goal1,
 		goal2,
+		pot_start,
+		pot_goal,
 		collision_avoidance,
 		xlims,
 		ylims,
@@ -738,6 +771,16 @@ function _plot_single_integrator_3d_browser_trajectories(
 		t -> _agent_position_at_time(makie, t, x2, y2, z2),
 		time_index,
 	)
+	current_pot_position = makie.lift(time_index) do t
+		i = clamp(t + 1, 1, min(length(x1), length(x2)))
+		[
+			makie.Point3f(
+				0.5 * (x1[i] + x2[i]),
+				0.5 * (y1[i] + y2[i]),
+				0.5 * (z1[i] + z2[i]),
+			),
+		]
+	end
 	current1_marker = makie.scatter!(
 		scene_axis,
 		current1_position;
@@ -753,6 +796,15 @@ function _plot_single_integrator_3d_browser_trajectories(
 		marker = :diamond,
 		markersize = 30,
 		color = player2_color,
+		strokecolor = :black,
+		strokewidth = 1,
+	)
+	current_pot_marker = makie.scatter!(
+		scene_axis,
+		current_pot_position;
+		marker = :diamond,
+		markersize = 32,
+		color = SINGLE_INTEGRATOR_3D_POT_CENTER_COLOR,
 		strokecolor = :black,
 		strokewidth = 1,
 	)
@@ -795,12 +847,34 @@ function _plot_single_integrator_3d_browser_trajectories(
 		strokecolor = :black,
 		strokewidth = 1,
 	)
+	pot_start_marker = makie.scatter!(
+		scene_axis,
+		[pot_start[1]],
+		[pot_start[2]],
+		[pot_start[3]];
+		marker = :rect,
+		markersize = 28,
+		color = SINGLE_INTEGRATOR_3D_POT_CENTER_COLOR,
+		strokecolor = :black,
+		strokewidth = 1,
+	)
+	pot_goal_marker = makie.scatter!(
+		scene_axis,
+		[pot_goal[1]],
+		[pot_goal[2]],
+		[pot_goal[3]];
+		marker = :star5,
+		markersize = 34,
+		color = SINGLE_INTEGRATOR_3D_POT_CENTER_COLOR,
+		strokecolor = :black,
+		strokewidth = 1,
+	)
 
 	legend_elements = Any[player1_path, player2_path]
 	legend_labels = ["Left gripper (P1)", "Right gripper (P1)"]
 	if has_child
 		push!(legend_elements, player3_path)
-		push!(legend_labels, "Child/Pet (P2)")
+		push!(legend_labels, "Child (P2)")
 	end
 	append!(
 		legend_elements,
@@ -810,9 +884,11 @@ function _plot_single_integrator_3d_browser_trajectories(
 		legend_labels,
 		["Start 1", "Start 2", "Current 1", "Current 2", "Goal 1", "Goal 2"],
 	)
+	append!(legend_elements, Any[pot_start_marker, current_pot_marker, pot_goal_marker])
+	append!(legend_labels, ["Pot center initial", "Pot center current", "Pot center goal"])
 	if has_child
 		append!(legend_elements, Any[start3_marker, current3_marker])
-		append!(legend_labels, ["Child/Pet Start", "Child/Pet Current"])
+		append!(legend_labels, ["Child Start", "Child Current"])
 	end
 	if !isnothing(safety_handle)
 		push!(legend_elements, safety_handle)

@@ -1,11 +1,11 @@
 {
     "schema_version": 2,
-    "commit": "356af3a1e2bb3b4515820ce3afe426a0e96ae95e",
-    "indexed_at": "2026-07-10T15:51:08Z",
+    "commit": "8dc4c72643f58aac902bb999f6a5c558b0b8d447",
+    "indexed_at": "2026-07-10T22:40:42Z",
     "project": "Users-dhl-Documents-Reduced-GOOP",
-    "nodes": 1016,
-    "edges": 1658,
+    "nodes": 1014,
+    "edges": 1648,
     "original_size": 4784128,
-    "compressed_size": 750535,
+    "compressed_size": 748836,
     "compression_level": 3
 }

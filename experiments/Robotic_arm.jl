@@ -154,16 +154,17 @@ function get_setup(scenario_config::ScenarioConfig)
 
 	function control_objective(; player)
 		function (z, _)
-			(; xs, us) = trajectory(z; player)
+			(; us) = trajectory(z; player)
 			sum(sum(u .^ 2) for u in us)
 		end
 	end
 
 	function load_balance_objective(z, θ; allowance = 0.1)
-		(; xs) = trajectory(z; player = 1)
+		(; xs, us) = trajectory(z; player = 1)
 		sum(eachindex(xs)) do t
 			balance = (xs[t][arm1_range[end]] - xs[t][arm2_range[end]])^2
-			ifelse(balance < allowance^2, 0.0, balance - allowance^2)
+			swerve = us[t][arm1_range[1]]^2 + us[t][arm2_range[1]]^2
+			ifelse(balance + swerve < allowance^2, 0.0, (balance + swerve) - allowance^2)
 		end
 	end
 
@@ -302,7 +303,6 @@ function get_setup(scenario_config::ScenarioConfig)
 			# control_objective(; player = 1),
 			goal_objective,
 			load_balance_objective,
-			# robot_child_buffer_inequality,
 			robot_inequality,
 		],
 		[
@@ -485,11 +485,11 @@ function demo(;
 
 	# ── Scenario ───────────────────────────────────────────────────────────────
 	# Single Integrator 3D: state = [px, py, pz]
-	base_initial_state1 = [-1.0,  6.0, 0.0]
-	base_initial_state2 = [ 1.0,  6.0, 0.0]
+	base_initial_state1 = [-1.0,  6.0, 1.5]
+	base_initial_state2 = [ 1.0,  6.0, 1.5]
 	goal_position1      = [-1.0, -5.0, 5.0]
 	goal_position2      = [ 1.0, -5.0, 5.0]
-	initial_state3      = [-6.0, -1.0, 0.0]
+	initial_state3      = [-3.0, -1.0, 0.0]
 	goal_position3	    = [ 0.0,  0.0, 0.0]
 	obstacle_position   = [0.25, 0.15, 0.0]   # placeholder
 
@@ -564,24 +564,27 @@ function demo(;
 	function solve_game_instance(θ; z₀, ϵ₀, max_inner_iters)
 		options = @timeit TO "solver options construction" ReducedGOOP.InteriorPointOptions(;
 				tol = 0.01, #1e-4
-				η₀ = 1.0e-6, # 5e-5, 0.0 to turn off Tikhonov
+				η₀ = 1.0, # 0.0 to turn off Tikhonov regularization
+				η_max = 1.0,
 				ϵ₀,
 				max_inner_iters,
 				max_outer_iters = 1,
-				tightening_rate = 1.2, # high => weak decrease in η
-				loosening_rate = 3.0, # low => strong increase in η
+				tightening_rate = 3.0, # high => weak decrease in η
+				loosening_rate = 0.5, # low => strong increase in η
 				min_stepsize = 1e-20,
 				linesearch,
 				linear_solve_algorithm = ReducedGOOP.LinearSolve.KrylovJL_LSMR(),
 				use_linsolve = false,
 				record_convergence = true,
 				record_condition_number = true,
-				eta_retry_growth = 0.3,
+				eta_retry_growth = 2.0,
+				ρ_low = 0.25,
+				ρ_high = 0.75,
 				perturbation_enabled = false,
 				stagnation_rtol = 1e-1,
 				perturbation_scale = 1e-6,
 				tsvd_threshold = 0.0, # 0.0: pure Tikhonov, > 0 and η = 0: pure TSVD
-				use_marquardt_scaling = false,
+				use_marquardt_scaling = true,
 				verbose,
 			)
 
