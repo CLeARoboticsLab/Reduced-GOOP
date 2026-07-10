@@ -92,7 +92,11 @@
       "Bash(julia --project=experiments /private/tmp/claude-501/-Users-dhl-Documents-Reduced-GOOP/4e23284e-a31b-42d4-ae58-9d47c64970c5/scratchpad/bench_solver.jl)",
       "Bash(julia --project=experiments /private/tmp/claude-501/-Users-dhl-Documents-Reduced-GOOP/4e23284e-a31b-42d4-ae58-9d47c64970c5/scratchpad/bench_marquardt.jl)",
       "Bash(julia --project=experiments -e 'import Pkg; Pkg.add\\(\"ProgressMeter\"\\); println\\(\"ADDED\"\\)')",
-      "Bash(awk -F: '{print $1\": \"$2}')"
+      "Bash(awk -F: '{print $1\": \"$2}')",
+      "mcp__codebase-memory-mcp__index_repository",
+      "mcp__codebase-memory-mcp__get_architecture",
+      "mcp__codebase-memory-mcp__index_status",
+      "mcp__codebase-memory-mcp__detect_changes"
     ],
     "additionalDirectories": [
       "/private/tmp"

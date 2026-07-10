@@ -10,7 +10,7 @@ end
 using CairoMakie: CairoMakie
 using LaTeXStrings: @L_str
 using BlockArrays
-using JLD2, Distributions, Random
+using JLD2, Random
 using ReducedGOOP
 using TimerOutputs: @timeit, reset_timer!
 
@@ -23,26 +23,71 @@ include(joinpath(@__DIR__, "plotting.jl"))
 include(joinpath(@__DIR__, "3d_plotting.jl"))
 include(joinpath(@__DIR__, "dynamics.jl"))
 
+# ── Configuration ────────────────────────────────────────────────────────────────────────
+
+"""Stable numerical and geometric configuration for the robotic-arm game."""
+Base.@kwdef struct ScenarioConfig{DM,D,CB}
+	dynamics_model::DM
+	dynamics::D
+	control_bounds::CB
+	num_players::Int = 2
+	planning_horizon::Int = 12
+	position_dimension::Int = 3
+	map_end::Float64 = 10.0
+	lane_width::Float64 = 2.0
+	Δt::Float64 = 0.1
+	dₚ::Float64 = 2.0
+	collision_avoidance::Float64 = 2.0
+	safety_buffer_margin::Float64 = 1.0
+	child_initial_buffer::Float64 = 4.0
+	arm_speed_limit::Float64 = 5.0
+	child_speed_limit::Float64 = 3.0
+	base_initial_state1::Vector{Float64} = [-1.0, 6.0, 0.0]
+	base_initial_state2::Vector{Float64} = [1.0, 6.0, 0.0]
+	goal_position1::Vector{Float64} = [-1.0, -5.0, 5.0]
+	goal_position2::Vector{Float64} = [1.0, -5.0, 5.0]
+	initial_state3::Vector{Float64} = [-6.0, -1.0, 0.0]
+	goal_position3::Vector{Float64} = [0.0, 0.0, 0.0]
+	obstacle_position::Vector{Float64} = [0.25, 0.15, 0.0]
+	use_scalarized_baseline::Bool = false
+	use_social_equilibrium_baseline::Bool = false
+end
+
+"""Output locations and display/file-format choices for experiment plots."""
+Base.@kwdef struct VisualizationConfig{D}
+	dirs::D
+	show_interactive_trajectory::Bool = false
+	static_extension::String = "pdf"
+	interactive_extension::String = "html"
+end
+
+"""Per-attempt parameter blocks passed to solver and plotting routines."""
+struct InstanceParameters{T1,T2,T3,T}
+	θ1::T1
+	θ2::T2
+	θ3::T3
+	θ::T
+end
+
 # ── Problem definition ─────────────────────────────────────────────────────────
 
-function get_setup(
-	num_players;
-	dynamics,
-	control_bounds = (; lb = [-10.0, -10.0, -10.0], ub = [10.0, 10.0, 10.0]),
-	planning_horizon = 10,
-	dₚ = 2.0,
-	collision_avoidance = 1.0,
-	safety_buffer_margin = 1.0,
-	arm_speed_limit = 3.0,
-	child_speed_limit = 1.5,
-	map_end = 10,
-	lane_width = 2,
-	use_scalarized_baseline = false,
-	use_social_equilibrium_baseline = false,
-	tracking_weight = 1.0,
-)
+function get_setup(scenario_config::ScenarioConfig)
+	(;
+		num_players,
+		dynamics,
+		control_bounds,
+		planning_horizon,
+		dₚ,
+		collision_avoidance,
+		arm_speed_limit,
+		child_speed_limit,
+		use_scalarized_baseline,
+		use_social_equilibrium_baseline,
+	) = scenario_config
 	num_players == 2 || error("robotic_arm Zero-Sum GOOP setup expects exactly two players (two-arm robot and child).")
 	length(dynamics) == num_players || error("Expected one dynamics entry per player.")
+
+	# ── Shared dimensions and parameter layout ──────────────────────────────────────────────────────────
 
 	position_dimension = 3
 	# Player 1 is the combined two-arm agent: state/control stack both arms as
@@ -53,19 +98,15 @@ function get_setup(
 	primal_dimensions = [
 		(dyn.state_dimension + dyn.control_dimension) * planning_horizon for dyn in dynamics
 	]
-	# Per player: (initial state, goal of same length as the state, 3D obstacle).
-	# Player 1 additionally carries a per-timestep reference trajectory for the
-	# stacked two-arm state. It enters as parameters (not symbolic decision
-	# variables), so the KKT system is generated once and MPC iterations only
-	# update parameter values.
+	# Per player: initial state, goal of the same length, and a 3D obstacle.
 	parameter_dimensions = [
-		2 * dyn.state_dimension + position_dimension +
-		(i == 1 ? dyn.state_dimension * planning_horizon : 0)
-		for (i, dyn) in enumerate(dynamics)
+		2 * dyn.state_dimension + position_dimension for dyn in dynamics
 	]
 
 	dummy_primals = BlockArray(zeros(sum(primal_dimensions)), primal_dimensions)
 	dummy_parameters = BlockArray(zeros(sum(parameter_dimensions)), parameter_dimensions)
+
+	# ── Shared parameter and trajectory helpers ─────────────────────────────────────────────────────────────
 
 	unflatten_parameters = function (θ; player)
 		state_dimension = dynamics[player].state_dimension
@@ -73,9 +114,7 @@ function get_setup(
 		initial_state = first(θ_iter, state_dimension)
 		goal_position = first(θ_iter, state_dimension)
 		obstacle_position = first(θ_iter, position_dimension)
-		reference_trajectory = player == 1 ?
-			first(θ_iter, state_dimension * planning_horizon) : nothing
-		(; initial_state, goal_position, obstacle_position, reference_trajectory)
+		(; initial_state, goal_position, obstacle_position)
 	end
 
 	function flatten_parameters(;
@@ -83,33 +122,12 @@ function get_setup(
 		initial_state,
 		goal_position,
 		obstacle_position,
-		reference_trajectory = nothing,
 	)
 		state_dimension = dynamics[player].state_dimension
 		length(initial_state) == state_dimension || error("Expected initial_state length $(state_dimension), got $(length(initial_state)).")
 		length(goal_position) == state_dimension || error("Expected goal_position length $(state_dimension), got $(length(goal_position)).")
 		length(obstacle_position) == position_dimension || error("Expected 3D obstacle_position, got length $(length(obstacle_position)).")
-		if player != 1
-			return vcat(initial_state, goal_position, obstacle_position)
-		end
-		isnothing(reference_trajectory) &&
-			error("Player 1 requires a reference_trajectory parameter block.")
-		length(reference_trajectory) == state_dimension * planning_horizon ||
-			error("Expected reference_trajectory length $(state_dimension * planning_horizon), got $(length(reference_trajectory)).")
-		vcat(initial_state, goal_position, obstacle_position, reference_trajectory)
-	end
-
-	function squared_violation(h)
-		"h(x) ≥ 0	<=> (min(h(x), 0))^2 = 0"
-		return (min(h, 0))^2
-	end
-
-	function smooth_piecewise_preference_objective(
-		preference,
-		level;
-		ϵ = 0.0,
-	)
-		ifelse(preference ≥ ϵ, 0.0, (ϵ - preference)^(level + 2))
+		vcat(initial_state, goal_position, obstacle_position)
 	end
 
 	trajectory(z; player) = unflatten_trajectory(
@@ -118,31 +136,20 @@ function get_setup(
 		dynamics[player].control_dimension,
 	)
 
+	# ── Preference objectives ──────────────────────────────────────────────────────────────────
+
 	function goal_objective(z, θ)
 		# The two-arm agent delivers the pot center to the center of the two
 		# per-arm goals; both quantities are recovered from the stacked state.
 		(; xs) = trajectory(z; player = 1)
-		(; goal_position, reference_trajectory) =
-			unflatten_parameters(θ[Block(1)]; player = 1)
+		(; goal_position) = unflatten_parameters(θ[Block(1)]; player = 1)
 
 		center_position = 0.5 .* (xs[end][arm1_range] .+ xs[end][arm2_range])
 		center_goal_position = 0.5 .* (goal_position[arm1_range] .+ goal_position[arm2_range])
 		goal_deviation = center_position .- center_goal_position
 		terminal_objective = sum(goal_deviation .^ 2)
 
-		# Track the nominal straight-line motion toward the goal. The reference
-		# enters through θ, so it can be refreshed every MPC iteration without
-		# touching the compiled KKT system.
-		state_dimension = dynamics[1].state_dimension
-		tracking_objective = sum(eachindex(xs)) do t
-			reference_state =
-				reference_trajectory[((t-1)*state_dimension+1):(t*state_dimension)]
-			sum((xs[t] .- reference_state) .^ 2)
-		end
-
-		# Normalized by the horizon so the tracking term stays commensurate
-		# with the terminal objective regardless of planning_horizon.
-		terminal_objective #+ (tracking_weight / planning_horizon) * tracking_objective
+		terminal_objective
 	end
 
 	function control_objective(; player)
@@ -152,6 +159,36 @@ function get_setup(
 		end
 	end
 
+	function load_balance_objective(z, θ; allowance = 0.1)
+		(; xs) = trajectory(z; player = 1)
+		sum(eachindex(xs)) do t
+			balance = (xs[t][arm1_range[end]] - xs[t][arm2_range[end]])^2
+			ifelse(balance < allowance^2, 0.0, balance - allowance^2)
+		end
+	end
+
+	function negative_load_balance_objective(z, θ)
+		-load_balance_objective(z, θ)
+	end
+
+	function pot_approach_objective(z, θ)
+		arm_trajectory = trajectory(z; player = 1)
+		child_trajectory = trajectory(z; player = 2)
+
+		# The child/pet is curious, not physically coupled to the pot.
+		# Approach the pot center c = (p₁ + p₂) / 2.
+		sum(eachindex(child_trajectory.xs)) do t
+			arm_state = arm_trajectory.xs[t]
+			pot_center = 0.5 .* (arm_state[arm1_range] .+ arm_state[arm2_range])
+			sum(abs2, child_trajectory.xs[t] .- pot_center)
+		end
+	end
+
+	function negative_pot_approach_objective(z, θ)
+		-pot_approach_objective(z, θ)
+	end
+
+	# ── Control-bound constraints ──────────────────────────────────────────────────────────
 	function control_bound_inequality(; player)
 		function (z, _)
 			# The combined two-arm agent tiles the single-arm bounds over both arms.
@@ -166,6 +203,7 @@ function get_setup(
 		end
 	end
 
+	# ── Equality and inequality constraints ──────────────────────────────────────────────────────────
 	player_equality_constraints = [
 		function (z, θ)
 			(; xs, us) = trajectory(z; player = i)
@@ -180,8 +218,7 @@ function get_setup(
 
 			# The two arms jointly carry the hot pot. This hard handle-grasp
 			# constraint keeps the two grippers separated by the fixed 3D handle
-			# distance dₚ at all times. It is internal to the combined two-arm
-			# player; the child never directly manipulates the pot.
+			# distance dₚ at all times.
 			handle_grasp_constraint = i == 1 ?
 				mapreduce(vcat, eachindex(xs)) do t
 					gripper_separation = xs[t][arm1_range] .- xs[t][arm2_range]
@@ -190,8 +227,7 @@ function get_setup(
 				empty_constraint
 
 			# The child is modeled with the same 3D single-integrator dynamics, but its
-			# vertical velocity is fixed to zero. Since its initial z is zero, the child
-			# remains on the ground for the full trajectory.
+			# vertical velocity is fixed to zero.
 			child_ground_constraint = i == 2 ?
 				mapreduce(u -> [u[position_dimension]], vcat, us) :
 				empty_constraint
@@ -221,25 +257,6 @@ function get_setup(
 			pot_center = 0.5 .* (arm_state[arm1_range] .+ arm_state[arm2_range])
 			separation = pot_center .- child_trajectory.xs[t]
 			[sum(abs2, separation) - collision_avoidance^2]
-		end
-	end
-
-	function robot_child_buffer_inequality(z, θ)
-		arm_trajectory = trajectory(z; player = 1)
-		child_trajectory = trajectory(z; player = 2)
-
-		# Soft comfort clearance: the same coupling as
-		# robot_child_safety_inequality but with the enlarged radius
-		# collision_avoidance + safety_buffer_margin. As a prioritized
-		# (slack-relaxable) preference level it makes the robot trade goal
-		# progress for extra clearance whenever feasible, so the equilibrium no
-		# longer rides the hard safety boundary as the child approaches.
-		buffer_radius = collision_avoidance + safety_buffer_margin
-		mapreduce(vcat, eachindex(child_trajectory.xs)) do t
-			arm_state = arm_trajectory.xs[t]
-			pot_center = 0.5 .* (arm_state[arm1_range] .+ arm_state[arm2_range])
-			separation = pot_center .- child_trajectory.xs[t]
-			[sum(abs2, separation) - buffer_radius^2]
 		end
 	end
 
@@ -278,36 +295,9 @@ function get_setup(
 		child_ground_speed_inequality,
 	]
 
-	# Load balance objective
-	function load_balance_objective(z, θ; allowance = 0.1)
-		(; xs) = trajectory(z; player = 1)
-		sum(eachindex(xs)) do t
-			balance = (xs[t][arm1_range[end]] - xs[t][arm2_range[end]])^2
-			ifelse(balance < allowance^2, 0.0, balance - allowance^2)
-		end
-	end
-
-	function negative_load_balance_objective(z, θ)
-		-load_balance_objective(z, θ)
-	end
-
-	function pot_approach_objective(z, θ)
-		arm_trajectory = trajectory(z; player = 1)
-		child_trajectory = trajectory(z; player = 2)
-
-		# The child/pet is curious, not physically coupled to the pot.
-		# Approach the pot center c = (p₁ + p₂) / 2.
-		sum(eachindex(child_trajectory.xs)) do t
-			arm_state = arm_trajectory.xs[t]
-			pot_center = 0.5 .* (arm_state[arm1_range] .+ arm_state[arm2_range])
-			sum(abs2, child_trajectory.xs[t] .- pot_center)
-		end
-	end
-	function negative_pot_approach_objective(z, θ)
-		-pot_approach_objective(z, θ)
-	end
-
-	preferences = [
+	# ── 1. GOOP formulation ──────────────────────────────────────────────────────────────────────────────
+	# Preference hierarchy: [lowest priority, ..., highest priority].
+	goop_preferences = [
 		[
 			# control_objective(; player = 1),
 			goal_objective,
@@ -320,23 +310,35 @@ function get_setup(
 			child_ground_speed_inequality
 		],
 	]
-
-	# Preference hierarchy: [lowest priority, ..., highest priority]
-	is_prioritized_constraint = [[false, false, true], [false, true]]
+	goop_is_prioritized_constraint = [[false, false, true], [false, true]]
 
 	function build_goop_problem()
-		@timeit TO "ParametricGOOP construction" begin
-			ReducedGOOP.ParametricGOOP(
+		@timeit TO "ParametricGOOP construction" ReducedGOOP.ParametricGOOP(
 				dummy_primals,
 				dummy_parameters;
-				preferences = use_scalarized_baseline ? scalarized_preferences : preferences,
-				is_prioritized_constraint = use_scalarized_baseline ? scalarized_is_prioritized_constraint : is_prioritized_constraint,
+				preferences = goop_preferences,
+				is_prioritized_constraint = goop_is_prioritized_constraint,
 				equality_constraints,
 				inequality_constraints = [nothing, nothing],
 				shared_equality_constraint = nothing,
 				shared_inequality_constraint = nothing,
 			)
-		end
+	end
+
+	# ── 2. Scalarized baseline formulation ─────────────────────────────────────────────────────────────
+	# Flatten each player's hierarchy into one smooth objective while retaining
+	# the same per-player equalities and ParametricGOOP solver representation.
+	function squared_violation(h)
+		"h(x) ≥ 0	<=> (min(h(x), 0))^2 = 0"
+		return (min(h, 0))^2
+	end
+
+	function smooth_piecewise_preference_objective(
+		preference,
+		level;
+		ϵ = 0.0,
+	)
+		ifelse(preference ≥ ϵ, 0.0, (ϵ - preference)^(level + 2))
 	end
 
 	function evaluate_preference_level(preference, is_constraint, level, z, θ)
@@ -366,52 +368,76 @@ function get_setup(
 		end
 	end
 
-	" Scalarized baseline (Nash / no hierarchy): flattens hierarchical preferences into a single objective per player"
 	scalarized_player_preferences =
-		map(scalarized_player_preference, preferences, is_prioritized_constraint)
+		map(
+			scalarized_player_preference,
+			goop_preferences,
+			goop_is_prioritized_constraint,
+		)
 	scalarized_preferences = [[preference] for preference in scalarized_player_preferences]
 	scalarized_is_prioritized_constraint = [[false] for _ in scalarized_preferences]
 
-	" Social equilibrium (no Nash / no hierarchy) baseline: sum of all players' preferences, single optimization problem"
-	objective = function (z, θ)
+	function build_scalarized_problem()
+		@timeit TO "ParametricGOOP construction" ReducedGOOP.ParametricGOOP(
+				dummy_primals,
+				dummy_parameters;
+				preferences = scalarized_preferences,
+				is_prioritized_constraint = scalarized_is_prioritized_constraint,
+				equality_constraints,
+				inequality_constraints = [nothing, nothing],
+				shared_equality_constraint = nothing,
+				shared_inequality_constraint = nothing,
+			)
+	end
+
+	# ── 3. Social equilibrium formulation ────────────────────────────────────────────────────────────────
+	# Sum the scalarized player objectives and concatenate all player constraints
+	# into a single ParametricOptimizationProblem.
+	social_objective = function (z, θ)
 		accumulated_objective = 0
 		for preference in scalarized_player_preferences
 			accumulated_objective += preference(z, θ)
 		end
 		accumulated_objective
 	end
-	equality_constraint = function (z, θ)
+	social_equality_constraint = function (z, θ)
 		mapreduce(f -> f(z, θ), vcat, player_equality_constraints)
 	end
-	inequality_constraint = function (z, θ)
+	social_inequality_constraint = function (z, θ)
 		vcat(
 			inequality_constraints[1](z, θ),
 			inequality_constraints[2](z, θ),
 		)
 	end
-	primal_dimension = sum(primal_dimensions)
-	parameter_dimension = sum(parameter_dimensions)
-	equality_dimension = length(equality_constraint(dummy_primals, dummy_parameters))
-	inequality_dimension = length(inequality_constraint(dummy_primals, dummy_parameters))
+	social_primal_dimension = sum(primal_dimensions)
+	social_parameter_dimension = sum(parameter_dimensions)
+	social_equality_dimension =
+		length(social_equality_constraint(dummy_primals, dummy_parameters))
+	social_inequality_dimension =
+		length(social_inequality_constraint(dummy_primals, dummy_parameters))
 
+	# TODO: Pass the unequal per-player primal and parameter block dimensions;
+	# ParametricOptimizationProblem currently splits both totals evenly.
 	function build_social_problem()
-		@timeit TO "ParametricOptimizationProblem construction" begin
-			ReducedGOOP.ParametricOptimizationProblem(;
-				objective,
-				equality_constraint,
-				inequality_constraint,
-				parameter_dimension,
-				primal_dimension,
-				equality_dimension,
-				inequality_dimension,
+		@timeit TO "ParametricOptimizationProblem construction" ReducedGOOP.ParametricOptimizationProblem(;
+				objective = social_objective,
+				equality_constraint = social_equality_constraint,
+				inequality_constraint = social_inequality_constraint,
+				parameter_dimension = social_parameter_dimension,
+				primal_dimension = social_primal_dimension,
+				equality_dimension = social_equality_dimension,
+				inequality_dimension = social_inequality_dimension,
 				num_players,
 			)
-		end
 	end
 
-	# Build problem
-	problem = @timeit TO "preference and constraint construction" begin
-		use_social_equilibrium_baseline ? build_social_problem() : build_goop_problem()
+	# Social equilibrium retains precedence when both baseline flags are enabled.
+	problem = @timeit TO "preference and constraint construction" if use_social_equilibrium_baseline
+		build_social_problem()
+	elseif use_scalarized_baseline
+		build_scalarized_problem()
+	else
+		build_goop_problem()
 	end
 
 	(; problem, flatten_parameters)
@@ -436,9 +462,8 @@ function demo(;
 	# ── Settings ───────────────────────────────────────────────────────────────
 	run_id = "Robotic_arm_single_robot_agent_optimized_solver"
 	dynamics_model = Robotic_arm.SingleIntegrator3D()
-	goop_version = :reduced               # :complete | :reduced | :quasi
-	solver = ReducedGOOP.InteriorPoint() # ReducedGOOP.InteriorPoint() | ReducedGOOP.PATHSolver()
-	linesearch = :backtracking          # :backtracking | :fraction_to_boundary
+	goop_version = :reduced      # :complete | :reduced | :quasi
+	linesearch = :backtracking   # :backtracking | :fraction_to_boundary
 	compute_warmstart = true # Whether to compute a warmstart trajectory via rollout (true) or load from file (false)
 
 	# ── Problem parameters ─────────────────────────────────────────────────────
@@ -480,35 +505,40 @@ function demo(;
 		build_two_arm_dynamics(dynamics_model; Δt),
 		build_dynamics(dynamics_model; Δt, state_dimension, control_dimension),
 	]
+	scenario_config = ScenarioConfig(;
+		dynamics_model,
+		dynamics,
+		control_bounds,
+		num_players,
+		planning_horizon,
+		position_dimension = state_dimension,
+		map_end = Float64(map_end),
+		lane_width = Float64(lane_width),
+		Δt,
+		dₚ,
+		collision_avoidance,
+		child_initial_buffer,
+		arm_speed_limit,
+		child_speed_limit,
+		base_initial_state1,
+		base_initial_state2,
+		goal_position1,
+		goal_position2,
+		initial_state3,
+		goal_position3,
+		obstacle_position,
+		use_scalarized_baseline,
+		use_social_equilibrium_baseline,
+	)
 
-	@timeit TO "problem setup" begin
-		(; problem, flatten_parameters) = get_setup(
-			num_players;
-			dynamics,
-			control_bounds,
-			planning_horizon,
-			dₚ,
-			collision_avoidance,
-			arm_speed_limit,
-			child_speed_limit,
-			map_end,
-			lane_width,
-			use_scalarized_baseline,
-			use_social_equilibrium_baseline,
-		)
-	end
-	kkt_generators = if solver isa ReducedGOOP.InteriorPoint
-		Dict(
-			:complete => ReducedGOOP.generate_slacked_complete_kkt_system,
-			:reduced  => ReducedGOOP.generate_slacked_reduced_kkt_system,
-			:quasi    => ReducedGOOP.generate_slacked_quasi_kkt_system,
-		)
-	else
-		Dict(
-			:complete => ReducedGOOP.generate_mcp_complete_kkt_system,
-			:reduced  => ReducedGOOP.generate_mcp_reduced_kkt_system,
-		)
-	end
+	(; problem, flatten_parameters) = @timeit TO "problem setup" get_setup(scenario_config)
+	# This example currently supports only the interior-point solver.
+	solver = ReducedGOOP.InteriorPoint()
+	kkt_generators = Dict(
+		:complete => ReducedGOOP.generate_slacked_complete_kkt_system,
+		:reduced  => ReducedGOOP.generate_slacked_reduced_kkt_system,
+		:quasi    => ReducedGOOP.generate_slacked_quasi_kkt_system,
+	)
 
 	GOOP_kkt_generator = get(kkt_generators, goop_version, nothing)
 	isnothing(GOOP_kkt_generator) && error("Unknown GOOP version: $(goop_version)")
@@ -523,13 +553,8 @@ function demo(;
 		end
 	end
 
-	if solver isa ReducedGOOP.InteriorPoint
-		println("[Primal-Dual] KKT Dimension: ", GOOP_kkt_system.kkt_dimension)
-		println("[Primal-Dual] variable Dimension: ", GOOP_kkt_system.variable_dimension)
-	else
-		println("[PATH] MCP Dimension: ", GOOP_kkt_system.problem_size)
-		println("[PATH] Variable Dimension: ", length(GOOP_kkt_system.lower_bounds))
-	end
+	println("[Primal-Dual] KKT Dimension: ", GOOP_kkt_system.kkt_dimension)
+	println("[Primal-Dual] variable Dimension: ", GOOP_kkt_system.variable_dimension)
 
 	primal_dimensions = [
 		(dyn.state_dimension + dyn.control_dimension) * planning_horizon for dyn in dynamics
@@ -537,8 +562,7 @@ function demo(;
 
 	# ── Per-instance solver ────────────────────────────────────────────────────
 	function solve_game_instance(θ; z₀, ϵ₀, max_inner_iters)
-		options = @timeit TO "solver options construction" if solver isa ReducedGOOP.InteriorPoint
-			ReducedGOOP.InteriorPointOptions(;
+		options = @timeit TO "solver options construction" ReducedGOOP.InteriorPointOptions(;
 				tol = 0.01, #1e-4
 				η₀ = 1.0e-6, # 5e-5, 0.0 to turn off Tikhonov
 				ϵ₀,
@@ -560,27 +584,6 @@ function demo(;
 				use_marquardt_scaling = false,
 				verbose,
 			)
-		else
-			ReducedGOOP.PATHOptions(;
-				convergence_tolerance = 1e-4,
-				ϵ₀,
-				cumulative_iteration_limit = 1_000_000,
-				proximal_perturbation = 1e-2,
-				major_iteration_limit = 10_000,
-				minor_iteration_limit = 15_000,
-				nms_initial_reference_factor = 50_000,
-				nms_maximum_watchdogs = 8_000,
-				nms_memory_size = 16_000,
-				nms_mstep_frequency = 5_000,
-				lemke_start_type = "advanced",
-				lemke_rank_deficiency_iterations = 50,
-				restart_limit = 120,
-				gradient_step_limit = 120,
-				use_basics = true,
-				use_start = true,
-				verbose,
-			)
-		end
 
 		@info "Solving game instance with $(solver)..."
 		kkt_error_history = Float64[]
@@ -598,32 +601,23 @@ function demo(;
 					z₀,
 					options,
 				)
-			if solver isa ReducedGOOP.InteriorPoint
-				(;
-					status,
-					z,
-					x,
-					kkt_error,
-					ϵ,
-					total_iters,
-					kkt_error_history,
-					condition_number_history,
-				) = output
-				eta_history = hasproperty(output, :eta_history) ? output.eta_history : Float64[]
-				alpha_history = hasproperty(output, :alpha_history) ? output.alpha_history : Float64[]
-				rho_history = hasproperty(output, :rho_history) ? output.rho_history : Float64[]
-				if status == :failed
-					println("  [solver exit] total_iters=$(total_iters), kkt_error=$(round(kkt_error; sigdigits=4)), tol=$(options.tol)")
-				end
-				solver_status = status
-			else
-				(; status, z, ϵ, info) = output
-				@show status
-				Int(status) != 1 && return nothing
-				kkt_error = info.residual
-				x = z[1:sum(primal_dimensions)]
-				solver_status = :solved
+			(;
+				status,
+				z,
+				x,
+				kkt_error,
+				ϵ,
+				total_iters,
+				kkt_error_history,
+				condition_number_history,
+			) = output
+			eta_history = hasproperty(output, :eta_history) ? output.eta_history : Float64[]
+			alpha_history = hasproperty(output, :alpha_history) ? output.alpha_history : Float64[]
+			rho_history = hasproperty(output, :rho_history) ? output.rho_history : Float64[]
+			if status == :failed
+				println("  [solver exit] total_iters=$(total_iters), kkt_error=$(round(kkt_error; sigdigits=4)), tol=$(options.tol)")
 			end
+			solver_status = status
 		end
 
 		strategies = @timeit TO "solution postprocessing" extract_player_strategies(
@@ -654,6 +648,7 @@ function demo(;
 	end
 
 	# ── Output directories ─────────────────────────────────────────────────────
+	output_dirs = @timeit TO "output directory setup" prepare_robotic_arm_output_dirs(run_id; debug)
 	(;
 		run_dir,
 		problem_data_dir,
@@ -664,7 +659,11 @@ function demo(;
 		control_plots_dir,
 		distance_plots_dir,
 		warmstart_plots_dir,
-	) = @timeit TO "output directory setup" prepare_robotic_arm_output_dirs(run_id; debug)
+	) = output_dirs
+	visualization_config = VisualizationConfig(;
+		dirs = output_dirs,
+		show_interactive_trajectory,
+	)
 
 	# ── Main solve loop ────────────────────────────────────────────────────────
 	instance_problem_data = Dict{String, Any}[]
@@ -691,15 +690,6 @@ function demo(;
 		else
 			(copy(base_initial_state1), copy(base_initial_state2))
 		end
-		# initial_state3, goal_position3 = choose_child_initial_and_goal(
-		# 	initial_state1,
-		# 	initial_state2,
-		# 	goal_position1,
-		# 	goal_position2,
-		# 	collision_avoidance,
-		# 	child_initial_buffer = child_initial_buffer,
-		# )
-
 		println(
 			"solved $(solved_attempts)/$(num_instances), attempt $(total_attempts), goop version $(goop_version): ",
 		)
@@ -710,59 +700,33 @@ function demo(;
 		println("initial_state3:", initial_state3)
 		println("goal_position3:", goal_position3)
 
-		(; θ1, θ2, θ3, θ) = @timeit TO "instance parameter construction" build_instance_parameters(
-				flatten_parameters,
-				initial_state1,
-				initial_state2,
-				initial_state3,
-				goal_position1,
-				goal_position2,
-				goal_position3,
-				obstacle_position,
-				planning_horizon,
-			)
+		instance_states = (; initial_state1, initial_state2, initial_state3)
+		instance_parameters = @timeit TO "instance parameter construction" build_instance_parameters(
+			flatten_parameters,
+			instance_states,
+			scenario_config,
+		)
+		(; θ1, θ2, θ3, θ) = instance_parameters
 
 		(; warmstart_solution) = @timeit TO "warmstart construction" if compute_warmstart
 			build_default_warmstart(
-				planning_horizon,
-				dynamics,
-				initial_state1,
-				initial_state2,
-				goal_position1,
-				goal_position2,
-				initial_state3,
-				goal_position3;
-				arm_speed_limit,
-				child_speed_limit,
+				instance_states,
+				scenario_config,
 			)
 		else
 			(;
 				warmstart_solution = load("experiments/solution_dict_instance_1_eps0.1.jld2")["single_stored_object"]["x"][1:sum(primal_dimensions)],
 			)
 		end
-		@timeit TO "warmstart visualization" begin
-			save_warmstart_visualizations(
-				warmstart_solution,
-				warmstart_plots_dir,
-				total_attempts,
-				solved_attempts + 1,
-				primal_dimensions,
-				dynamics,
-				map_end,
-				lane_width,
-				θ1,
-				θ2,
-				θ3,
-				goal_position1,
-				goal_position2,
-				goal_position3,
-				collision_avoidance,
-				dₚ,
-				arm_speed_limit,
-				child_speed_limit,
-				control_bounds,
-			)
-		end
+		@timeit TO "warmstart visualization" save_warmstart_visualizations(
+			warmstart_solution;
+			total_attempts,
+			instance_idx = solved_attempts + 1,
+			primal_dimensions,
+			instance_parameters,
+			scenario_config,
+			visualization_config,
+		)
 
 		epsilon_results = Pair{Float64, Any}[]
 		stage_warmstart = warmstart_solution
@@ -861,90 +825,14 @@ function demo(;
 					solution_dict,
 				)
 				save_convergence_diagnostics(solution_dict, convergence_plots_dir, solved_attempts, ϵ₀)
-				# Plots keep the per-arm view of the combined two-arm agent.
-				plot_strategies = split_arm_strategies(result.strategies)
-				trajectory_fig, _ = plot_single_integrator_3d_trajectories(
-					;
-					map_end,
-					lane_width,
-					strategy = plot_strategies,
-					θ1,
-					θ2,
-					θ3,
-					goal_position1,
-					goal_position2,
-					goal_position3,
-					collision_avoidance,
+				save_solution_visualizations(
+					result.strategies,
+					solved_attempts,
+					ϵ₀;
+					instance_parameters,
+					scenario_config,
+					visualization_config,
 				)
-				speed_fig, _ = speed_plot(;
-					strategy = plot_strategies,
-					speed_limit = arm_speed_limit,
-					dynamics_model,
-					speed_limit_players = 1:2,
-					additional_speed_limits = [(; limit = child_speed_limit, players = 3)],
-				)
-				control_fig, _ = control_plot(;
-					strategy = plot_strategies,
-					control_lb = control_bounds.lb,
-					control_ub = control_bounds.ub,
-				)
-				distance_fig, _ = inter_player_distance_plot(;
-					strategy = plot_strategies,
-					reference_distance = dₚ,
-					safety_distance = collision_avoidance,
-				)
-
-				save_figure(
-					joinpath(
-						trajectory_plots_dir,
-						"trajectory_instance_$(solved_attempts)_eps$(ϵ₀).pdf",
-					),
-					trajectory_fig,
-				)
-				save_figure(
-					joinpath(
-						speed_plots_dir,
-						"speed_instance_$(solved_attempts)_eps$(ϵ₀).pdf",
-					),
-					speed_fig,
-				)
-				save_figure(
-					joinpath(
-						control_plots_dir,
-						"control_instance_$(solved_attempts)_eps$(ϵ₀).pdf",
-					),
-					control_fig,
-				)
-				save_figure(
-					joinpath(
-						distance_plots_dir,
-						"distance_instance_$(solved_attempts)_eps$(ϵ₀).pdf",
-					),
-					distance_fig,
-				)
-				if show_interactive_trajectory
-					interactive_trajectory_path = joinpath(
-						trajectory_plots_dir,
-						"trajectory_interactive_instance_$(solved_attempts)_eps$(ϵ₀).html",
-					)
-					plot_trajectory_3d_interactive(
-						;
-						map_end,
-						lane_width,
-						strategy = plot_strategies,
-						θ1,
-						θ2,
-						θ3,
-						goal_position1,
-						goal_position2,
-						goal_position3,
-						collision_avoidance,
-						reference_distance = dₚ,
-						display_figure = false,
-						save_path = interactive_trajectory_path,
-					)
-					println("saved interactive trajectory browser file: ", interactive_trajectory_path)
-				end
 			end
 		end
 	end
@@ -983,26 +871,30 @@ end
 # ── Output / plotting helpers ──────────────────────────────────────────────────
 
 function save_warmstart_visualizations(
-	warmstart_solution,
-	warmstart_plots_dir,
+	warmstart_solution;
 	total_attempts,
 	instance_idx,
 	primal_dimensions,
-	dynamics,
-	map_end,
-	lane_width,
-	θ1,
-	θ2,
-	θ3,
-	goal_position1,
-	goal_position2,
-	goal_position3,
-	collision_avoidance,
-	dₚ,
-	arm_speed_limit,
-	child_speed_limit,
-	control_bounds,
+	instance_parameters::InstanceParameters,
+	scenario_config::ScenarioConfig,
+	visualization_config::VisualizationConfig,
 )
+	(; θ1, θ2, θ3) = instance_parameters
+	(;
+		dynamics,
+		map_end,
+		lane_width,
+		goal_position1,
+		goal_position2,
+		goal_position3,
+		collision_avoidance,
+		dₚ,
+		arm_speed_limit,
+		child_speed_limit,
+		control_bounds,
+	) = scenario_config
+	(; warmstart_plots_dir) = visualization_config.dirs
+	static_extension = visualization_config.static_extension
 	# Plots keep the per-arm view: split the combined two-arm strategy back
 	# into [arm1, arm2, child].
 	warmstart_strategies = split_arm_strategies(
@@ -1050,31 +942,132 @@ function save_warmstart_visualizations(
 	save_figure(
 		joinpath(
 			warmstart_plots_dir,
-			"warmstart_attempt_$(total_attempts)_instance_$(instance_idx).pdf",
+			"warmstart_attempt_$(total_attempts)_instance_$(instance_idx).$(static_extension)",
 		),
 		warmstart_fig,
 	)
 	save_figure(
 		joinpath(
 			warmstart_plots_dir,
-			"warmstart_speed_attempt_$(total_attempts)_instance_$(instance_idx).pdf",
+			"warmstart_speed_attempt_$(total_attempts)_instance_$(instance_idx).$(static_extension)",
 		),
 		warmstart_speed_fig,
 	)
 	save_figure(
 		joinpath(
 			warmstart_plots_dir,
-			"warmstart_control_attempt_$(total_attempts)_instance_$(instance_idx).pdf",
+			"warmstart_control_attempt_$(total_attempts)_instance_$(instance_idx).$(static_extension)",
 		),
 		warmstart_control_fig,
 	)
 	save_figure(
 		joinpath(
 			warmstart_plots_dir,
-			"warmstart_distance_attempt_$(total_attempts)_instance_$(instance_idx).pdf",
+			"warmstart_distance_attempt_$(total_attempts)_instance_$(instance_idx).$(static_extension)",
 		),
 		warmstart_distance_fig,
 	)
+end
+
+"""Save the standard static plots and optional interactive trajectory for one solution."""
+function save_solution_visualizations(
+	strategies,
+	instance_idx,
+	ϵ₀;
+	instance_parameters::InstanceParameters,
+	scenario_config::ScenarioConfig,
+	visualization_config::VisualizationConfig,
+)
+	(; θ1, θ2, θ3) = instance_parameters
+	(;
+		dynamics_model,
+		control_bounds,
+		map_end,
+		lane_width,
+		goal_position1,
+		goal_position2,
+		goal_position3,
+		collision_avoidance,
+		dₚ,
+		arm_speed_limit,
+		child_speed_limit,
+	) = scenario_config
+	(;
+		trajectory_plots_dir,
+		speed_plots_dir,
+		control_plots_dir,
+		distance_plots_dir,
+	) = visualization_config.dirs
+	static_extension = visualization_config.static_extension
+	interactive_extension = visualization_config.interactive_extension
+
+	# Plots keep the per-arm view of the combined two-arm agent.
+	plot_strategies = split_arm_strategies(strategies)
+	trajectory_fig, _ = plot_single_integrator_3d_trajectories(;
+		map_end,
+		lane_width,
+		strategy = plot_strategies,
+		θ1,
+		θ2,
+		θ3,
+		goal_position1,
+		goal_position2,
+		goal_position3,
+		collision_avoidance,
+	)
+	speed_fig, _ = speed_plot(;
+		strategy = plot_strategies,
+		speed_limit = arm_speed_limit,
+		dynamics_model,
+		speed_limit_players = 1:2,
+		additional_speed_limits = [(; limit = child_speed_limit, players = 3)],
+	)
+	control_fig, _ = control_plot(;
+		strategy = plot_strategies,
+		control_lb = control_bounds.lb,
+		control_ub = control_bounds.ub,
+	)
+	distance_fig, _ = inter_player_distance_plot(;
+		strategy = plot_strategies,
+		reference_distance = dₚ,
+		safety_distance = collision_avoidance,
+	)
+
+	plot_specs = (
+		(trajectory_plots_dir, "trajectory", trajectory_fig),
+		(speed_plots_dir, "speed", speed_fig),
+		(control_plots_dir, "control", control_fig),
+		(distance_plots_dir, "distance", distance_fig),
+	)
+	for (output_dir, plot_name, figure) in plot_specs
+		save_figure(
+			joinpath(output_dir, "$(plot_name)_instance_$(instance_idx)_eps$(ϵ₀).$(static_extension)"),
+			figure,
+		)
+	end
+
+	if visualization_config.show_interactive_trajectory
+		interactive_trajectory_path = joinpath(
+			trajectory_plots_dir,
+			"trajectory_interactive_instance_$(instance_idx)_eps$(ϵ₀).$(interactive_extension)",
+		)
+		plot_trajectory_3d_interactive(;
+			map_end,
+			lane_width,
+			strategy = plot_strategies,
+			θ1,
+			θ2,
+			θ3,
+			goal_position1,
+			goal_position2,
+			goal_position3,
+			collision_avoidance,
+			reference_distance = dₚ,
+			display_figure = false,
+			save_path = interactive_trajectory_path,
+		)
+		println("saved interactive trajectory browser file: ", interactive_trajectory_path)
+	end
 end
 
 function prepare_robotic_arm_output_dirs(run_id; debug)
@@ -1193,97 +1186,24 @@ function split_arm_strategies(strategies; position_dimension = 3)
 	vcat([arm1, arm2], strategies[2:end])
 end
 
-function evaluate_preferences_at_solution(problem, x, θ)
-	x_block = BlockArray(collect(x), problem.primal_dims)
-	θ_block = BlockArray(collect(θ), problem.parameter_dims)
-	map(1:problem.num_players) do player
-		map(problem.preferences[player]) do preference
-			preference(x_block, θ_block)
-		end
-	end
-end
-
-function planar_distance(a, b)
-	sqrt((a[1] - b[1])^2 + (a[2] - b[2])^2)
-end
-
-function choose_child_initial_and_goal(
-	initial_state1,
-	initial_state2,
-	goal_position1,
-	goal_position2,
-	collision_avoidance,
-	;
-	child_initial_buffer = 1.2,
-)
-	start_center = 0.5 .* (initial_state1 .+ initial_state2)
-	goal_center = 0.5 .* (goal_position1 .+ goal_position2)
-	path_xy = goal_center[1:2] .- start_center[1:2]
-	path_norm = sqrt(sum(abs2, path_xy))
-	path_norm > 0 || error("Cannot place child for a degenerate robot delivery path.")
-
-	# Put the child on the side of the nominal pot path, then aim its nominal
-	# ground-level warm start toward the delivery corridor. This starts outside
-	# the initial safety radius while naturally intercepting the robots' route.
-	side_xy = [path_xy[2], -path_xy[1]] ./ path_norm
-	initial_offset = collision_avoidance + child_initial_buffer
-	goal_offset = 0.25 * collision_avoidance
-
-	child_initial_xy = start_center[1:2] .+ 0.35 .* path_xy .+ initial_offset .* side_xy
-	child_goal_xy = start_center[1:2] .+ 0.80 .* path_xy .+ goal_offset .* side_xy
-	child_initial = [child_initial_xy[1], child_initial_xy[2], 0.0]
-	child_goal = [child_goal_xy[1], child_goal_xy[2], 0.0]
-
-	initial_clearance = min(
-		planar_distance(child_initial, initial_state1),
-		planar_distance(child_initial, initial_state2),
-	)
-	if initial_clearance <= collision_avoidance
-		child_initial[1:2] .+= (collision_avoidance - initial_clearance + 0.5) .* side_xy
-	end
-
-	(child_initial, child_goal)
-end
-
-"""
-Straight-line interpolation from `initial_state` to `goal_position` over the
-planning horizon, flattened per timestep. This is the nominal motion the robot
-would follow with no approaching child or other disturbance (the initial warm
-start that simply carries the hot pot directly to the goal).
-"""
-function build_reference_trajectory(initial_state, goal_position, planning_horizon)
-	planning_horizon >= 2 || error("Reference trajectory requires at least two time steps.")
-	mapreduce(vcat, 0:(planning_horizon-1)) do t
-		τ = t / (planning_horizon - 1)
-		initial_state .+ τ .* (goal_position .- initial_state)
-	end
-end
-
 function build_instance_parameters(
 	flatten_parameters,
-	initial_state1,
-	initial_state2,
-	initial_state3,
-	goal_position1,
-	goal_position2,
-	goal_position3,
-	obstacle_position,
-	planning_horizon,
+	instance_states,
+	scenario_config::ScenarioConfig,
 )
+	(; initial_state1, initial_state2, initial_state3) = instance_states
+	(;
+		goal_position1,
+		goal_position2,
+		goal_position3,
+		obstacle_position,
+	) = scenario_config
 	# Solver-facing parameter blocks: player 1 stacks both arms, player 2 is the child.
-	# The tracking reference is rebuilt from the current initial state on every
-	# call, so each MPC iteration injects an updated reference through θ alone.
-	reference_trajectory = build_reference_trajectory(
-		vcat(initial_state1, initial_state2),
-		vcat(goal_position1, goal_position2),
-		planning_horizon,
-	)
 	θ_arms = flatten_parameters(;
 		player = 1,
 		initial_state = vcat(initial_state1, initial_state2),
 		goal_position = vcat(goal_position1, goal_position2),
 		obstacle_position = obstacle_position,
-		reference_trajectory,
 	)
 	θ_child = flatten_parameters(;
 		player = 2,
@@ -1298,7 +1218,7 @@ function build_instance_parameters(
 	θ2 = vcat(initial_state2, goal_position2, obstacle_position)
 	θ3 = copy(θ_child)
 
-	(; θ1, θ2, θ3, θ = [θ_arms..., θ_child...])
+	InstanceParameters(θ1, θ2, θ3, [θ_arms..., θ_child...])
 end
 
 function limit_control_speed(control, speed_limit, speed_indices)
@@ -1312,17 +1232,19 @@ function limit_control_speed(control, speed_limit, speed_indices)
 end
 
 function build_default_warmstart(
-	planning_horizon,
-	dynamics,
-	initial_state1,
-	initial_state2,
-	goal_position1,
-	goal_position2,
-	initial_state3,
-	goal_position3;
-	arm_speed_limit = 3.0,
-	child_speed_limit = 1.5,
+	instance_states,
+	scenario_config::ScenarioConfig,
 )
+	(; initial_state1, initial_state2, initial_state3) = instance_states
+	(;
+		planning_horizon,
+		dynamics,
+		goal_position1,
+		goal_position2,
+		goal_position3,
+		arm_speed_limit,
+		child_speed_limit,
+	) = scenario_config
 	arm_dynamics, child_dynamics = dynamics
 	planning_horizon >= 2 || error("Robot warm start requires at least two time steps.")
 	length(goal_position1) == child_dynamics.state_dimension || error("Goal position 1 dimension mismatch.")
@@ -1359,15 +1281,6 @@ function build_default_warmstart(
 		[arms_warmstart.us, child_warmstart.us],
 	)
 	(; warmstart_solution)
-end
-
-function infer_planar_di_timestep(dynamics)
-	x0       = [0.0, 0.0, 0.0, 0.0]
-	u_unit_y = [0.0, 1.0]
-	x1       = dynamics.step(x0, u_unit_y, 1)
-	dt       = x1[4]
-	dt <= 0.0 && error("Failed to infer planar double-integrator timestep from dynamics.")
-	dt
 end
 
 function build_constant_control_warmstart(planning_horizon, dynamics, initial_state, constant_control)
@@ -1408,34 +1321,6 @@ function build_ground_line_warmstart(
 		push!(us, copy(us[1]))
 	end
 	us[end] = zeros(dynamics.control_dimension)
-	(; xs, us)
-end
-
-function build_planar_di_speed_profile_warmstart(
-	planning_horizon,
-	dynamics,
-	initial_state;
-	vx_profile,
-	vy_profile,
-)
-	length(initial_state) == dynamics.state_dimension || error("Expected $(dynamics.state_dimension)D planar-double-integrator state.")
-	dynamics.control_dimension == 2 || error("Expected 2D control input for planar-double-integrator.")
-	length(vx_profile) == planning_horizon || error("vx_profile length must equal planning_horizon.")
-	length(vy_profile) == planning_horizon || error("vy_profile length must equal planning_horizon.")
-
-	dt = infer_planar_di_timestep(dynamics)
-	x0 = [initial_state[1], initial_state[2], vx_profile[1], vy_profile[1]]
-	xs = [x0]
-	us = Vector{Vector{Float64}}()
-	for t in 1:(planning_horizon-1)
-		u = [
-			(vx_profile[t+1] - vx_profile[t]) / dt,
-			(vy_profile[t+1] - vy_profile[t]) / dt,
-		]
-		push!(us, u)
-		push!(xs, dynamics.step(xs[t], u, t))
-	end
-	push!(us, [0.0, 0.0])
 	(; xs, us)
 end
 

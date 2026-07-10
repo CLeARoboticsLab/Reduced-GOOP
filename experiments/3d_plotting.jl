@@ -282,7 +282,6 @@ function _plot_single_integrator_3d_trajectories(
 	goal_position2,
 	goal_position3 = nothing,
 	collision_avoidance = nothing,
-	reference_trajectories = nothing,
 	map_end = nothing,
 	lane_width = nothing,
 	workspace_margin = 0.75,
@@ -388,26 +387,6 @@ function _plot_single_integrator_3d_trajectories(
 				if isnothing(safety_handle)
 					safety_handle = current_safety
 				end
-			end
-		end
-	end
-
-	# Nominal tracking references (e.g. straight lines to the goals), drawn
-	# first so the realized trajectories stay on top.
-	reference_handle = nothing
-	if !isnothing(reference_trajectories)
-		for reference in reference_trajectories
-			current_reference = makie.lines!(
-				ax,
-				[point[1] for point in reference],
-				[point[2] for point in reference],
-				[point[3] for point in reference];
-				color = (:gray, 0.9),
-				linestyle = :dash,
-				linewidth = interactive ? 3 : 2.25,
-			)
-			if isnothing(reference_handle)
-				reference_handle = current_reference
 			end
 		end
 	end
@@ -564,11 +543,6 @@ function _plot_single_integrator_3d_trajectories(
 		push!(legend_elements, safety_handle)
 		push!(legend_labels, "Safety hemisphere")
 	end
-	if !isnothing(reference_handle)
-		push!(legend_elements, reference_handle)
-		push!(legend_labels, "Tracking reference")
-	end
-
 	makie.Legend(
 		figure[1, 1],
 		legend_elements,
@@ -600,7 +574,6 @@ function _plot_single_integrator_3d_browser_trajectories(
 	goal_position3 = nothing,
 	collision_avoidance = nothing,
 	reference_distance = nothing,
-	reference_trajectories = nothing,
 	map_end = nothing,
 	lane_width = nothing,
 	workspace_margin = 0.75,
@@ -693,26 +666,6 @@ function _plot_single_integrator_3d_browser_trajectories(
 			)
 			if isnothing(safety_handle)
 				safety_handle = current_safety
-			end
-		end
-	end
-
-	# Nominal tracking references (e.g. straight lines to the goals), drawn
-	# first so the realized trajectories stay on top.
-	reference_handle = nothing
-	if !isnothing(reference_trajectories)
-		for reference in reference_trajectories
-			current_reference = makie.lines!(
-				scene_axis,
-				[point[1] for point in reference],
-				[point[2] for point in reference],
-				[point[3] for point in reference];
-				color = (:gray, 0.9),
-				linestyle = :dash,
-				linewidth = 3,
-			)
-			if isnothing(reference_handle)
-				reference_handle = current_reference
 			end
 		end
 	end
@@ -865,11 +818,6 @@ function _plot_single_integrator_3d_browser_trajectories(
 		push!(legend_elements, safety_handle)
 		push!(legend_labels, "Safety hemisphere")
 	end
-	if !isnothing(reference_handle)
-		push!(legend_elements, reference_handle)
-		push!(legend_labels, "Tracking reference")
-	end
-
 	makie.Legend(
 		figure[1, 3],
 		legend_elements,

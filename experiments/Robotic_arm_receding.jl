@@ -85,21 +85,32 @@ function demo(;
 		RA.build_two_arm_dynamics(dynamics_model; Δt),
 		RA.build_dynamics(dynamics_model; Δt, state_dimension, control_dimension),
 	]
+	scenario_config = RA.ScenarioConfig(;
+		dynamics_model,
+		dynamics,
+		control_bounds,
+		num_players,
+		planning_horizon,
+		position_dimension = state_dimension,
+		map_end = Float64(map_end),
+		lane_width = Float64(lane_width),
+		Δt,
+		dₚ,
+		collision_avoidance,
+		safety_buffer_margin,
+		arm_speed_limit,
+		child_speed_limit,
+		base_initial_state1,
+		base_initial_state2,
+		goal_position1,
+		goal_position2,
+		initial_state3,
+		goal_position3,
+		obstacle_position,
+	)
 
 	problem_setup_time_sec = @elapsed @timeit TO "problem setup" begin
-		(; problem, flatten_parameters) = RA.get_setup(
-			num_players;
-			dynamics,
-			control_bounds,
-			planning_horizon,
-			dₚ,
-			collision_avoidance,
-			safety_buffer_margin,
-			arm_speed_limit,
-			child_speed_limit,
-			map_end,
-			lane_width,
-		)
+		(; problem, flatten_parameters) = RA.get_setup(scenario_config)
 	end
 
 	# Built exactly once; every MPC iteration reuses the compiled KKT system and
@@ -147,6 +158,10 @@ function demo(;
 
 	# ── Output directories ─────────────────────────────────────────────────────
 	dirs = @timeit TO "output directory setup" prepare_receding_output_dirs(run_id; debug)
+	visualization_config = RA.VisualizationConfig(;
+		dirs,
+		show_interactive_trajectory,
+	)
 
 	# ── MPC state ──────────────────────────────────────────────────────────────
 	current_state1 = copy(base_initial_state1)
@@ -159,17 +174,14 @@ function demo(;
 	]
 	closed_loop_us = [Vector{Float64}[] for _ in 1:num_players]
 
+	instance_states = (;
+		initial_state1 = current_state1,
+		initial_state2 = current_state2,
+		initial_state3 = current_state_child,
+	)
 	(; warmstart_solution) = @timeit TO "warmstart construction" RA.build_default_warmstart(
-		planning_horizon,
-		dynamics,
-		current_state1,
-		current_state2,
-		goal_position1,
-		goal_position2,
-		current_state_child,
-		goal_position3;
-		arm_speed_limit,
-		child_speed_limit,
+		instance_states,
+		scenario_config,
 	)
 	stage_warmstart = warmstart_solution
 
@@ -181,41 +193,28 @@ function demo(;
 
 	# ── MPC loop ───────────────────────────────────────────────────────────────
 	for k in 1:num_mpc_steps
-		# Rebuilds the straight-line tracking reference from the current state;
-		# only parameter values change, the compiled KKT system is untouched.
-		(; θ1, θ2, θ3, θ) = @timeit TO "instance parameter construction" RA.build_instance_parameters(
-			flatten_parameters,
-			current_state1,
-			current_state2,
-			current_state_child,
-			goal_position1,
-			goal_position2,
-			goal_position3,
-			obstacle_position,
-			planning_horizon,
+		# Refresh the initial-state parameters without rebuilding the KKT system.
+		instance_states = (;
+			initial_state1 = current_state1,
+			initial_state2 = current_state2,
+			initial_state3 = current_state_child,
 		)
+		instance_parameters = @timeit TO "instance parameter construction" RA.build_instance_parameters(
+			flatten_parameters,
+			instance_states,
+			scenario_config,
+		)
+		(; θ1, θ2, θ3, θ) = instance_parameters
 		if k == 1
 			θ1_initial, θ2_initial, θ3_initial = θ1, θ2, θ3
 			@timeit TO "warmstart visualization" RA.save_warmstart_visualizations(
-				stage_warmstart,
-				dirs.warmstart_plots_dir,
-				1,
-				1,
+				stage_warmstart;
+				total_attempts = 1,
+				instance_idx = 1,
 				primal_dimensions,
-				dynamics,
-				map_end,
-				lane_width,
-				θ1,
-				θ2,
-				θ3,
-				goal_position1,
-				goal_position2,
-				goal_position3,
-				collision_avoidance,
-				dₚ,
-				arm_speed_limit,
-				child_speed_limit,
-				control_bounds,
+				instance_parameters,
+				scenario_config,
+				visualization_config,
 			)
 		end
 
@@ -596,22 +595,6 @@ end
 
 # ── Output / plotting helpers ──────────────────────────────────────────────────
 
-"""
-Per-arm 3D point lists of the straight-line tracking reference (current
-initial position → goal), in the format the trajectory plots expect. `θ1`/`θ2`
-are the legacy per-arm parameter blocks whose first three entries hold the
-current initial position.
-"""
-function _reference_point_lists(θ1, θ2, goal_position1, goal_position2, num_points)
-	[
-		[
-			initial .+ (t / (num_points - 1)) .* (goal .- initial)
-			for t in 0:(num_points-1)
-		]
-		for (initial, goal) in ((θ1[1:3], goal_position1), (θ2[1:3], goal_position2))
-	]
-end
-
 function _add_title!(figure, title_text)
 	CairoMakie.Label(figure[0, :], title_text; fontsize = 20, tellwidth = false)
 end
@@ -649,13 +632,6 @@ function save_step_plots(
 	plot_strategies = RA.split_arm_strategies(strategies)
 	status_suffix = converged ? "" : "_notconverged"
 	title = _step_title(k, num_mpc_steps, converged, kkt_error)
-	reference_trajectories = _reference_point_lists(
-		θ1,
-		θ2,
-		goal_position1,
-		goal_position2,
-		length(plot_strategies[1].xs),
-	)
 
 	trajectory_fig, _ = RA.plot_single_integrator_3d_trajectories(
 		;
@@ -669,7 +645,6 @@ function save_step_plots(
 		goal_position2,
 		goal_position3,
 		collision_avoidance,
-		reference_trajectories,
 	)
 	_add_title!(trajectory_fig, title)
 	speed_fig, _ = RA.speed_plot(;
@@ -728,7 +703,6 @@ function save_step_plots(
 			goal_position3,
 			collision_avoidance,
 			reference_distance = dₚ,
-			reference_trajectories,
 			display_figure = false,
 			save_path = interactive_path,
 		)
@@ -762,15 +736,6 @@ function save_closed_loop_plots(
 	if !isempty(failed_steps)
 		title *= " — non-converged steps: $(join(failed_steps, ", "))"
 	end
-	# Initial-state tracking reference: the nominal straight-line delivery.
-	reference_trajectories = _reference_point_lists(
-		θ1,
-		θ2,
-		goal_position1,
-		goal_position2,
-		length(plot_strategies[1].xs),
-	)
-
 	trajectory_fig, _ = RA.plot_single_integrator_3d_trajectories(
 		;
 		map_end,
@@ -783,7 +748,6 @@ function save_closed_loop_plots(
 		goal_position2,
 		goal_position3,
 		collision_avoidance,
-		reference_trajectories,
 	)
 	_add_title!(trajectory_fig, title)
 	speed_fig, _ = RA.speed_plot(;
@@ -839,7 +803,6 @@ function save_closed_loop_plots(
 			goal_position3,
 			collision_avoidance,
 			reference_distance = dₚ,
-			reference_trajectories,
 			display_figure = false,
 			save_path = interactive_path,
 		)
