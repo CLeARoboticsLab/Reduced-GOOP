@@ -164,7 +164,10 @@ function get_setup(scenario_config::ScenarioConfig)
 		sum(eachindex(xs)) do t
 			balance = (xs[t][arm1_range[end]] - xs[t][arm2_range[end]])^2
 			swerve = us[t][arm1_range[1]]^2 + us[t][arm2_range[1]]^2
-			ifelse(balance + swerve < allowance^2, 0.0, (balance + swerve) - allowance^2)
+			# Squared excess keeps the deadzone but makes the penalty C¹ at the
+			# boundary; the raw excess has a gradient jump there, which pins the
+			# equilibrium on a non-stationary kink and blocks KKT convergence.
+			ifelse(balance < allowance^2, 0.0, balance - allowance^2)
 		end
 	end
 
@@ -460,7 +463,7 @@ function demo(;
 	@timeit TO "experiment setup" Random.seed!(rng_seed)
 
 	# ── Settings ───────────────────────────────────────────────────────────────
-	run_id = "Robotic_arm_single_robot_agent_optimized_solver"
+	run_id = "Robotic_arm_single_robot_agent_trial1"
 	dynamics_model = Robotic_arm.SingleIntegrator3D()
 	goop_version = :reduced      # :complete | :reduced | :quasi
 	linesearch = :backtracking   # :backtracking | :fraction_to_boundary
@@ -564,13 +567,13 @@ function demo(;
 	function solve_game_instance(θ; z₀, ϵ₀, max_inner_iters)
 		options = @timeit TO "solver options construction" ReducedGOOP.InteriorPointOptions(;
 				tol = 0.01, #1e-4
-				η₀ = 1.0, # 0.0 to turn off Tikhonov regularization
-				η_max = 1.0,
+				η₀ = 1e-6, # 0.0 to turn off Tikhonov regularization
+				η_max = 1e6,
 				ϵ₀,
 				max_inner_iters,
 				max_outer_iters = 1,
-				tightening_rate = 3.0, # high => weak decrease in η
-				loosening_rate = 0.5, # low => strong increase in η
+				tightening_rate = 1.2, # high => weak decrease in η
+				loosening_rate = 3.0, # low => strong increase in η
 				min_stepsize = 1e-20,
 				linesearch,
 				linear_solve_algorithm = ReducedGOOP.LinearSolve.KrylovJL_LSMR(),
@@ -578,13 +581,13 @@ function demo(;
 				record_convergence = true,
 				record_condition_number = true,
 				eta_retry_growth = 2.0,
-				ρ_low = 0.25,
+				ρ_low = 0.75,
 				ρ_high = 0.75,
 				perturbation_enabled = false,
 				stagnation_rtol = 1e-1,
 				perturbation_scale = 1e-6,
 				tsvd_threshold = 0.0, # 0.0: pure Tikhonov, > 0 and η = 0: pure TSVD
-				use_marquardt_scaling = true,
+				use_marquardt_scaling = false,
 				verbose,
 			)
 
