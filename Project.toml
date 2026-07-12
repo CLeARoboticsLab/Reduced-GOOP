@@ -1,7 +1,7 @@
 name = "ReducedGOOP"
 uuid = "48e8ddca-bd20-452f-8ba0-e6bfbdc6f25c"
-authors = ["Dong Ho Lee <leedh0124@utexas.edu>"]
 version = "0.1.0"
+authors = ["Dong Ho Lee <leedh0124@utexas.edu>"]
 
 [deps]
 BlockArrays = "8e7c35d0-a365-5155-bbbb-fb81a777f24e"
@@ -22,7 +22,7 @@ BlockArrays = "0.16.43"
 InvertedIndices = "1.3.1"
 JLD2 = "0.5.13"
 LinearAlgebra = "1.11.0"
-LinearSolve = "3.9.0"
+LinearSolve = "3.9.0, 5"
 ParametricMCPs = "0.1.17"
 ProgressMeter = "1.10.4"
 SciMLBase = "2.87.0"
