@@ -448,26 +448,18 @@ end
 
 # ── Experiment entry point ─────────────────────────────────────────────────────
 
-function demo(;
+"""
+Build the exact `ScenarioConfig` used by `demo`. Kept as a separate function so
+external tools (e.g. `SecondOrderCheck`) can rebuild the identical problem
+without duplicating the configuration.
+"""
+function demo_scenario_config(;
 	map_end = 10,
 	lane_width = 2,
-	verbose = false,
-	rng_seed = 123,
-	random_initial_state = false,
-	debug = false,
 	use_scalarized_baseline = false,
 	use_social_equilibrium_baseline = false,
-	show_interactive_trajectory = false,
 )
-	reset_timer!(TO)
-	@timeit TO "experiment setup" Random.seed!(rng_seed)
-
-	# ── Settings ───────────────────────────────────────────────────────────────
-	run_id = "Robotic_arm_single_robot_agent_trial1"
-	dynamics_model = Robotic_arm.SingleIntegrator3D()
-	goop_version = :reduced      # :complete | :reduced | :quasi
-	linesearch = :backtracking   # :backtracking | :fraction_to_boundary
-	compute_warmstart = true # Whether to compute a warmstart trajectory via rollout (true) or load from file (false)
+	dynamics_model = SingleIntegrator3D()
 
 	# ── Problem parameters ─────────────────────────────────────────────────────
 	# Player 1: combined two-arm agent, Player 2: child/pet.
@@ -475,16 +467,9 @@ function demo(;
 	planning_horizon     = 12
 	collision_avoidance  = 2.0
 	child_initial_buffer = 4.0
-	arm_speed_limit		 = 5.0
+	arm_speed_limit      = 5.0
 	child_speed_limit    = 3.0
-	num_instances        = 1
-	perturbation_scale   = 0.3
 	dₚ                   = 2.0
-
-
-	# ── Solver schedule ────────────────────────────────────────────────────────
-	epsilon_schedule         = [0.1]
-	max_inner_iters_schedule = fill(500, length(epsilon_schedule))
 
 	# ── Scenario ───────────────────────────────────────────────────────────────
 	# Single Integrator 3D: state = [px, py, pz]
@@ -493,10 +478,10 @@ function demo(;
 	goal_position1      = [-1.0, -5.0, 5.0]
 	goal_position2      = [ 1.0, -5.0, 5.0]
 	initial_state3      = [-3.0, -1.0, 0.0]
-	goal_position3	    = [ 0.0,  0.0, 0.0]
+	goal_position3      = [ 0.0,  0.0, 0.0]
 	obstacle_position   = [0.25, 0.15, 0.0]   # placeholder
 
-	# ── Build dynamics and problem ─────────────────────────────────────────────
+	# ── Build dynamics ─────────────────────────────────────────────────────────
 	state_dimension   = 3
 	control_dimension = 3
 	Δt                = 0.1
@@ -508,7 +493,8 @@ function demo(;
 		build_two_arm_dynamics(dynamics_model; Δt),
 		build_dynamics(dynamics_model; Δt, state_dimension, control_dimension),
 	]
-	scenario_config = ScenarioConfig(;
+
+	ScenarioConfig(;
 		dynamics_model,
 		dynamics,
 		control_bounds,
@@ -533,6 +519,58 @@ function demo(;
 		use_scalarized_baseline,
 		use_social_equilibrium_baseline,
 	)
+end
+
+function demo(;
+	map_end = 10,
+	lane_width = 2,
+	verbose = false,
+	rng_seed = 123,
+	random_initial_state = false,
+	debug = false,
+	use_scalarized_baseline = false,
+	use_social_equilibrium_baseline = false,
+	show_interactive_trajectory = false,
+)
+	reset_timer!(TO)
+	@timeit TO "experiment setup" Random.seed!(rng_seed)
+
+	# ── Settings ───────────────────────────────────────────────────────────────
+	run_id = "Robotic_arm_single_robot_agent_trial1"
+	goop_version = :reduced      # :complete | :reduced | :quasi
+	linesearch = :backtracking   # :backtracking | :fraction_to_boundary
+	compute_warmstart = true # Whether to compute a warmstart trajectory via rollout (true) or load from file (false)
+	num_instances      = 1
+	perturbation_scale = 0.3
+
+	# ── Solver schedule ────────────────────────────────────────────────────────
+	epsilon_schedule         = [0.1]
+	max_inner_iters_schedule = fill(500, length(epsilon_schedule))
+
+	# ── Scenario and problem ───────────────────────────────────────────────────
+	scenario_config = demo_scenario_config(;
+		map_end,
+		lane_width,
+		use_scalarized_baseline,
+		use_social_equilibrium_baseline,
+	)
+	(;
+		dynamics_model,
+		dynamics,
+		planning_horizon,
+		base_initial_state1,
+		base_initial_state2,
+		initial_state3,
+		goal_position1,
+		goal_position2,
+		goal_position3,
+		arm_speed_limit,
+		child_speed_limit,
+		collision_avoidance,
+		child_initial_buffer,
+		dₚ,
+	) = scenario_config
+	state_dimension = scenario_config.position_dimension
 
 	(; problem, flatten_parameters) = @timeit TO "problem setup" get_setup(scenario_config)
 	# This example currently supports only the interior-point solver.

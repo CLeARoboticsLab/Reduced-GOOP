@@ -107,7 +107,11 @@
       "mcp__codebase-memory-mcp__get_code_snippet",
       "Bash(julia --project=experiments /private/tmp/claude-501/-Users-dhl-Documents-Reduced-GOOP/9f2ec05e-6875-47b2-a5c2-c5df96af1876/scratchpad/residual_blocks.jl)",
       "Bash(julia --project=experiments /private/tmp/claude-501/-Users-dhl-Documents-Reduced-GOOP/9f2ec05e-6875-47b2-a5c2-c5df96af1876/scratchpad/solve_sweep.jl)",
-      "Bash(julia --project=experiments /private/tmp/claude-501/-Users-dhl-Documents-Reduced-GOOP/9f2ec05e-6875-47b2-a5c2-c5df96af1876/scratchpad/kink_check.jl)"
+      "Bash(julia --project=experiments /private/tmp/claude-501/-Users-dhl-Documents-Reduced-GOOP/9f2ec05e-6875-47b2-a5c2-c5df96af1876/scratchpad/kink_check.jl)",
+      "Bash(julia --project=experiments /private/tmp/claude-501/-Users-dhl-Documents-Reduced-GOOP/45b8c24a-db30-4e1c-9811-bcbe6f63d001/scratchpad/check_second_order_quick.jl)",
+      "Bash(julia --project=experiments /private/tmp/claude-501/-Users-dhl-Documents-Reduced-GOOP/45b8c24a-db30-4e1c-9811-bcbe6f63d001/scratchpad/check_second_order_projected.jl)",
+      "Bash(julia --project=experiments /private/tmp/claude-501/-Users-dhl-Documents-Reduced-GOOP/45b8c24a-db30-4e1c-9811-bcbe6f63d001/scratchpad/check_second_order_projected2.jl)",
+      "Bash(echo \"exit code: $?\")"
     ],
     "additionalDirectories": [
       "/private/tmp"
