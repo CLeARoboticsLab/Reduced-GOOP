@@ -147,12 +147,31 @@ function smooth_piecewise_preference_objective(
 	ifelse(preference ≥ ϵ, 0.0, (ϵ - preference)^(level + 2))
 end
 
+function smooth_piecewise_preference_objective(
+	preference::SymbolicTracingUtils.FD.Node,
+	level;
+	ϵ = 0.0,
+)
+	# FastDifferentiation cannot differentiate through ifelse, so use the
+	# algebraically identical branch-free form max(ϵ - preference, 0)^(level + 2).
+	violation = ϵ - preference
+	(0.5 * (violation + abs(violation)))^(level + 2)
+end
+
 "Construct the Reduced KKT system corresponding to a ParametricGOOP."
 function generate_slacked_reduced_kkt_system(
 	goop::ParametricGOOP;
 	backend = SymbolicTracingUtils.SymbolicsBackend(),
 	drop_higher_order_terms = false,
+	backend_options = (;),
+	codegen = :native,
 )
+	if drop_higher_order_terms &&
+	   backend isa SymbolicTracingUtils.FastDifferentiationBackend
+		error(
+			"drop_higher_order_terms = true (the quasi variant) relies on Symbolics-only QuasiLagrangianTerm objects; use backend = SymbolicTracingUtils.SymbolicsBackend().",
+		)
+	end
 	# Main.@infiltrate
 	# Symbolic variables for all primals, parameters, and duals for shared constraints.
 	@timeit TO "symbolic variable construction" begin
@@ -318,7 +337,7 @@ function generate_slacked_reduced_kkt_system(
 					_push_quasi_lagrangian_term!(lagrangian_terms, gₛ, γₛ)
 					_quasi_gradient_from_terms(lagrangian_terms, vars)
 				else
-					(@timeit TO "symbolic gradient construction" Symbolics.gradient(L, vars)), QuasiLagrangianTerm[]
+					(@timeit TO "symbolic gradient construction" SymbolicTracingUtils.gradient(L, vars)), QuasiLagrangianTerm[]
 				end
 				F = Vector{symbolic_type}(
 					filter!(
@@ -352,7 +371,7 @@ function generate_slacked_reduced_kkt_system(
 					_push_quasi_lagrangian_term!(lagrangian_terms, gₛ, γₛ)
 					_quasi_gradient_from_terms(lagrangian_terms, x[Block(player)])
 				else
-					(@timeit TO "symbolic gradient construction" Symbolics.gradient(L, x[Block(player)])), QuasiLagrangianTerm[]
+					(@timeit TO "symbolic gradient construction" SymbolicTracingUtils.gradient(L, x[Block(player)])), QuasiLagrangianTerm[]
 				end
 				F = Vector{symbolic_type}(
 					filter!(
@@ -501,7 +520,7 @@ function generate_slacked_reduced_kkt_system(
 				)
 				_quasi_gradient_from_terms(lagrangian_terms, vars)
 			else
-				(@timeit TO "symbolic gradient construction" Symbolics.gradient(L, vars)), QuasiLagrangianTerm[]
+				(@timeit TO "symbolic gradient construction" SymbolicTracingUtils.gradient(L, vars)), QuasiLagrangianTerm[]
 			end
 
 			F̃ = [
@@ -551,7 +570,7 @@ function generate_slacked_reduced_kkt_system(
 				)
 				_quasi_gradient_from_terms(lagrangian_terms, x[Block(player)])
 			else
-				(@timeit TO "symbolic gradient construction" Symbolics.gradient(L, x[Block(player)])), QuasiLagrangianTerm[]
+				(@timeit TO "symbolic gradient construction" SymbolicTracingUtils.gradient(L, x[Block(player)])), QuasiLagrangianTerm[]
 			end
 			F̃ = Vector{symbolic_type}(
 				filter!(
@@ -631,7 +650,9 @@ function generate_slacked_reduced_kkt_system(
 		primal_dims,
 		preference_slack_dims,
 		interior_point_slack_dims,
-		inequality_constraint_dual_dims,
+		inequality_constraint_dual_dims;
+		backend_options,
+		codegen,
 	)
 
 end
@@ -640,11 +661,15 @@ end
 function generate_slacked_quasi_kkt_system(
 	goop::ParametricGOOP;
 	backend = SymbolicTracingUtils.SymbolicsBackend(),
+	backend_options = (;),
+	codegen = :native,
 )
 	generate_slacked_reduced_kkt_system(
 		goop;
 		backend,
 		drop_higher_order_terms = true,
+		backend_options,
+		codegen,
 	)
 end
 
@@ -652,6 +677,8 @@ end
 function generate_slacked_complete_kkt_system(
 	goop::ParametricGOOP;
 	backend = SymbolicTracingUtils.SymbolicsBackend(),
+	backend_options = (;),
+	codegen = :native,
 )
 	# Symbolic variables for all primals, parameters, and duals for shared constraints.
 	x =
@@ -805,7 +832,7 @@ function generate_slacked_complete_kkt_system(
 				# 	L += 0.03 * sum(goal_deviation .^ 2)
 				# end
 
-				∇L = Symbolics.gradient(L, vcat(x[Block(player)], preference_slack))
+				∇L = SymbolicTracingUtils.gradient(L, vcat(x[Block(player)], preference_slack))
 
 				F = Vector{symbolic_type}(
 					filter!(
@@ -855,7 +882,7 @@ function generate_slacked_complete_kkt_system(
 				# Highest priority is a cost. 
 				L = h - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
 					(isnothing(fₛ) ? 0 : λₛ' * fₛ) - (isnothing(gₛ) ? 0 : γₛ' * gₛ)
-				∇L = Symbolics.gradient(L, x[Block(player)])
+				∇L = SymbolicTracingUtils.gradient(L, x[Block(player)])
 				F = Vector{symbolic_type}(
 					filter!(
 						!isnothing,
@@ -970,7 +997,7 @@ function generate_slacked_complete_kkt_system(
 			)
 			# L = sum(preference_slack) + 0.001sum(sum(u .^ 2) for u in us) - γₚ' * (h .+ preference_slack) - μₛ' * preference_slack -λ' * F - γ' * G
 			L = sum(preference_slack .^ 2) - γₚ' * (h .+ preference_slack) - λ' * F - γ' * G
-			∇L = Symbolics.gradient(L, vcat(z, preference_slack))
+			∇L = SymbolicTracingUtils.gradient(L, vcat(z, preference_slack))
 
 			F̃ = Vector{symbolic_type}(
 				filter!(
@@ -1022,7 +1049,7 @@ function generate_slacked_complete_kkt_system(
 			@assert length(h) == 1 "Expected a single preference function at the level $(level), but got $(length(h))"
 			# Current priority is a cost.
 			L = h - λ' * F - γ' * G
-			∇L = Symbolics.gradient(L, z)
+			∇L = SymbolicTracingUtils.gradient(L, z)
 			F̃ = Vector{symbolic_type}(
 				filter!(
 					!isnothing,
@@ -1107,7 +1134,9 @@ function generate_slacked_complete_kkt_system(
 		primal_dims,
 		preference_slack_dims,
 		interior_point_slack_dims,
-		inequality_constraint_dual_dims,
+		inequality_constraint_dual_dims;
+		backend_options,
+		codegen,
 	)
 end
 

@@ -141,7 +141,7 @@ function get_setup(scenario_config::ScenarioConfig)
 	function goal_objective(z, θ)
 		# The two-arm agent delivers the pot center to the center of the two
 		# per-arm goals; both quantities are recovered from the stacked state.
-		(; xs) = trajectory(z; player = 1)
+		(; xs, us) = trajectory(z; player = 1)
 		(; goal_position) = unflatten_parameters(θ[Block(1)]; player = 1)
 
 		center_position = 0.5 .* (xs[end][arm1_range] .+ xs[end][arm2_range])
@@ -303,7 +303,7 @@ function get_setup(scenario_config::ScenarioConfig)
 	# Preference hierarchy: [lowest priority, ..., highest priority].
 	goop_preferences = [
 		[
-			# control_objective(; player = 1),
+			control_objective(; player = 1),
 			goal_objective,
 			load_balance_objective,
 			robot_inequality,
@@ -313,7 +313,7 @@ function get_setup(scenario_config::ScenarioConfig)
 			child_ground_speed_inequality
 		],
 	]
-	goop_is_prioritized_constraint = [[false, false, true], [false, true]]
+	goop_is_prioritized_constraint = [[false, false, false, true], [false, true]]
 
 	function build_goop_problem()
 		@timeit TO "ParametricGOOP construction" ReducedGOOP.ParametricGOOP(
@@ -464,7 +464,7 @@ function demo_scenario_config(;
 	# ── Problem parameters ─────────────────────────────────────────────────────
 	# Player 1: combined two-arm agent, Player 2: child/pet.
 	num_players          = 2
-	planning_horizon     = 12
+	planning_horizon     = 6
 	collision_avoidance  = 2.0
 	child_initial_buffer = 4.0
 	arm_speed_limit      = 5.0
@@ -536,8 +536,20 @@ function demo(;
 	@timeit TO "experiment setup" Random.seed!(rng_seed)
 
 	# ── Settings ───────────────────────────────────────────────────────────────
-	run_id = "Robotic_arm_single_robot_agent_trial1"
+	run_id = "Robotic_arm_single_robot_agent_add_min_ctrl_at_top_level_4_levels_FD"
 	goop_version = :reduced      # :complete | :reduced | :quasi
+	# Tracing/differentiation backend. The :fast_differentiation tracing backend
+	# is unusable here: FD 0.4.5 has an upstream factoring bug on ≥3rd-order
+	# derivatives of kinked (abs/ifelse) preference penalties, which this
+	# 4-level hierarchy needs. Keep :symbolics.
+	kkt_backend = :symbolics # :symbolics | :fast_differentiation
+	kkt_backend_options = (;) # forwarded to Symbolics.build_function
+	# Code generation for the compiled residual/Jacobian. Differentiation stays
+	# in Symbolics; :fast_differentiation only re-emits the same expressions as
+	# a hash-consed DAG, which avoids the pathological first-call LLVM compile
+	# times of Symbolics codegen on this problem size (solver first-call compile
+	# ~47 min → ~1 min at horizon 6, verified numerically identical to 1e-15).
+	kkt_codegen = :fast_differentiation # :native | :fast_differentiation
 	linesearch = :backtracking   # :backtracking | :fraction_to_boundary
 	compute_warmstart = true # Whether to compute a warmstart trajectory via rollout (true) or load from file (false)
 	num_instances      = 1
@@ -584,13 +596,25 @@ function demo(;
 	GOOP_kkt_generator = get(kkt_generators, goop_version, nothing)
 	isnothing(GOOP_kkt_generator) && error("Unknown GOOP version: $(goop_version)")
 
-	@info "Building KKT system for $(goop_version) GOOP formulation and $(solver) solver..."
+	symbolic_backends = Dict(
+		:symbolics => ReducedGOOP.SymbolicTracingUtils.SymbolicsBackend(),
+		:fast_differentiation => ReducedGOOP.SymbolicTracingUtils.FastDifferentiationBackend(),
+	)
+	backend = get(symbolic_backends, kkt_backend, nothing)
+	isnothing(backend) && error("Unknown KKT backend: $(kkt_backend)")
+
+	@info "Building KKT system for $(goop_version) GOOP formulation ($(kkt_backend) backend, $(kkt_codegen) codegen) and $(solver) solver..."
 	# Check if problem is not an instance of GOOPKKTSystem. Otherwise, build GOOPKKTSystem.
 	GOOP_kkt_system = @timeit TO "KKT construction" begin
 		if problem isa ReducedGOOP.GOOPKKTSystem
 			problem
 		else
-			GOOP_kkt_generator(problem)
+			GOOP_kkt_generator(
+				problem;
+				backend,
+				backend_options = kkt_backend_options,
+				codegen = kkt_codegen,
+			)
 		end
 	end
 
