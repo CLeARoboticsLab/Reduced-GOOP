@@ -13,9 +13,15 @@ using ProgressMeter: ProgressMeter, @showprogress
 using ReducedGOOP
 using TimerOutputs: @timeit, reset_timer!
 
-include(joinpath(@__DIR__, "Robotic_arm.jl"))
-
-const RA = Robotic_arm
+# Reuse an already-loaded (e.g. Revise-tracked via includet) Main.Robotic_arm
+# instead of baking in a private copy: `includet` is non-recursive, so a copy
+# created by a plain `include` here would never pick up edits to Robotic_arm.jl.
+if isdefined(Main, :Robotic_arm)
+	const RA = Main.Robotic_arm
+else
+	include(joinpath(@__DIR__, "Robotic_arm.jl"))
+	const RA = Robotic_arm
+end
 const TO = ReducedGOOP.TO
 
 # ── Experiment entry point ─────────────────────────────────────────────────────
@@ -36,7 +42,7 @@ Non-converged solves are not fatal: the final iterate is used and the step is
 marked as non-converged in the saved plots.
 """
 function demo(;
-	planning_horizon = 12,
+	planning_horizon = 10,
 	num_mpc_steps = 20,
 	map_end = 10,
 	lane_width = 2,
@@ -51,73 +57,48 @@ function demo(;
 
 	# ── Settings ───────────────────────────────────────────────────────────────
 	run_id = "Robotic_arm_receding_" * Dates.format(Dates.now(), "yyyy-mm-dd_HHMMSS")
-	dynamics_model = RA.SingleIntegrator3D()
 	solver = ReducedGOOP.InteriorPoint()
 	linesearch = :backtracking
-
-	# ── Problem parameters (same scenario as the open-loop demo) ───────────────
-	# Player 1: combined two-arm agent, Player 2: child/pet.
-	num_players = 2
-	collision_avoidance = 3.0
-	safety_buffer_margin = 1.0
-	arm_speed_limit = 5.0
-	child_speed_limit = 3.0
-	dₚ = 2.0
 	ϵ₀ = 0.1
 	max_inner_iters = 500
 
-	# ── Scenario ───────────────────────────────────────────────────────────────
-	base_initial_state1 = [-1.0, 6.0, 2.0]
-	base_initial_state2 = [1.0, 6.0, 2.0]
-	goal_position1      = [-1.0, -5.0, 5.0]
-	goal_position2      = [1.0, -5.0, 5.0]
-	initial_state3      = [-6.0, -1.0, 0.0]
-	goal_position3      = [0.0, 0.0, 0.0]
-	obstacle_position   = [0.25, 0.15, 0.0]   # placeholder
-
-	# ── Build dynamics and problem ─────────────────────────────────────────────
-	state_dimension   = 3
-	control_dimension = 3
-	Δt               = 0.1
-	control_bounds    = (; lb = [-10.0, -10.0, -10.0], ub = [10.0, 10.0, 10.0])
-
-	dynamics = @timeit TO "dynamics construction" [
-		RA.build_two_arm_dynamics(dynamics_model; Δt),
-		RA.build_dynamics(dynamics_model; Δt, state_dimension, control_dimension),
-	]
-	scenario_config = RA.ScenarioConfig(;
+	# ── Scenario and problem (identical to the open-loop demo) ─────────────────
+	# Player 1: combined two-arm agent, Player 2: child/pet.
+	scenario_config = RA.demo_scenario_config(; map_end, lane_width, planning_horizon)
+	(;
 		dynamics_model,
 		dynamics,
 		control_bounds,
 		num_players,
-		planning_horizon,
-		position_dimension = state_dimension,
-		map_end = Float64(map_end),
-		lane_width = Float64(lane_width),
-		Δt,
-		dₚ,
-		collision_avoidance,
-		safety_buffer_margin,
-		arm_speed_limit,
-		child_speed_limit,
 		base_initial_state1,
 		base_initial_state2,
 		goal_position1,
 		goal_position2,
 		initial_state3,
 		goal_position3,
-		obstacle_position,
-	)
+		collision_avoidance,
+		arm_speed_limit,
+		child_speed_limit,
+		dₚ,
+	) = scenario_config
+	state_dimension = scenario_config.position_dimension
 
 	problem_setup_time_sec = @elapsed @timeit TO "problem setup" begin
 		(; problem, flatten_parameters) = RA.get_setup(scenario_config)
 	end
-
 	# Built exactly once; every MPC iteration reuses the compiled KKT system and
-	# only changes θ (initial states) and the warm start.
+	# only changes θ (initial states) and the warm start. Differentiation stays
+	# in Symbolics; :fast_differentiation codegen re-emits the expressions as a
+	# hash-consed DAG, avoiding the pathological first-call LLVM compile times
+	# of native Symbolics codegen (see the open-loop demo for details).
 	@info "Building KKT system once for the receding-horizon loop (T = $(planning_horizon))..."
 	kkt_build_time_sec = @elapsed GOOP_kkt_system = @timeit TO "KKT construction" begin
-		ReducedGOOP.generate_slacked_reduced_kkt_system(problem)
+		ReducedGOOP.generate_slacked_reduced_kkt_system(
+			problem;
+			backend = ReducedGOOP.SymbolicTracingUtils.SymbolicsBackend(),
+			backend_options = (;),
+			codegen = :fast_differentiation,
+		)
 	end
 	println(
 		"one-time setup: problem construction $(round(problem_setup_time_sec; digits = 2)) s, ",
@@ -126,24 +107,27 @@ function demo(;
 	println("[Primal-Dual] KKT Dimension: ", GOOP_kkt_system.kkt_dimension)
 	println("[Primal-Dual] variable Dimension: ", GOOP_kkt_system.variable_dimension)
 
+	# Same options as the open-loop demo, except record_condition_number stays a
+	# kwarg (default false): it costs a dense SVD per Newton iteration, which is
+	# prohibitive across an MPC loop.
 	options = ReducedGOOP.InteriorPointOptions(;
 		tol = 0.01,
-		η₀ = 1.0e-6,
+		η₀ = 1e-6,
+		η_max = 1e6,
 		ϵ₀,
 		max_inner_iters,
 		max_outer_iters = 1,
 		tightening_rate = 1.2,
 		loosening_rate = 3.0,
-		eta_increase_factor = 2.0,
-		eta_decrease_factor = 0.5,
 		min_stepsize = 1e-20,
 		linesearch,
 		linear_solve_algorithm = ReducedGOOP.LinearSolve.KrylovJL_LSMR(),
 		use_linsolve = false,
 		record_convergence = true,
 		record_condition_number,
-		η_min = 1e-12,
-		eta_retry_growth = 0.3,
+		eta_retry_growth = 2.0,
+		ρ_low = 0.75,
+		ρ_high = 0.75,
 		perturbation_enabled = false,
 		stagnation_rtol = 1e-1,
 		perturbation_scale = 1e-6,

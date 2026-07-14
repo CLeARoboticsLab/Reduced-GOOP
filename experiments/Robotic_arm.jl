@@ -303,7 +303,7 @@ function get_setup(scenario_config::ScenarioConfig)
 	# Preference hierarchy: [lowest priority, ..., highest priority].
 	goop_preferences = [
 		[
-			control_objective(; player = 1),
+			# control_objective(; player = 1),
 			goal_objective,
 			load_balance_objective,
 			robot_inequality,
@@ -313,7 +313,7 @@ function get_setup(scenario_config::ScenarioConfig)
 			child_ground_speed_inequality
 		],
 	]
-	goop_is_prioritized_constraint = [[false, false, false, true], [false, true]]
+	goop_is_prioritized_constraint = [[false, false, true], [false, true]]
 
 	function build_goop_problem()
 		@timeit TO "ParametricGOOP construction" ReducedGOOP.ParametricGOOP(
@@ -456,6 +456,7 @@ without duplicating the configuration.
 function demo_scenario_config(;
 	map_end = 10,
 	lane_width = 2,
+	planning_horizon = 6,
 	use_scalarized_baseline = false,
 	use_social_equilibrium_baseline = false,
 )
@@ -464,7 +465,6 @@ function demo_scenario_config(;
 	# ── Problem parameters ─────────────────────────────────────────────────────
 	# Player 1: combined two-arm agent, Player 2: child/pet.
 	num_players          = 2
-	planning_horizon     = 6
 	collision_avoidance  = 2.0
 	child_initial_buffer = 4.0
 	arm_speed_limit      = 5.0

@@ -111,7 +111,8 @@
       "Bash(julia --project=experiments /private/tmp/claude-501/-Users-dhl-Documents-Reduced-GOOP/45b8c24a-db30-4e1c-9811-bcbe6f63d001/scratchpad/check_second_order_quick.jl)",
       "Bash(julia --project=experiments /private/tmp/claude-501/-Users-dhl-Documents-Reduced-GOOP/45b8c24a-db30-4e1c-9811-bcbe6f63d001/scratchpad/check_second_order_projected.jl)",
       "Bash(julia --project=experiments /private/tmp/claude-501/-Users-dhl-Documents-Reduced-GOOP/45b8c24a-db30-4e1c-9811-bcbe6f63d001/scratchpad/check_second_order_projected2.jl)",
-      "Bash(echo \"exit code: $?\")"
+      "Bash(echo \"exit code: $?\")",
+      "Bash(julia -e 'for f in [\"experiments/Robotic_arm.jl\", \"experiments/Robotic_arm_receding.jl\"]; ex = Meta.parseall\\(read\\(f, String\\)\\); any\\(a -> a isa Expr && a.head == :error, ex.args\\) ? error\\(\"parse error in $f\"\\) : println\\(\"$f parses OK\"\\); end')"
     ],
     "additionalDirectories": [
       "/private/tmp"
