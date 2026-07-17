@@ -42,7 +42,6 @@ Non-converged solves are not fatal: the final iterate is used and the step is
 marked as non-converged in the saved plots.
 """
 function demo(;
-	planning_horizon = 10,
 	num_mpc_steps = 20,
 	map_end = 10,
 	lane_width = 2,
@@ -64,12 +63,13 @@ function demo(;
 
 	# ── Scenario and problem (identical to the open-loop demo) ─────────────────
 	# Player 1: combined two-arm agent, Player 2: child/pet.
-	scenario_config = RA.demo_scenario_config(; map_end, lane_width, planning_horizon)
+	scenario_config = RA.demo_scenario_config(; map_end, lane_width)
 	(;
 		dynamics_model,
 		dynamics,
 		control_bounds,
 		num_players,
+		planning_horizon,
 		base_initial_state1,
 		base_initial_state2,
 		goal_position1,
@@ -448,17 +448,15 @@ end
 
 """
 Shift a per-player trajectory one stage forward to warm-start the next MPC
-solve. The terminal stage is augmented with a constant terminal control: the
-previous final control is repeated, which for the single-integrator dynamics
-smoothly continues the last commanded velocity (and stays feasible, since that
-control already satisfied the speed constraints); the appended terminal state
-follows from the dynamics under that control.
+solve. The terminal stage is padded with a zero control passed through the
+dynamics (trivially feasible); for the single-integrator
+dynamics the appended terminal state repeats the previous final state.
 """
 function shift_strategies(strategies, dynamics, planning_horizon)
 	map(collect(enumerate(strategies))) do (player, strategy)
 		xs = [collect(Float64, x) for x in strategy.xs[2:end]]
 		us = [collect(Float64, u) for u in strategy.us[2:end]]
-		terminal_control = copy(us[end])
+		terminal_control = zeros(dynamics[player].control_dimension)
 		push!(xs, dynamics[player].step(xs[end], terminal_control, planning_horizon))
 		push!(us, terminal_control)
 		(; xs, us)
