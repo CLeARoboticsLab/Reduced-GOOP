@@ -50,6 +50,7 @@ function demo(;
 	debug = false,
 	show_interactive_trajectory = true,
 	record_condition_number = false,
+	record_convergence = true,
 )
 	reset_timer!(TO)
 	@timeit TO "experiment setup" Random.seed!(rng_seed)
@@ -60,10 +61,11 @@ function demo(;
 	linesearch = :backtracking
 	ϵ₀ = 0.1
 	max_inner_iters = 500
+	use_running_goal_cost = true
 
 	# ── Scenario and problem (identical to the open-loop demo) ─────────────────
 	# Player 1: combined two-arm agent, Player 2: child/pet.
-	scenario_config = RA.demo_scenario_config(; map_end, lane_width)
+	scenario_config = RA.demo_scenario_config(; use_running_goal_cost)
 	(;
 		dynamics_model,
 		dynamics,
@@ -87,10 +89,7 @@ function demo(;
 		(; problem, flatten_parameters) = RA.get_setup(scenario_config)
 	end
 	# Built exactly once; every MPC iteration reuses the compiled KKT system and
-	# only changes θ (initial states) and the warm start. Differentiation stays
-	# in Symbolics; :fast_differentiation codegen re-emits the expressions as a
-	# hash-consed DAG, avoiding the pathological first-call LLVM compile times
-	# of native Symbolics codegen (see the open-loop demo for details).
+	# only changes θ (initial states) and the warm start. 
 	@info "Building KKT system once for the receding-horizon loop (T = $(planning_horizon))..."
 	kkt_build_time_sec = @elapsed GOOP_kkt_system = @timeit TO "KKT construction" begin
 		ReducedGOOP.generate_slacked_reduced_kkt_system(
@@ -123,7 +122,7 @@ function demo(;
 		linesearch,
 		linear_solve_algorithm = ReducedGOOP.LinearSolve.KrylovJL_LSMR(),
 		use_linsolve = false,
-		record_convergence = true,
+		record_convergence,
 		record_condition_number,
 		eta_retry_growth = 2.0,
 		ρ_low = 0.75,
@@ -456,6 +455,7 @@ function shift_strategies(strategies, dynamics, planning_horizon)
 	map(collect(enumerate(strategies))) do (player, strategy)
 		xs = [collect(Float64, x) for x in strategy.xs[2:end]]
 		us = [collect(Float64, u) for u in strategy.us[2:end]]
+		# terminal_control = copy(us[end])
 		terminal_control = zeros(dynamics[player].control_dimension)
 		push!(xs, dynamics[player].step(xs[end], terminal_control, planning_horizon))
 		push!(us, terminal_control)

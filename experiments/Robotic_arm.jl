@@ -499,7 +499,7 @@ function demo(;
 	# ── Settings ───────────────────────────────────────────────────────────────
 	run_id = something(
 		run_id,
-		 "challenging-scenario1_겨ㅜost_dt0.1_T10_line_copy"
+		 "challenging-scenario1_runcost_dt0.1_T10_line_copy"
 	)
 	goop_version = :reduced      # :complete | :reduced | :quasi
 	# Tracing/differentiation backend. The :fast_differentiation tracing backend
