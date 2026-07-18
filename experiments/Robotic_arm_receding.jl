@@ -59,7 +59,7 @@ function demo(;
 	run_id = "Robotic_arm_receding_" * Dates.format(Dates.now(), "yyyy-mm-dd_HHMMSS")
 	solver = ReducedGOOP.InteriorPoint()
 	linesearch = :backtracking
-	ϵ₀ = 0.1
+	ϵ₀ = 0.1 # placeholder in the robotic arm scenario (no inequality constraints here)
 	max_inner_iters = 500
 	use_running_goal_cost = true
 
@@ -190,16 +190,19 @@ function demo(;
 		(; θ1, θ2, θ3, θ) = instance_parameters
 		if k == 1
 			θ1_initial, θ2_initial, θ3_initial = θ1, θ2, θ3
-			@timeit TO "warmstart visualization" RA.save_warmstart_visualizations(
+		end
+
+		# Plot the warm start used for this step's solve. 
+		# The interactive export of the previous step leaves WGLMakie active; static PDF saving needs the CairoMakie backend.
+		CairoMakie.activate!()
+		@timeit TO "warmstart visualization" RA.save_warmstart_visualizations(
 				stage_warmstart;
-				total_attempts = 1,
-				instance_idx = 1,
+				filename_tag = "step_$(k)",
 				primal_dimensions,
 				instance_parameters,
 				scenario_config,
 				visualization_config,
 			)
-		end
 
 		elapsed_time = @elapsed output = @timeit TO "solver invocation" ReducedGOOP.solve(
 			solver,

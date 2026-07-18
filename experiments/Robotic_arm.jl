@@ -418,7 +418,7 @@ function demo_scenario_config(;
 	# ── Problem parameters ─────────────────────────────────────────────────────
 	# Player 1: combined two-arm agent, Player 2: child/pet.
 	num_players = 2
-	collision_avoidance = 3.0
+	collision_avoidance = 2.0
 	child_initial_buffer = 4.0
 	arm_speed_limit = 5.0
 	child_speed_limit = 3.0
@@ -936,8 +936,9 @@ end
 
 function save_warmstart_visualizations(
 	warmstart_solution;
-	total_attempts,
-	instance_idx,
+	total_attempts = nothing,
+	instance_idx = nothing,
+	filename_tag = "attempt_$(total_attempts)_instance_$(instance_idx)",
 	primal_dimensions,
 	instance_parameters::InstanceParameters,
 	scenario_config::ScenarioConfig,
@@ -998,28 +999,28 @@ function save_warmstart_visualizations(
 	save_figure(
 		joinpath(
 			warmstart_plots_dir,
-			"warmstart_attempt_$(total_attempts)_instance_$(instance_idx).$(static_extension)",
+			"warmstart_$(filename_tag).$(static_extension)",
 		),
 		warmstart_fig,
 	)
 	save_figure(
 		joinpath(
 			warmstart_plots_dir,
-			"warmstart_speed_attempt_$(total_attempts)_instance_$(instance_idx).$(static_extension)",
+			"warmstart_speed_$(filename_tag).$(static_extension)",
 		),
 		warmstart_speed_fig,
 	)
 	save_figure(
 		joinpath(
 			warmstart_plots_dir,
-			"warmstart_control_attempt_$(total_attempts)_instance_$(instance_idx).$(static_extension)",
+			"warmstart_control_$(filename_tag).$(static_extension)",
 		),
 		warmstart_control_fig,
 	)
 	save_figure(
 		joinpath(
 			warmstart_plots_dir,
-			"warmstart_distance_attempt_$(total_attempts)_instance_$(instance_idx).$(static_extension)",
+			"warmstart_distance_$(filename_tag).$(static_extension)",
 		),
 		warmstart_distance_fig,
 	)
