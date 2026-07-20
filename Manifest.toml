@@ -2,7 +2,7 @@
 
 julia_version = "1.12.6"
 manifest_format = "2.0"
-project_hash = "e7773cb561e4bbee6b5d1fa935b9a60dfb6050f1"
+project_hash = "a9912d166f7c188e9d2fd314e85c02eb292c23dd"
 
 [[deps.ADTypes]]
 git-tree-sha1 = "d9aaef7c63466eee4de23b4d9dad03629df54bea"
@@ -476,6 +476,12 @@ deps = ["StyledStrings"]
 uuid = "ac6e5ff7-fb65-4e79-a425-ec3bc9c03011"
 version = "1.12.0"
 
+[[deps.KLU]]
+deps = ["LinearAlgebra", "SparseArrays", "SuiteSparse_jll"]
+git-tree-sha1 = "07649c499349dad9f08dde4243a4c597064663e9"
+uuid = "ef3ab10e-7fda-4108-b977-705223b18434"
+version = "0.6.0"
+
 [[deps.Krylov]]
 deps = ["LinearAlgebra", "Printf", "SparseArrays"]
 git-tree-sha1 = "fc2e5bc665dfa1be33fac60b5762d462bccfae7b"
@@ -839,7 +845,7 @@ version = "4.3.2"
     Zygote = "e88e6eb3-aa80-5325-afca-941959d7151f"
 
 [[deps.ReducedGOOP]]
-deps = ["BlockArrays", "InvertedIndices", "JLD2", "LinearAlgebra", "LinearSolve", "ProgressMeter", "SciMLBase", "SparseArrays", "Statistics", "SymbolicTracingUtils", "Symbolics", "TimerOutputs"]
+deps = ["BlockArrays", "InvertedIndices", "JLD2", "KLU", "LinearAlgebra", "LinearSolve", "ProgressMeter", "SciMLBase", "SparseArrays", "Statistics", "SymbolicTracingUtils", "Symbolics", "TimerOutputs"]
 path = "."
 uuid = "48e8ddca-bd20-452f-8ba0-e6bfbdc6f25c"
 version = "0.1.0"
