@@ -51,8 +51,6 @@ function default_interior_point_options(; verbose = false)
         loosening_rate = 0.5,
         min_stepsize = 1e-20,
         linesearch = :fraction_to_boundary,
-        linear_solve_algorithm = ReducedGOOP.LinearSolve.KrylovJL_LSMR(),
-        use_linsolve = false,
         record_convergence = false,
         record_condition_number = false,
         eta_retry_growth = 0.3,
@@ -591,8 +589,6 @@ function klu_test_options(;
         loosening_rate = 0.5,
         min_stepsize = 1e-20,
         linesearch,
-        linear_solve_algorithm = ReducedGOOP.LinearSolve.KrylovJL_LSMR(),
-        use_linsolve = false,
         record_convergence = false,
         record_condition_number = false,
         eta_retry_growth = 0.3,
@@ -626,7 +622,9 @@ end
         J = kkt.∇F_z!.result_buffer
         kkt.∇F_z!(J, z; θ, ϵ, η = 0.0)
 
-        for η in (1e-6, 1e-2)
+        # High-η cases lock in the √η-balanced augmented scaling: the naive
+        # [I J; Jᵀ -ηI] form loses the tiny ~1/η step to cancellation there.
+        for η in (1e-6, 1e-2, 1e2, 1e6)
             cache = ReducedGOOP._build_augmented_kkt_cache(J, m, n)
             ReducedGOOP._update_augmented_kkt!(cache, J, η)
             δz_klu = zeros(n)

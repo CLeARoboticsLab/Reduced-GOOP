@@ -120,8 +120,6 @@ solve_options = ReducedGOOP.InteriorPointOptions(;
 	loosening_rate = 0.5,
 	linesearch = :backtracking,
 	verbose = true,
-	linear_solve_algorithm = ReducedGOOP.LinearSolve.KrylovJL_LSMR(),
-	use_linsolve = false,
 )
 status, z_sol_new_goop, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters = ReducedGOOP.solve(
 	ReducedGOOP.InteriorPoint(),

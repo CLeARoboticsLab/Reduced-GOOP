@@ -7,8 +7,6 @@ using SparseArrays: SparseArrays
 using InvertedIndices: Not
 using LinearAlgebra: LinearAlgebra, I, norm, eigvals, cond, svdvals, ldiv!
 using KLU: KLU
-using LinearSolve: LinearSolve, LinearProblem, init, solve!
-using SciMLBase: SciMLBase
 using SymbolicTracingUtils: SymbolicTracingUtils
 using JLD2: JLD2
 using TimerOutputs: TimerOutput, @timeit

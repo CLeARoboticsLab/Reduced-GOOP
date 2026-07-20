@@ -610,8 +610,6 @@ function demo(;
 				loosening_rate = 3.0, # low => strong increase in η
 				min_stepsize = 1e-20,
 				linesearch,
-				linear_solve_algorithm = ReducedGOOP.LinearSolve.KrylovJL_LSMR(),
-				use_linsolve = false,
 				record_convergence = true,
 				record_condition_number = true,
 				eta_retry_growth = 2.0,

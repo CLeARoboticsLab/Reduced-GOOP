@@ -58,6 +58,25 @@ function demo(;
     # ~20-30 iterations per step.
     full_warmstart = false,
     reuse_factorization_iters = 0,
+    # η_max = 1e6 lets a struggling step escalate the regularization into a
+    # do-nothing limit cycle: LM steps scale like 1/η, so at η ~ 1e6 the solver
+    # takes microscopic "full" steps that pass the line search but reduce the
+    # residual by ~1e-5 per iteration until the budget is gone. Successful
+    # steps never use η above ~1e-4, so 1e2 is a generous ceiling that makes
+    # genuinely stuck solves fail fast instead.
+    η_max = 1e2,
+    # Re-solve a failed step once from the default (cold) warmstart.
+    rescue_failed_steps = true,
+    # Armijo sufficient-decrease constant for the backtracking line search;
+    # 0.0 recovers the pre-Armijo accept-any-decrease behavior.
+    armijo_constant = 1e-4,
+    # When set (e.g. 8), round the warmstart AND the closed-loop states carried
+    # into the next MPC step to this many decimal digits. Quantizes away any
+    # bit-level noise before it can cascade through the (chaotic) Newton path,
+    # making runs comparable step-by-step even across environments. `nothing`
+    # disables truncation. Digits ≥ 6 are far below tol = 0.01, so convergence
+    # behavior is unaffected.
+    truncate_carry_digits = nothing,
 )
     reset_timer!(TO)
     @timeit TO "experiment setup" Random.seed!(rng_seed)
@@ -119,7 +138,7 @@ function demo(;
     options = ReducedGOOP.InteriorPointOptions(;
         tol = 0.01,
         η₀ = 1e-6,
-        η_max = 1e6,
+        η_max,
         ϵ₀,
         max_inner_iters,
         max_outer_iters = 1,
@@ -127,8 +146,6 @@ function demo(;
         loosening_rate = 3.0,
         min_stepsize = 1e-20,
         linesearch,
-        linear_solve_algorithm = ReducedGOOP.LinearSolve.KrylovJL_LSMR(),
-        use_linsolve = false,
         record_convergence,
         record_condition_number,
         eta_retry_growth = 2.0,
@@ -140,6 +157,7 @@ function demo(;
         tsvd_threshold = 0.0,
         use_marquardt_scaling = false,
         linear_solver,
+        armijo_constant,
         reuse_factorization_iters,
         verbose,
     )
@@ -171,7 +189,9 @@ function demo(;
             instance_states,
             scenario_config,
         )
-    stage_warmstart = warmstart_solution
+    _truncate_carry(v) =
+        isnothing(truncate_carry_digits) ? v : round.(v; digits = truncate_carry_digits)
+    stage_warmstart = _truncate_carry(warmstart_solution)
 
     step_statuses = Symbol[]
     step_kkt_errors = Float64[]
@@ -222,6 +242,32 @@ function demo(;
             z₀ = stage_warmstart,
             options,
         )
+        if output.status == :failed && rescue_failed_steps
+            # The shifted warmstart occasionally lands in a bad basin (the solver
+            # stalls with η pinned at η_max, or at a merit-function local minimum
+            # where ‖F‖ stays large). A fresh solve from the default warmstart is
+            # cheap with the KLU path and usually recovers the step.
+            println(
+                "  step $(k): solve from shifted warmstart failed ",
+                "(kkt_error=$(round(output.kkt_error; sigdigits = 3))); ",
+                "retrying from the default warmstart.",
+            )
+            rescue_warmstart = _truncate_carry(
+                RA.build_default_warmstart(instance_states, scenario_config).warmstart_solution,
+            )
+            elapsed_time += @elapsed rescue_output =
+                @timeit TO "solver invocation (rescue)" ReducedGOOP.solve(
+                    solver,
+                    GOOP_kkt_system,
+                    θ;
+                    z₀ = rescue_warmstart,
+                    options,
+                )
+            if rescue_output.status == :solved ||
+               rescue_output.kkt_error < output.kkt_error
+                output = rescue_output
+            end
+        end
         converged = output.status == :solved
         push!(step_statuses, output.status)
         push!(step_kkt_errors, output.kkt_error)
@@ -253,9 +299,10 @@ function demo(;
             push!(closed_loop_xs[player], collect(strategies[player].xs[2]))
         end
         combined_arm_state = closed_loop_xs[1][end]
-        current_state1 = combined_arm_state[1:state_dimension]
-        current_state2 = combined_arm_state[(state_dimension + 1):(2 * state_dimension)]
-        current_state_child = closed_loop_xs[2][end]
+        current_state1 = _truncate_carry(combined_arm_state[1:state_dimension])
+        current_state2 =
+            _truncate_carry(combined_arm_state[(state_dimension + 1):(2 * state_dimension)])
+        current_state_child = _truncate_carry(closed_loop_xs[2][end])
 
         solution_dict = Dict(
             "mpc_step" => k,
@@ -332,15 +379,17 @@ function demo(;
             [strategy.xs for strategy in shifted_strategies],
             [strategy.us for strategy in shifted_strategies],
         )
-        stage_warmstart = if full_warmstart
-            # Carry duals and slacks over unshifted from the previous solution;
-            # only the primal block is shifted by one stage.
-            splice = copy(output.z)
-            splice[GOOP_kkt_system.primal_dims] .= shifted_primal
-            splice
-        else
-            shifted_primal
-        end
+        stage_warmstart = _truncate_carry(
+            if full_warmstart
+                # Carry duals and slacks over unshifted from the previous solution;
+                # only the primal block is shifted by one stage.
+                splice = copy(output.z)
+                splice[GOOP_kkt_system.primal_dims] .= shifted_primal
+                splice
+            else
+                shifted_primal
+            end,
+        )
     end
 
     # ── Closed-loop outputs ────────────────────────────────────────────────────

@@ -14,8 +14,6 @@ Base.@kwdef struct InteriorPointOptions
     loosening_rate::Float64
     min_stepsize::Float64
     linesearch::Symbol
-    linear_solve_algorithm::LinearSolve.SciMLLinearSolveAlgorithm
-    use_linsolve::Bool
     record_convergence::Bool = false
     record_condition_number::Bool = false
     max_eta_retries::Int = 5
@@ -94,7 +92,6 @@ Keyword arguments:
 	- `min_stepsize::Real = 1e-2`: the minimum step size for the linesearch.
 	- `linesearch::Symbol = :backtracking`: linesearch mode (`:backtracking` or `:fraction_to_boundary`).
 	- `verbose::Bool = false`: whether to print debug information.
-	- `linear_solve_algorithm::LinearSolve.SciMLLinearSolveAlgorithm`: the linear solve algorithm to use. Any solver from `LinearSolve.jl` that can handle nonsquare system can be used.
 	- `record_convergence::Bool = false`: if true, record and return `kkt_error_history` and `eta_history`.
 	- `record_condition_number::Bool = false`: if true, record and return `condition_number_history`.
 	- `perturbation_enabled::Bool = false`: if true, perturb `x` after repeated KKT residual stagnation.
@@ -136,8 +133,6 @@ function solve(
     loosening_rate = options.loosening_rate
     min_stepsize = options.min_stepsize
     linesearch = options.linesearch
-    linear_solve_algorithm = options.linear_solve_algorithm
-    use_linsolve = options.use_linsolve
     record_convergence = options.record_convergence
     record_condition_number = options.record_condition_number
     verbose = options.verbose
@@ -253,14 +248,6 @@ function solve(
         # the reshaped row alias lets sum! reduce column norms without allocating.
         marquardt_scale = zeros(mcp.variable_dimension)
         marquardt_scale_row = reshape(marquardt_scale, 1, :)
-
-        use_linsolve && (
-            linsolve = init(
-                LinearProblem(∇F, δz),
-                linear_solve_algorithm,
-                maxiters = 100000,
-            )
-        )
 
         # Main solver loop.
         if ϵ₀ === :auto
@@ -506,10 +493,6 @@ function solve(
                             end
                         end
                     end
-
-                    # if inner_iters > 20 && kkt_error < 5e-3
-                    # 	η = 0.0
-                    # end
 
                     local α, pred_reduction, actual_reduction, F_z_next
                     while true
@@ -903,22 +886,31 @@ end
 Sparse augmented system for the Tikhonov-regularized least-squares Newton step.
 
 The KKT Jacobian `J` is rectangular (m×n), so the regularized step
-`δz = -(JᵀJ + ηI)⁻¹JᵀF` is obtained from the square quasi-definite system
+`δz = -(JᵀJ + ηI)⁻¹JᵀF` is obtained from the square quasi-definite system in
+its √η-balanced form (γ = √η, any diagonal pair with product η gives the same
+δz in exact arithmetic):
 
-	[ I_m    J   ] [ w  ]   [ -F ]
-	[ Jᵀ   -ηI_n ] [ δz ] = [  0 ]
+	[ γI_m    J   ] [ w  ]   [ -F ]
+	[  Jᵀ   -γI_n ] [ δz ] = [  0 ]
 
-whose sparsity pattern is fixed across iterations and η updates, so KLU's
+The balanced scaling keeps the matrix condition ~κ(J) even when the
+regularization escalates to large η; the naive `[I J; Jᵀ -ηI]` form loses
+relative accuracy in the (then ~1/η-sized) step through cancellation exactly
+in the hard, heavily regularized regime, producing noisier directions than
+the SVD filter there.
+
+The sparsity pattern is fixed across iterations and η updates, so KLU's
 symbolic analysis is computed once and only numeric refactorizations happen
 per iteration. `J_positions`/`Jt_positions` map `nonzeros(J)` (CSC order) into
-`nonzeros(K)` for the two off-diagonal blocks; `eta_positions` addresses the
--η diagonal of the lower-right block.
+`nonzeros(K)` for the two off-diagonal blocks; `identity_positions` and
+`eta_positions` address the two η-dependent diagonal blocks.
 """
 struct AugmentedKKTCache
     K::SparseArrays.SparseMatrixCSC{Float64,Int}
     klu_fact::Base.RefValue{Any}
     J_positions::Vector{Int}
     Jt_positions::Vector{Int}
+    identity_positions::Vector{Int}
     eta_positions::Vector{Int}
     rhs::Vector{Float64}
     sol::Vector{Float64}
@@ -968,6 +960,7 @@ function _build_augmented_kkt_cache(
     end
     J_positions = [locate(rows[t], m + cols[t]) for t in 1:nnzJ]
     Jt_positions = [locate(m + cols[t], rows[t]) for t in 1:nnzJ]
+    identity_positions = [locate(i, i) for i in 1:m]
     eta_positions = [locate(m + i, m + i) for i in 1:n]
 
     AugmentedKKTCache(
@@ -975,6 +968,7 @@ function _build_augmented_kkt_cache(
         Ref{Any}(nothing),
         J_positions,
         Jt_positions,
+        identity_positions,
         eta_positions,
         zeros(m + n),
         zeros(m + n),
@@ -995,13 +989,17 @@ function _update_augmented_kkt!(cache::AugmentedKKTCache, ∇F, η)
     cache
 end
 
-"Rewrite only the -η diagonal block (used by the η-retry loop, where J is unchanged)."
+"Rewrite only the η-dependent diagonals (used by the η-retry loop, where J is unchanged)."
 function _update_augmented_eta!(cache::AugmentedKKTCache, η)
     K_nonzeros = SparseArrays.nonzeros(cache.K)
-    # Keep the block strictly negative definite even if η underflows to 0.
-    η_diagonal = -max(η, 1e-12)
+    # Balanced scaling γ = √η with a floor keeping both diagonal blocks
+    # strictly definite even if η underflows to 0.
+    γ = sqrt(max(η, 1e-12))
+    @inbounds for position in cache.identity_positions
+        K_nonzeros[position] = γ
+    end
     @inbounds for position in cache.eta_positions
-        K_nonzeros[position] = η_diagonal
+        K_nonzeros[position] = -γ
     end
     cache
 end
@@ -1021,7 +1019,7 @@ function _solve_augmented!(δz, cache::AugmentedKKTCache, F; refactor = true)
     end
     cache.sol .= cache.rhs
     ldiv!(cache.klu_fact[], cache.sol)
-    δz .= view(cache.sol, (cache.m + 1):(cache.m + cache.n))
+    δz .= view(cache.sol, (cache.m + 1):(cache.m + cache.n)) # copy last n elements
     δz
 end
 

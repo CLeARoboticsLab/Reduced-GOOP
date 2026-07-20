@@ -75,8 +75,6 @@ for tol in [1e-3, 1e-4]
 		loosening_rate = 3.0,
 		min_stepsize = 1e-20,
 		linesearch = :backtracking,
-		linear_solve_algorithm = ReducedGOOP.LinearSolve.KrylovJL_LSMR(),
-		use_linsolve = false,
 		record_convergence = true,
 		record_condition_number = true,
 		eta_retry_growth = 2.0,

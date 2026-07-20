@@ -15,8 +15,6 @@ Base.@kwdef struct InteriorPointOptions
 	loosening_rate::Float64
 	min_stepsize::Float64
 	linesearch::Symbol
-	linear_solve_algorithm::LinearSolve.SciMLLinearSolveAlgorithm
-	use_linsolve::Bool
 	record_convergence::Bool
 	record_condition_number::Bool = false
 	record_solver_diagnostics::Bool = false
@@ -87,7 +85,6 @@ Keyword arguments:
 	- `min_stepsize::Real = 1e-2`: the minimum step size for the linesearch.
 	- `linesearch::Symbol = :backtracking`: linesearch mode (`:backtracking` or `:fraction_to_boundary`).
 	- `verbose::Bool = false`: whether to print debug information.
-	- `linear_solve_algorithm::LinearSolve.SciMLLinearSolveAlgorithm`: the linear solve algorithm to use. Any solver from `LinearSolve.jl` that can handle nonsquare system can be used.
 	- `record_convergence::Bool = false`: if true, record and return `kkt_error_history`.
 	- `record_condition_number::Bool = false`: if true, record and return `condition_number_history`.
 	- `record_solver_diagnostics::Bool = false`: if true, record singular-value and step diagnostics.
@@ -117,8 +114,6 @@ function solve(
 	loosening_rate = options.loosening_rate
 	min_stepsize = options.min_stepsize
 	linesearch = options.linesearch
-	linear_solve_algorithm = options.linear_solve_algorithm
-	use_linsolve = options.use_linsolve
 	record_convergence = options.record_convergence
 	record_condition_number = options.record_condition_number
 	record_solver_diagnostics = options.record_solver_diagnostics
@@ -168,8 +163,6 @@ function solve(
 	δs = @view δz[mcp.preference_slack_dims]
 	δσ = @view δz[mcp.interior_point_slack_dims]
 	δγ = @view δz[mcp.inequality_constraint_dual_dims]
-
-	use_linsolve && (linsolve = init(LinearProblem(∇F, δz), linear_solve_algorithm, maxiters = 100000))
 
 	# Main solver loop.
 	if ϵ₀ === :auto
