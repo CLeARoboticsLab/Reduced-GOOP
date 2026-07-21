@@ -165,6 +165,7 @@ function generate_slacked_reduced_kkt_system(
 	drop_higher_order_terms = false,
 	backend_options = (;),
 	codegen = :native,
+	fd_codegen_chunk_size = nothing,
 )
 	if drop_higher_order_terms &&
 	   backend isa SymbolicTracingUtils.FastDifferentiationBackend
@@ -653,6 +654,7 @@ function generate_slacked_reduced_kkt_system(
 		inequality_constraint_dual_dims;
 		backend_options,
 		codegen,
+		fd_codegen_chunk_size,
 	)
 
 end
@@ -663,6 +665,7 @@ function generate_slacked_quasi_kkt_system(
 	backend = SymbolicTracingUtils.SymbolicsBackend(),
 	backend_options = (;),
 	codegen = :native,
+	fd_codegen_chunk_size = nothing,
 )
 	generate_slacked_reduced_kkt_system(
 		goop;
@@ -670,6 +673,7 @@ function generate_slacked_quasi_kkt_system(
 		drop_higher_order_terms = true,
 		backend_options,
 		codegen,
+		fd_codegen_chunk_size,
 	)
 end
 
@@ -679,6 +683,7 @@ function generate_slacked_complete_kkt_system(
 	backend = SymbolicTracingUtils.SymbolicsBackend(),
 	backend_options = (;),
 	codegen = :native,
+	fd_codegen_chunk_size = nothing,
 )
 	# Symbolic variables for all primals, parameters, and duals for shared constraints.
 	x =
@@ -1137,6 +1142,7 @@ function generate_slacked_complete_kkt_system(
 		inequality_constraint_dual_dims;
 		backend_options,
 		codegen,
+		fd_codegen_chunk_size,
 	)
 end
 

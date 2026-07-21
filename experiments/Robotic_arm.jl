@@ -96,16 +96,37 @@ function get_setup(scenario_config::ScenarioConfig)
 	position_dimension = 3
 	# Player 1 is the combined two-arm agent: state/control stack both arms as
 	# [arm1; arm2]. Player 2 is the child/pet on the ground.
-	arm1_range = 1:position_dimension
-	arm2_range = (position_dimension+1):(2*position_dimension)
+	arm_state_dimension, state_remainder = divrem(dynamics[1].state_dimension, 2)
+	arm_control_dimension, control_remainder = divrem(dynamics[1].control_dimension, 2)
+	iszero(state_remainder) || error("Expected an even stacked two-arm state dimension.")
+	iszero(control_remainder) ||
+		error("Expected an even stacked two-arm control dimension.")
+	arm_state_dimension == position_dimension || error(
+		"Expected each arm state to have $(position_dimension) position dimensions, " *
+		"got $(arm_state_dimension).",
+	)
+	child_control_dimension = dynamics[2].control_dimension
+	child_control_dimension == position_dimension || error(
+		"Expected a $(position_dimension)D child control, got " *
+		"$(child_control_dimension)D.",
+	)
+	arm1_state_range = 1:arm_state_dimension
+	arm2_state_range = (arm_state_dimension+1):(2*arm_state_dimension)
+	arm1_control_range = 1:arm_control_dimension
+	arm2_control_range = (arm_control_dimension+1):(2*arm_control_dimension)
+	child_horizontal_control_range = 1:(child_control_dimension-1)
+	child_vertical_control_index = child_control_dimension
 
 	primal_dimensions = [
 		(dyn.state_dimension + dyn.control_dimension) * planning_horizon for
 		dyn in dynamics
 	]
-	# Per player: initial state, goal of the same length, and a 3D obstacle.
+	# Per player: initial state, initial control, goal state, and a 3D obstacle.
 	parameter_dimensions =
-		[2 * dyn.state_dimension + position_dimension for dyn in dynamics]
+		[
+			dyn.state_dimension + dyn.control_dimension + dyn.state_dimension +
+			position_dimension for dyn in dynamics
+		]
 
 	dummy_primals = BlockArray(zeros(sum(primal_dimensions)), primal_dimensions)
 	dummy_parameters = BlockArray(zeros(sum(parameter_dimensions)), parameter_dimensions)
@@ -114,19 +135,29 @@ function get_setup(scenario_config::ScenarioConfig)
 
 	unflatten_parameters = function (θ; player)
 		state_dimension = dynamics[player].state_dimension
+		control_dimension = dynamics[player].control_dimension
 		θ_iter = Iterators.Stateful(θ)
 		initial_state = first(θ_iter, state_dimension)
+		initial_control = first(θ_iter, control_dimension)
 		goal_position = first(θ_iter, state_dimension)
 		obstacle_position = first(θ_iter, position_dimension)
-		(; initial_state, goal_position, obstacle_position)
+		(; initial_state, initial_control, goal_position, obstacle_position)
 	end
 
-	function flatten_parameters(; player, initial_state, goal_position, obstacle_position)
+	function flatten_parameters(;
+		player,
+		initial_state,
+		initial_control,
+		goal_position,
+		obstacle_position,
+	)
 		state_dimension = dynamics[player].state_dimension
+		control_dimension = dynamics[player].control_dimension
 		length(initial_state) == state_dimension || error("Expected initial_state length $(state_dimension), got $(length(initial_state)).",)
+		length(initial_control) == control_dimension || error("Expected initial_control length $(control_dimension), got $(length(initial_control)).",)
 		length(goal_position) == state_dimension || error("Expected goal_position length $(state_dimension), got $(length(goal_position)).",)
 		length(obstacle_position) == position_dimension || error("Expected 3D obstacle_position, got length $(length(obstacle_position)).",)
-		vcat(initial_state, goal_position, obstacle_position)
+		vcat(initial_state, initial_control, goal_position, obstacle_position)
 	end
 
 	trajectory(z; player) = unflatten_trajectory(
@@ -142,14 +173,16 @@ function get_setup(scenario_config::ScenarioConfig)
 		(; goal_position) = unflatten_parameters(θ[Block(1)]; player = 1)
 
 		center_goal_position =
-			0.5 .* (goal_position[arm1_range] .+ goal_position[arm2_range])
+			0.5 .* (goal_position[arm1_state_range] .+ goal_position[arm2_state_range])
 		if use_running_goal_cost
 			sum(eachindex(xs)) do t
-				center_position = 0.5 .* (xs[t][arm1_range] .+ xs[t][arm2_range])
+				center_position =
+					0.5 .* (xs[t][arm1_state_range] .+ xs[t][arm2_state_range])
 				sum(abs2, center_position .- center_goal_position)
 			end
 		else # terminal cost only
-			center_position = 0.5 .* (xs[end][arm1_range] .+ xs[end][arm2_range])
+			center_position =
+				0.5 .* (xs[end][arm1_state_range] .+ xs[end][arm2_state_range])
 			sum(abs2, center_position .- center_goal_position)
 		end
 	end
@@ -161,10 +194,11 @@ function get_setup(scenario_config::ScenarioConfig)
 		end
 	end
 
-	function load_balance_objective(z, θ; allowance = 0.1)
+	function load_balance_objective(z, θ; allowance = 0.5)
 		(; xs, us) = trajectory(z; player = 1)
 		sum(eachindex(xs)) do t
-			balance = (xs[t][arm1_range[end]] - xs[t][arm2_range[end]])^2
+			balance =
+				(xs[t][arm1_state_range[end]] - xs[t][arm2_state_range[end]])^2
 			ifelse(balance < allowance^2, 0.0, balance - allowance^2)
 		end
 	end
@@ -175,7 +209,8 @@ function get_setup(scenario_config::ScenarioConfig)
 
 		sum(eachindex(child_trajectory.xs)) do t
 			arm_state = arm_trajectory.xs[t]
-			pot_center = 0.5 .* (arm_state[arm1_range] .+ arm_state[arm2_range])
+			pot_center =
+				0.5 .* (arm_state[arm1_state_range] .+ arm_state[arm2_state_range])
 			sum(abs2, child_trajectory.xs[t] .- pot_center)
 		end
 	end
@@ -184,9 +219,11 @@ function get_setup(scenario_config::ScenarioConfig)
 	player_equality_constraints = [
 		function (z, θ)
 			(; xs, us) = trajectory(z; player = i)
-			(; initial_state) = unflatten_parameters(θ[Block(i)]; player = i)
+			(; initial_state, initial_control) =
+				unflatten_parameters(θ[Block(i)]; player = i)
 
 			initial_state_constraint = xs[1] - initial_state
+			initial_control_constraint = us[1] - initial_control
 			dynamics_constraints = mapreduce(vcat, 1:(length(xs)-1)) do t
 				# xs[t] - dynamics(xs[t-1], us[t-1], t)
 				dynamics[i].residual(z[Block(i)], t)
@@ -199,18 +236,21 @@ function get_setup(scenario_config::ScenarioConfig)
 			handle_grasp_constraint =
 				i == 1 ?
 				mapreduce(vcat, eachindex(xs)) do t
-					gripper_separation = xs[t][arm1_range] .- xs[t][arm2_range]
+					gripper_separation =
+						xs[t][arm1_state_range] .- xs[t][arm2_state_range]
 					[sum(abs2, gripper_separation) - dₚ^2]
 				end : empty_constraint
 
 			# The child is modeled with the same 3D single-integrator dynamics, but its
 			# vertical velocity is fixed to zero.
 			child_ground_constraint =
-				i == 2 ? mapreduce(u -> [u[position_dimension]], vcat, us) :
+				i == 2 ?
+				mapreduce(u -> [u[child_vertical_control_index]], vcat, us) :
 				empty_constraint
 
 			vcat(
 				initial_state_constraint,
+				initial_control_constraint,
 				dynamics_constraints,
 				handle_grasp_constraint,
 				child_ground_constraint,
@@ -226,7 +266,8 @@ function get_setup(scenario_config::ScenarioConfig)
 
 		mapreduce(vcat, eachindex(child_trajectory.xs)) do t
 			arm_state = arm_trajectory.xs[t]
-			pot_center = 0.5 .* (arm_state[arm1_range] .+ arm_state[arm2_range])
+			pot_center =
+				0.5 .* (arm_state[arm1_state_range] .+ arm_state[arm2_state_range])
 			separation = pot_center .- child_trajectory.xs[t]
 			[sum(abs2, separation) - collision_avoidance^2]
 		end
@@ -238,8 +279,8 @@ function get_setup(scenario_config::ScenarioConfig)
 		# Each arm individually respects the same speed limit.
 		mapreduce(vcat, us) do u
 			[
-				arm_speed_limit^2 - sum(abs2, u[arm1_range]),
-				arm_speed_limit^2 - sum(abs2, u[arm2_range]),
+				arm_speed_limit^2 - sum(abs2, u[arm1_control_range]),
+				arm_speed_limit^2 - sum(abs2, u[arm2_control_range]),
 			]
 		end
 	end
@@ -253,7 +294,7 @@ function get_setup(scenario_config::ScenarioConfig)
 
 		# Child cannot teleport into the pot center.
 		mapreduce(vcat, us) do u
-			[(child_speed_limit)^2 - sum(abs2, u[1:2])]
+			[(child_speed_limit)^2 - sum(abs2, u[child_horizontal_control_range])]
 		end
 	end
 
@@ -418,7 +459,7 @@ function demo_scenario_config(;
 	# ── Problem parameters ─────────────────────────────────────────────────────
 	# Player 1: combined two-arm agent, Player 2: child/pet.
 	num_players = 2
-	collision_avoidance = 2.0
+	collision_avoidance = 2.5
 	child_initial_buffer = 4.0
 	arm_speed_limit = 5.0
 	child_speed_limit = 3.0
@@ -439,7 +480,7 @@ function demo_scenario_config(;
 	lane_width = 2
 
 	# ── Build dynamics ─────────────────────────────────────────────────────────
-	planning_horizon = 10
+	planning_horizon = 20
 	Δt = 0.1
 	state_dimension = 3
 	control_dimension = 3
@@ -731,14 +772,6 @@ function demo(;
 		println("goal_position3:", goal_position3)
 
 		instance_states = (; initial_state1, initial_state2, initial_state3)
-		instance_parameters =
-			@timeit TO "instance parameter construction" build_instance_parameters(
-				flatten_parameters,
-				instance_states,
-				scenario_config,
-			)
-		(; θ1, θ2, θ3, θ) = instance_parameters
-
 		(; warmstart_solution) = @timeit TO "warmstart construction" if compute_warmstart
 			build_default_warmstart(instance_states, scenario_config)
 		else
@@ -746,8 +779,21 @@ function demo(;
 				warmstart_solution = load(
 					"experiments/solution_dict_instance_1_eps0.1.jld2",
 				)["single_stored_object"]["x"][1:sum(primal_dimensions)],
-			)
+				)
 		end
+		initial_controls = extract_initial_controls(
+			warmstart_solution,
+			primal_dimensions,
+			dynamics,
+		)
+		instance_states = merge(instance_states, initial_controls)
+		instance_parameters =
+			@timeit TO "instance parameter construction" build_instance_parameters(
+				flatten_parameters,
+				instance_states,
+				scenario_config,
+			)
+		(; θ1, θ2, θ3, θ) = instance_parameters
 		@timeit TO "warmstart visualization" save_warmstart_visualizations(
 			warmstart_solution;
 			total_attempts,
@@ -1220,20 +1266,56 @@ function extract_player_strategies(primal_solution, primal_dimensions, dynamics)
 	end
 end
 
+"""Extract the per-arm and child controls at the first trajectory knot."""
+function extract_initial_controls(
+	primal_solution,
+	primal_dimensions,
+	dynamics,
+)
+	strategies = extract_player_strategies(primal_solution, primal_dimensions, dynamics)
+	combined_arm_control = collect(strategies[1].us[1])
+	arm_control_dimension, remainder = divrem(dynamics[1].control_dimension, 2)
+	iszero(remainder) || error(
+		"Expected an even stacked two-arm control dimension, got " *
+		"$(dynamics[1].control_dimension).",
+	)
+	length(combined_arm_control) == dynamics[1].control_dimension || error(
+		"Expected a stacked two-arm control of length " *
+		"$(dynamics[1].control_dimension), got $(length(combined_arm_control)).",
+	)
+	length(strategies) >= 2 || error("Expected a child strategy.")
+	child_control = collect(strategies[2].us[1])
+	length(child_control) == dynamics[2].control_dimension || error(
+		"Expected a child control of length $(dynamics[2].control_dimension), got " *
+		"$(length(child_control)).",
+	)
+	(;
+		initial_control1 = combined_arm_control[1:arm_control_dimension],
+		initial_control2 =
+			combined_arm_control[(arm_control_dimension+1):(2*arm_control_dimension)],
+		initial_control3 = child_control,
+	)
+end
+
 """
 Split the combined two-arm strategy (player 1) into per-arm 3D strategies so
 the existing per-arm plotting code can be reused unchanged. Returns
 [arm1, arm2, child, ...] in the layout the plots expect.
 """
-function split_arm_strategies(strategies; position_dimension = 3)
+function split_arm_strategies(strategies)
 	combined = strategies[1]
+	state_dimension, state_remainder = divrem(length(combined.xs[1]), 2)
+	control_dimension, control_remainder = divrem(length(combined.us[1]), 2)
+	iszero(state_remainder) || error("Expected an even stacked two-arm state dimension.")
+	iszero(control_remainder) ||
+		error("Expected an even stacked two-arm control dimension.")
 	arm1 = (;
-		xs = [x[1:position_dimension] for x in combined.xs],
-		us = [u[1:position_dimension] for u in combined.us],
+		xs = [x[1:state_dimension] for x in combined.xs],
+		us = [u[1:control_dimension] for u in combined.us],
 	)
 	arm2 = (;
-		xs = [x[(position_dimension+1):(2*position_dimension)] for x in combined.xs],
-		us = [u[(position_dimension+1):(2*position_dimension)] for u in combined.us],
+		xs = [x[(state_dimension+1):(2*state_dimension)] for x in combined.xs],
+		us = [u[(control_dimension+1):(2*control_dimension)] for u in combined.us],
 	)
 	vcat([arm1, arm2], strategies[2:end])
 end
@@ -1297,26 +1379,49 @@ function build_instance_parameters(
 	scenario_config::ScenarioConfig,
 )
 	(; initial_state1, initial_state2, initial_state3) = instance_states
+	dynamics = scenario_config.dynamics
+	arm_control_dimension, remainder = divrem(dynamics[1].control_dimension, 2)
+	iszero(remainder) || error(
+		"Expected an even stacked two-arm control dimension, got " *
+		"$(dynamics[1].control_dimension).",
+	)
+	child_control_dimension = dynamics[2].control_dimension
+	# Keep callers that only provide states working by using the physically
+	# stationary initial condition as the default control boundary.
+	initial_control1 =
+		hasproperty(instance_states, :initial_control1) ?
+		instance_states.initial_control1 :
+		zeros(eltype(initial_state1), arm_control_dimension)
+	initial_control2 =
+		hasproperty(instance_states, :initial_control2) ?
+		instance_states.initial_control2 :
+		zeros(eltype(initial_state2), arm_control_dimension)
+	initial_control3 =
+		hasproperty(instance_states, :initial_control3) ?
+		instance_states.initial_control3 :
+		zeros(eltype(initial_state3), child_control_dimension)
 	(; goal_position1, goal_position2, goal_position3, obstacle_position) =
 		scenario_config
 	# Solver-facing parameter blocks: player 1 stacks both arms, player 2 is the child.
 	θ_arms = flatten_parameters(;
 		player = 1,
 		initial_state = vcat(initial_state1, initial_state2),
+		initial_control = vcat(initial_control1, initial_control2),
 		goal_position = vcat(goal_position1, goal_position2),
 		obstacle_position = obstacle_position,
 	)
 	θ_child = flatten_parameters(;
 		player = 2,
 		initial_state = initial_state3,
+		initial_control = initial_control3,
 		goal_position = goal_position3,
 		obstacle_position = obstacle_position,
 	)
 
-	# Per-arm 3D blocks kept in the legacy layout purely for plotting, which
-	# reads the initial position from the first three entries.
-	θ1 = vcat(initial_state1, goal_position1, obstacle_position)
-	θ2 = vcat(initial_state2, goal_position2, obstacle_position)
+	# Per-arm 3D blocks are retained for plotting, which reads the initial
+	# position from the first three entries.
+	θ1 = vcat(initial_state1, initial_control1, goal_position1, obstacle_position)
+	θ2 = vcat(initial_state2, initial_control2, goal_position2, obstacle_position)
 	θ3 = copy(θ_child)
 
 	InstanceParameters(θ1, θ2, θ3, [θ_arms..., θ_child...])
@@ -1348,10 +1453,23 @@ function build_default_warmstart(instance_states, scenario_config::ScenarioConfi
 		use_up_and_over_warmstart,
 	) = scenario_config
 	arm_dynamics, child_dynamics = dynamics
+	arm_state_dimension, state_remainder = divrem(arm_dynamics.state_dimension, 2)
+	arm_control_dimension, remainder = divrem(arm_dynamics.control_dimension, 2)
+	iszero(state_remainder) || error(
+		"Expected an even stacked two-arm state dimension, got " *
+		"$(arm_dynamics.state_dimension).",
+	)
+	iszero(remainder) || error(
+		"Expected an even stacked two-arm control dimension, got " *
+		"$(arm_dynamics.control_dimension).",
+	)
+	arm_state_dimension == arm_control_dimension || error(
+		"SingleIntegrator3D requires matching per-arm state and control dimensions.",
+	)
 	planning_horizon >= 2 || error("Robot warm start requires at least two time steps.")
-	length(goal_position1) == child_dynamics.state_dimension ||
+	length(goal_position1) == arm_state_dimension ||
 		error("Goal position 1 dimension mismatch.")
-	length(goal_position2) == child_dynamics.state_dimension ||
+	length(goal_position2) == arm_state_dimension ||
 		error("Goal position 2 dimension mismatch.")
 
 	arms_warmstart = if use_up_and_over_warmstart
@@ -1376,7 +1494,7 @@ function build_default_warmstart(instance_states, scenario_config::ScenarioConfi
 		robot_warmstart_control = limit_control_speed(
 			(goal_center .- start_center) ./ total_time,
 			arm_speed_limit,
-			1:child_dynamics.control_dimension,
+			1:arm_control_dimension,
 		)
 		build_constant_control_warmstart(
 			planning_horizon,
@@ -1434,16 +1552,33 @@ function build_up_and_over_warmstart(
 	planning_horizon >= 2 ||
 		error("Up-and-over warm start requires at least two time steps.")
 
-	arm1_range = 1:position_dimension
-	arm2_range = (position_dimension+1):(2*position_dimension)
+	arm_state_dimension, state_remainder = divrem(dynamics.state_dimension, 2)
+	arm_control_dimension, control_remainder = divrem(dynamics.control_dimension, 2)
+	iszero(state_remainder) || error("Expected an even stacked two-arm state dimension.")
+	iszero(control_remainder) ||
+		error("Expected an even stacked two-arm control dimension.")
+	arm_state_dimension == position_dimension || error(
+		"Expected each arm state to have $(position_dimension) position dimensions, " *
+		"got $(arm_state_dimension).",
+	)
+	arm_control_dimension == position_dimension || error(
+		"SingleIntegrator3D requires matching per-arm state and control dimensions.",
+	)
+	arm1_state_range = 1:arm_state_dimension
+	arm2_state_range = (arm_state_dimension+1):(2*arm_state_dimension)
+	vertical_state_index = position_dimension
+	vertical_control_index = arm_control_dimension
+	horizontal_control_range = 1:(arm_control_dimension-1)
 	Δt = dynamics.Δt
 	num_steps = planning_horizon - 1
 	num_rise_steps = max(1, round(Int, num_steps / 3))
 	num_descend_steps = max(1, round(Int, num_steps / 3))
 	num_cruise_steps = max(0, num_steps - num_rise_steps - num_descend_steps)
 
-	goal_center = 0.5 .* (goal_position[arm1_range] .+ goal_position[arm2_range])
-	start_center = 0.5 .* (initial_state[arm1_range] .+ initial_state[arm2_range])
+	goal_center =
+		0.5 .* (goal_position[arm1_state_range] .+ goal_position[arm2_state_range])
+	start_center =
+		0.5 .* (initial_state[arm1_state_range] .+ initial_state[arm2_state_range])
 	evasion_direction =
 		if lateral_evasion_offset > 0 && !isnothing(child_initial_position)
 			away = start_center[1:2] .- child_initial_position[1:2]
@@ -1456,22 +1591,23 @@ function build_up_and_over_warmstart(
 	xs = [collect(initial_state)]
 	us = Vector{Float64}[]
 	for t in 1:num_steps
-		center = 0.5 .* (xs[t][arm1_range] .+ xs[t][arm2_range])
+		center = 0.5 .* (xs[t][arm1_state_range] .+ xs[t][arm2_state_range])
 		remaining_time = (num_steps - t + 1) * Δt
 		center_control = (goal_center .- center) ./ remaining_time
 		if t <= num_rise_steps
 			remaining_rise_time = (num_rise_steps - t + 1) * Δt
-			center_control[3] = (clearance_altitude - center[3]) / remaining_rise_time
-			center_control[1:2] .+=
+			center_control[vertical_control_index] =
+				(clearance_altitude - center[vertical_state_index]) / remaining_rise_time
+			center_control[horizontal_control_range] .+=
 				evasion_direction .* (lateral_evasion_offset / (num_rise_steps * Δt))
 		elseif t <= num_rise_steps + num_cruise_steps
-			center_control[3] = 0.0
+			center_control[vertical_control_index] = 0.0
 		end
 		center_control =
 			limit_control_speed(
 				center_control,
 				speed_margin * speed_limit,
-				1:position_dimension,
+				1:arm_control_dimension,
 			)
 		push!(us, vcat(center_control, center_control))
 		push!(xs, dynamics.step(xs[t], us[t], t))
@@ -1514,17 +1650,27 @@ function build_ground_line_warmstart(
 		error("Goal position dimension mismatch.")
 	planning_horizon >= 2 ||
 		error("Ground-line warm start requires at least two time steps.")
+	dynamics.state_dimension == dynamics.control_dimension || error(
+		"SingleIntegrator3D requires matching state and control dimensions.",
+	)
+	vertical_state_index = dynamics.state_dimension
+	vertical_control_index = dynamics.control_dimension
+	horizontal_control_range = 1:(vertical_control_index-1)
 
 	total_time = dynamics.Δt * (planning_horizon - 1)
 	constant_control = (goal_position .- initial_state) ./ total_time
-	constant_control[3] = 0.0
-	constant_control = limit_control_speed(constant_control, ground_speed_limit, 1:2)
+	constant_control[vertical_control_index] = 0.0
+	constant_control = limit_control_speed(
+		constant_control,
+		ground_speed_limit,
+		horizontal_control_range,
+	)
 
 	xs = [collect(initial_state)]
 	us = [collect(constant_control)]
 	for t in 1:(planning_horizon-1)
 		push!(xs, dynamics.step(xs[t], us[1], t))
-		xs[end][3] = 0.0
+		xs[end][vertical_state_index] = 0.0
 		push!(us, copy(us[1]))
 	end
 	us[end] = zeros(dynamics.control_dimension)

@@ -92,7 +92,11 @@ function _build_fd_codegen_function(
 	θ_symbolic,
 	ϵ_symbolic,
 	η_symbolic,
+	;
+	chunk_size = nothing,
 )
+	isnothing(chunk_size) || chunk_size > 0 ||
+		throw(ArgumentError("FastDifferentiation codegen chunk_size must be positive."))
 	fd_z = SymbolicTracingUtils.FD.make_variables(:z, length(z_symbolic))
 	fd_θ = SymbolicTracingUtils.FD.make_variables(:θ, length(θ_symbolic))
 	fd_ϵ = SymbolicTracingUtils.FD.make_variables(:ϵ, 1)
@@ -115,13 +119,81 @@ function _build_fd_codegen_function(
 	# A single concatenated input vector keeps the generated function's arity
 	# in sync with the runtime call below, which flattens its arguments the
 	# same way.
-	_f! = SymbolicTracingUtils.FD.make_function(
-		fd_exprs,
-		vcat(fd_z, fd_θ, fd_ϵ, fd_η);
-		in_place = true,
-	)
+	fd_inputs = vcat(fd_z, fd_θ, fd_ϵ, fd_η)
+	if isnothing(chunk_size) || length(fd_exprs) <= chunk_size
+		_f! = SymbolicTracingUtils.FD.make_function(
+			fd_exprs,
+			fd_inputs;
+			in_place = true,
+		)
+		return (result, z, θ, ϵ, η) -> _f!(result, vcat(z, θ, ϵ, η))
+	end
 
-	(result, z, θ, ϵ, η) -> _f!(result, vcat(z, θ, ϵ, η))
+	chunk_ranges = [
+		start:min(start + chunk_size - 1, length(fd_exprs)) for
+		start in 1:chunk_size:length(fd_exprs)
+	]
+	# Keep these abstractly typed on purpose. Dynamic dispatch provides a
+	# function barrier between chunks, preventing Julia inference from merging
+	# all generated ASTs back into one enormous compiler unit.
+	chunk_functions = Function[
+		SymbolicTracingUtils.FD.make_function(
+			collect(@view fd_exprs[range]),
+			fd_inputs;
+			in_place = true,
+		) for range in chunk_ranges
+	]
+	function (result, z, θ, ϵ, η)
+		inputs = vcat(z, θ, ϵ, η)
+		for (range, f!) in zip(chunk_ranges, chunk_functions)
+			f!(@view(result[range]), inputs)
+		end
+		nothing
+	end
+end
+
+"""
+Construct a Symbolics sparse Jacobian while timing sparsity discovery,
+derivative expansion, and sparse assembly separately.
+
+`Symbolics.sparsejacobian` first discovers the sparsity pattern and then
+expands every structural derivative in a serial loop. Keeping those phases
+explicit here provides actionable profiling without changing Symbolics'
+derivative semantics. When the residual contains no deferred Differential
+operators—as is true for generated GOOP KKT systems—calling `executediff`
+directly avoids recursively checking the already-expanded residual again for
+every structural nonzero.
+"""
+function _build_symbolics_sparse_jacobian(
+	ops::AbstractVector{<:Symbolics.Num},
+	vars::AbstractVector{<:Symbolics.Num},
+)
+	sp = @timeit TO "Symbolics Jacobian sparsity detection" Symbolics.jacobian_sparsity(ops, vars)
+	rows, cols, _ = SparseArrays.findnz(sp)
+	values = @timeit TO "Symbolics derivative expansion" begin
+		unwrapped_ops = Symbolics.unwrap.(ops)
+		unwrapped_vars = Symbolics.unwrap.(vars)
+		if any(Symbolics.hasderiv, unwrapped_ops)
+			# Preserve the general Symbolics path if a caller supplies residuals
+			# containing deferred Differential operators.
+			Symbolics.sparsejacobian_vals(copy(ops), copy(vars), rows, cols)
+		else
+			differentials = Symbolics.Differential.(unwrapped_vars)
+			map(rows, cols) do row, col
+				Symbolics.Num(
+					Symbolics.executediff(differentials[col], unwrapped_ops[row]),
+				)
+			end
+		end
+	end
+
+	@timeit TO "Symbolics sparse Jacobian assembly" SparseArrays.sparse(
+		rows,
+		cols,
+		values,
+		length(ops),
+		length(vars),
+	)
 end
 
 function BuildGOOPKKTSystem(
@@ -136,13 +208,17 @@ function BuildGOOPKKTSystem(
 	inequality_constraint_dual_dims;
 	backend_options = (;),
 	codegen = :native,
+	fd_codegen_chunk_size = nothing,
 ) where {T <: Union{SymbolicTracingUtils.FD.Node, SymbolicTracingUtils.Symbolics.Num}}
 	codegen in (:native, :fast_differentiation) ||
 		error("Unknown codegen option: $(codegen). Use :native or :fast_differentiation.")
 	# The FD tracing backend already generates code through FD.
 	use_fd_codegen =
 		codegen === :fast_differentiation && T === SymbolicTracingUtils.Symbolics.Num
-
+	isnothing(fd_codegen_chunk_size) || use_fd_codegen || error(
+		"fd_codegen_chunk_size requires SymbolicsBackend with " *
+		"codegen = :fast_differentiation.",
+	)
 	@timeit TO "KKT executable construction" begin
 		if T == SymbolicTracingUtils.FD.Node
 			# FD.make_function only accepts vector-valued symbolic inputs, so the
@@ -164,6 +240,7 @@ function BuildGOOPKKTSystem(
 					θ_symbolic,
 					ϵ_symbolic,
 					η_symbolic,
+					chunk_size = fd_codegen_chunk_size,
 				)
 			else
 				SymbolicTracingUtils.build_function(
@@ -181,7 +258,16 @@ function BuildGOOPKKTSystem(
 		end
 
 		∇F_z! = @timeit TO "Jacobian function construction" let
-			∇F_symbolic = @timeit TO "Jacobian symbolic construction" SymbolicTracingUtils.sparse_jacobian(F_symbolic, z_symbolic)
+			∇F_symbolic = @timeit TO "Jacobian symbolic construction" begin
+				if T === SymbolicTracingUtils.Symbolics.Num
+					_build_symbolics_sparse_jacobian(
+						F_symbolic,
+						z_symbolic,
+					)
+				else
+					SymbolicTracingUtils.sparse_jacobian(F_symbolic, z_symbolic)
+				end
+			end
 			_∇F! = @timeit TO "Jacobian function build" if use_fd_codegen
 				# Generate code for the structural nonzeros only; the wrapper
 				# writes them straight into the sparse buffer, whose nzval
@@ -192,6 +278,7 @@ function BuildGOOPKKTSystem(
 					θ_symbolic,
 					ϵ_symbolic,
 					η_symbolic,
+					chunk_size = fd_codegen_chunk_size,
 				)
 				(result, z, θ, ϵ, η) ->
 					_Jvals!(SparseArrays.nonzeros(result), z, θ, ϵ, η)

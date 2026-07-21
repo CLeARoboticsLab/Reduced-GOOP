@@ -544,9 +544,26 @@ end
         problem;
         codegen = :fast_differentiation,
     )
+    fdgen_chunked = ReducedGOOP.generate_slacked_reduced_kkt_system(
+        problem;
+        codegen = :fast_differentiation,
+        fd_codegen_chunk_size = 7,
+    )
 
     @test fdgen.kkt_dimension == native.kkt_dimension
     @test fdgen.variable_dimension == native.variable_dimension
+    @test fdgen_chunked.kkt_dimension == native.kkt_dimension
+    @test fdgen_chunked.variable_dimension == native.variable_dimension
+
+    reference_symbolic_jacobian = ReducedGOOP.SymbolicTracingUtils.sparse_jacobian(
+        native.F_symbolic,
+        native.z_symbolic,
+    )
+    optimized_symbolic_jacobian = ReducedGOOP._build_symbolics_sparse_jacobian(
+        native.F_symbolic,
+        native.z_symbolic,
+    )
+    @test isequal(reference_symbolic_jacobian, optimized_symbolic_jacobian)
 
     n = native.variable_dimension
     m = sum(problem.parameter_dims)
@@ -562,9 +579,16 @@ end
 
         J_native = copy(native.∇F_z!.result_buffer)
         J_fd = copy(fdgen.∇F_z!.result_buffer)
+        F_fd_chunked = zeros(fdgen_chunked.kkt_dimension)
+        fdgen_chunked.F!(F_fd_chunked, z; θ, ϵ, η)
+        @test isapprox(F_native, F_fd_chunked; atol = 1e-12, rtol = 1e-12)
+
+        J_fd_chunked = copy(fdgen_chunked.∇F_z!.result_buffer)
         native.∇F_z!(J_native, z; θ, ϵ, η)
         fdgen.∇F_z!(J_fd, z; θ, ϵ, η)
+        fdgen_chunked.∇F_z!(J_fd_chunked, z; θ, ϵ, η)
         @test isapprox(J_native, J_fd; atol = 1e-12, rtol = 1e-12)
+        @test isapprox(J_native, J_fd_chunked; atol = 1e-12, rtol = 1e-12)
     end
 end
 

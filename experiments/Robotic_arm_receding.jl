@@ -30,10 +30,10 @@ const TO = ReducedGOOP.TO
 Receding-horizon (MPC) version of the robotic-arm experiment.
 
 The symbolic KKT system is built exactly once for a fixed `planning_horizon`.
-Every MPC iteration then only updates the initial-state entries of the
-parameter vector `θ` and the primal warm start `z₀` before re-solving, so all
-precomputed structures (compiled residuals, sparse Jacobian, solver options)
-are reused across iterations.
+Every MPC iteration then only updates the initial-state and initial-control
+entries of the parameter vector `θ` and the primal warm start `z₀` before
+re-solving, so all precomputed structures (compiled residuals, sparse Jacobian,
+solver options) are reused across iterations.
 
 At each MPC step the open-loop game is solved from the current state, the
 first control is applied (the system advances to the first predicted state),
@@ -52,6 +52,10 @@ function demo(;
     record_condition_number = false,
     record_convergence = true,
     linear_solver = :klu,
+    # FastDifferentiation otherwise emits all sparse-Jacobian entries as one
+    # enormous RuntimeGeneratedFunction. Bounded chunks avoid pathological
+    # first-call inference/lowering while preserving the same expressions.
+    fd_codegen_chunk_size = 128,
     # Carrying duals/slacks over from the shifted previous solution consistently
     # hurts MPC convergence here (stale multipliers misalign with the shifted
     # trajectory); primal-only warmstart with dual/slack reset converges in
@@ -109,13 +113,17 @@ function demo(;
         child_speed_limit,
         dₚ,
     ) = scenario_config
-    state_dimension = scenario_config.position_dimension
+    arm_state_dimension, state_remainder = divrem(dynamics[1].state_dimension, 2)
+    arm_control_dimension, control_remainder = divrem(dynamics[1].control_dimension, 2)
+    iszero(state_remainder) || error("Expected an even stacked two-arm state dimension.")
+    iszero(control_remainder) ||
+        error("Expected an even stacked two-arm control dimension.")
 
     problem_setup_time_sec = @elapsed @timeit TO "problem setup" begin
         (; problem, flatten_parameters) = RA.get_setup(scenario_config)
     end
     # Built exactly once; every MPC iteration reuses the compiled KKT system and
-    # only changes θ (initial states) and the warm start. 
+    # only changes θ (initial states and controls) and the warm start.
     @info "Building KKT system once for the receding-horizon loop (T = $(planning_horizon))..."
     kkt_build_time_sec = @elapsed GOOP_kkt_system = @timeit TO "KKT construction" begin
         ReducedGOOP.generate_slacked_reduced_kkt_system(
@@ -123,6 +131,7 @@ function demo(;
             backend = ReducedGOOP.SymbolicTracingUtils.SymbolicsBackend(),
             backend_options = (;),
             codegen = :fast_differentiation,
+            fd_codegen_chunk_size,
         )
     end
     println(
@@ -136,7 +145,7 @@ function demo(;
     # kwarg (default false): it costs a dense SVD per Newton iteration, which is
     # prohibitive across an MPC loop.
     options = ReducedGOOP.InteriorPointOptions(;
-        tol = 0.01,
+        tol = 0.008,
         η₀ = 1e-6,
         η_max,
         ϵ₀,
@@ -192,6 +201,14 @@ function demo(;
     _truncate_carry(v) =
         isnothing(truncate_carry_digits) ? v : round.(v; digits = truncate_carry_digits)
     stage_warmstart = _truncate_carry(warmstart_solution)
+    initial_controls = RA.extract_initial_controls(
+        stage_warmstart,
+        primal_dimensions,
+        dynamics,
+    )
+    current_control1 = initial_controls.initial_control1
+    current_control2 = initial_controls.initial_control2
+    current_control_child = initial_controls.initial_control3
 
     step_statuses = Symbol[]
     step_kkt_errors = Float64[]
@@ -201,11 +218,15 @@ function demo(;
 
     # ── MPC loop ───────────────────────────────────────────────────────────────
     for k in 1:num_mpc_steps
-        # Refresh the initial-state parameters without rebuilding the KKT system.
+        # Refresh the state/control boundary parameters without rebuilding the
+        # KKT system.
         instance_states = (;
             initial_state1 = current_state1,
             initial_state2 = current_state2,
             initial_state3 = current_state_child,
+            initial_control1 = current_control1,
+            initial_control2 = current_control2,
+            initial_control3 = current_control_child,
         )
         instance_parameters =
             @timeit TO "instance parameter construction" RA.build_instance_parameters(
@@ -299,10 +320,23 @@ function demo(;
             push!(closed_loop_xs[player], collect(strategies[player].xs[2]))
         end
         combined_arm_state = closed_loop_xs[1][end]
-        current_state1 = _truncate_carry(combined_arm_state[1:state_dimension])
+        current_state1 = _truncate_carry(combined_arm_state[1:arm_state_dimension])
         current_state2 =
-            _truncate_carry(combined_arm_state[(state_dimension + 1):(2 * state_dimension)])
+            _truncate_carry(
+                combined_arm_state[(arm_state_dimension + 1):(2 * arm_state_dimension)],
+            )
         current_state_child = _truncate_carry(closed_loop_xs[2][end])
+        # The shifted warm start begins at the old second knot, so carry those
+        # controls into θ as the next solve's fixed initial controls.
+        combined_arm_control = strategies[1].us[2]
+        current_control1 =
+            _truncate_carry(combined_arm_control[1:arm_control_dimension])
+        current_control2 = _truncate_carry(
+            combined_arm_control[
+                (arm_control_dimension+1):(2*arm_control_dimension)
+            ],
+        )
+        current_control_child = _truncate_carry(strategies[2].us[2])
 
         solution_dict = Dict(
             "mpc_step" => k,
@@ -315,11 +349,12 @@ function demo(;
             "ϵ" => output.ϵ,
             "status" => output.status,
             "total_iters" => output.total_iters,
-            "kkt_error_history" => output.kkt_error_history,
-            "condition_number_history" => output.condition_number_history,
-            "eta_history" => output.eta_history,
-            "alpha_history" => output.alpha_history,
-            "rho_history" => output.rho_history,
+            "kkt_error_history" => get(output, :kkt_error_history, Float64[]),
+            "condition_number_history" =>
+                get(output, :condition_number_history, Float64[]),
+            "eta_history" => get(output, :eta_history, Float64[]),
+            "alpha_history" => get(output, :alpha_history, Float64[]),
+            "rho_history" => get(output, :rho_history, Float64[]),
             "arm_speed_limit" => arm_speed_limit,
             "child_speed_limit" => child_speed_limit,
         )
@@ -484,6 +519,7 @@ function demo(;
                 "num_mpc_steps" => num_mpc_steps,
                 "ϵ₀" => ϵ₀,
                 "max_inner_iters" => max_inner_iters,
+                "fd_codegen_chunk_size" => fd_codegen_chunk_size,
                 "arm_speed_limit" => arm_speed_limit,
                 "child_speed_limit" => child_speed_limit,
                 "collision_avoidance" => collision_avoidance,
