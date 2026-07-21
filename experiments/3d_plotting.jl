@@ -1,11 +1,7 @@
 using CairoMakie: CairoMakie
 
 const SINGLE_INTEGRATOR_3D_PLAYER_COLORS = (:blue, :red, :darkorange)
-const WGLMAKIE_PKGID = Base.PkgId(Base.UUID("276b4fcb-3e11-5398-bf8b-a0c2d153d008"), "WGLMakie")
-
-function _load_wglmakie()
-	Base.require(WGLMAKIE_PKGID)
-end
+const SINGLE_INTEGRATOR_3D_POT_CENTER_COLOR = :purple
 
 function _trajectory_xyz(xs; player)
 	isempty(xs) && error("Player $(player) trajectory is empty.")
@@ -137,6 +133,8 @@ function _single_integrator_3d_plot_data(;
 	end
 	goal1 = _position3(goal_position1, "goal_position1")
 	goal2 = _position3(goal_position2, "goal_position2")
+	pot_start = 0.5 .* (start1 .+ start2)
+	pot_goal = 0.5 .* (goal1 .+ goal2)
 
 	all_x = vcat(x1, x2, start1[1], start2[1], goal1[1], goal2[1])
 	all_y = vcat(y1, y2, start1[2], start2[2], goal1[2], goal2[2])
@@ -183,6 +181,8 @@ function _single_integrator_3d_plot_data(;
 		start3,
 		goal1,
 		goal2,
+		pot_start,
+		pot_goal,
 		collision_avoidance,
 		xlims,
 		ylims,
@@ -328,6 +328,8 @@ function _plot_single_integrator_3d_trajectories(
 		start3,
 		goal1,
 		goal2,
+		pot_start,
+		pot_goal,
 		collision_avoidance,
 		xlims,
 		ylims,
@@ -525,12 +527,34 @@ function _plot_single_integrator_3d_trajectories(
 		strokecolor = :black,
 		strokewidth = 1,
 	)
+	pot_start_marker = makie.scatter!(
+		ax,
+		[pot_start[1]],
+		[pot_start[2]],
+		[pot_start[3]];
+		marker = :rect,
+		markersize = interactive ? 28 : 23,
+		color = SINGLE_INTEGRATOR_3D_POT_CENTER_COLOR,
+		strokecolor = :black,
+		strokewidth = 1,
+	)
+	pot_goal_marker = makie.scatter!(
+		ax,
+		[pot_goal[1]],
+		[pot_goal[2]],
+		[pot_goal[3]];
+		marker = :star5,
+		markersize = interactive ? 34 : 28,
+		color = SINGLE_INTEGRATOR_3D_POT_CENTER_COLOR,
+		strokecolor = :black,
+		strokewidth = 1,
+	)
 
 	legend_elements = Any[player1_path, player2_path]
-	legend_labels = ["Left gripper (P1)", "Right gripper (P2)"]
+	legend_labels = ["Left gripper (P1)", "Right gripper (P1)"]
 	if has_child
 		push!(legend_elements, player3_path)
-		push!(legend_labels, "Child/Pet (P3)")
+		push!(legend_labels, "Child (P2)")
 	end
 	append!(
 		legend_elements,
@@ -540,15 +564,16 @@ function _plot_single_integrator_3d_trajectories(
 		legend_labels,
 		["Start 1", "Start 2", "Current 1", "Current 2", "Goal 1", "Goal 2"],
 	)
+	append!(legend_elements, Any[pot_start_marker, pot_goal_marker])
+	append!(legend_labels, ["Pot center initial", "Pot center goal"])
 	if has_child
 		append!(legend_elements, Any[start3_marker, current3_marker])
-		append!(legend_labels, ["Child/Pet Start", "Child/Pet Current"])
+		append!(legend_labels, ["Child Start", "Child Current"])
 	end
 	if !isnothing(safety_handle)
 		push!(legend_elements, safety_handle)
 		push!(legend_labels, "Safety hemisphere")
 	end
-
 	makie.Legend(
 		figure[1, 1],
 		legend_elements,
@@ -579,6 +604,7 @@ function _plot_single_integrator_3d_browser_trajectories(
 	goal_position2,
 	goal_position3 = nothing,
 	collision_avoidance = nothing,
+	reference_distance = nothing,
 	map_end = nothing,
 	lane_width = nothing,
 	workspace_margin = 0.75,
@@ -617,6 +643,8 @@ function _plot_single_integrator_3d_browser_trajectories(
 		start3,
 		goal1,
 		goal2,
+		pot_start,
+		pot_goal,
 		collision_avoidance,
 		xlims,
 		ylims,
@@ -638,28 +666,39 @@ function _plot_single_integrator_3d_browser_trajectories(
 	)
 
 	player1_color, player2_color, player3_color = SINGLE_INTEGRATOR_3D_PLAYER_COLORS
+	time_horizon = length(x1) - 1
+	# Start at the final time step. Beyond matching the pre-slider look, this is
+	# required for the static HTML export: `Bonito.record_states` records the
+	# scene updates for slider values 0..T in order, and Makie's compute graph
+	# drops no-op updates — if the scene already sat at t = 0, the recorded
+	# entry for t = 0 would be empty and the exported slider could never return
+	# to the initial positions.
+	time_index = makie.Observable(time_horizon)
 	safety_handle = nothing
 	if has_child && !isnothing(collision_avoidance)
-		safety_stride = max(1, cld(length(x3), 6))
-		safety_indices = unique(vcat(collect(1:safety_stride:length(x3)), length(x3)))
-		for t in safety_indices
-			hemisphere_segments = _hemisphere_wireframe(
-				[x3[t], y3[t], z3[t]],
-				collision_avoidance,
+		# One hemisphere that follows the child position at the slider time;
+		# the origin-centered wireframe is computed once and only translated.
+		base_segments = _hemisphere_wireframe([0.0, 0.0, 0.0], collision_avoidance)
+		for (segment_x, segment_y, segment_z) in base_segments
+			segment_points = makie.lift(time_index) do t
+				i = clamp(t + 1, 1, length(x3))
+				[
+					makie.Point3f(
+						segment_x[k] + x3[i],
+						segment_y[k] + y3[i],
+						segment_z[k] + z3[i],
+					) for k in eachindex(segment_x)
+				]
+			end
+			current_safety = makie.lines!(
+				scene_axis,
+				segment_points;
+				color = (player3_color, 0.42),
+				linestyle = :dash,
+				linewidth = 2.0,
 			)
-			for (segment_x, segment_y, segment_z) in hemisphere_segments
-				current_safety = makie.lines!(
-					scene_axis,
-					segment_x,
-					segment_y,
-					segment_z;
-					color = (player3_color, 0.42),
-					linestyle = :dash,
-					linewidth = 2.0,
-				)
-				if isnothing(safety_handle)
-					safety_handle = current_safety
-				end
+			if isnothing(safety_handle)
+				safety_handle = current_safety
 			end
 		end
 	end
@@ -724,11 +763,27 @@ function _plot_single_integrator_3d_browser_trajectories(
 		strokecolor = :black,
 		strokewidth = 1,
 	) : nothing
+	current1_position = makie.lift(
+		t -> _agent_position_at_time(makie, t, x1, y1, z1),
+		time_index,
+	)
+	current2_position = makie.lift(
+		t -> _agent_position_at_time(makie, t, x2, y2, z2),
+		time_index,
+	)
+	current_pot_position = makie.lift(time_index) do t
+		i = clamp(t + 1, 1, min(length(x1), length(x2)))
+		[
+			makie.Point3f(
+				0.5 * (x1[i] + x2[i]),
+				0.5 * (y1[i] + y2[i]),
+				0.5 * (z1[i] + z2[i]),
+			),
+		]
+	end
 	current1_marker = makie.scatter!(
 		scene_axis,
-		[x1[end]],
-		[y1[end]],
-		[z1[end]];
+		current1_position;
 		marker = :diamond,
 		markersize = 30,
 		color = player1_color,
@@ -737,26 +792,39 @@ function _plot_single_integrator_3d_browser_trajectories(
 	)
 	current2_marker = makie.scatter!(
 		scene_axis,
-		[x2[end]],
-		[y2[end]],
-		[z2[end]];
+		current2_position;
 		marker = :diamond,
 		markersize = 30,
 		color = player2_color,
 		strokecolor = :black,
 		strokewidth = 1,
 	)
-	current3_marker = has_child ? makie.scatter!(
+	current_pot_marker = makie.scatter!(
 		scene_axis,
-		[x3[end]],
-		[y3[end]],
-		[z3[end]];
+		current_pot_position;
 		marker = :diamond,
-		markersize = 30,
-		color = player3_color,
+		markersize = 32,
+		color = SINGLE_INTEGRATOR_3D_POT_CENTER_COLOR,
 		strokecolor = :black,
 		strokewidth = 1,
-	) : nothing
+	)
+	current3_marker = if has_child
+		current3_position = makie.lift(
+			t -> _agent_position_at_time(makie, t, x3, y3, z3),
+			time_index,
+		)
+		makie.scatter!(
+			scene_axis,
+			current3_position;
+			marker = :diamond,
+			markersize = 30,
+			color = player3_color,
+			strokecolor = :black,
+			strokewidth = 1,
+		)
+	else
+		nothing
+	end
 	goal1_marker = makie.scatter!(
 		scene_axis,
 		[goal1[1]],
@@ -779,12 +847,34 @@ function _plot_single_integrator_3d_browser_trajectories(
 		strokecolor = :black,
 		strokewidth = 1,
 	)
+	pot_start_marker = makie.scatter!(
+		scene_axis,
+		[pot_start[1]],
+		[pot_start[2]],
+		[pot_start[3]];
+		marker = :rect,
+		markersize = 28,
+		color = SINGLE_INTEGRATOR_3D_POT_CENTER_COLOR,
+		strokecolor = :black,
+		strokewidth = 1,
+	)
+	pot_goal_marker = makie.scatter!(
+		scene_axis,
+		[pot_goal[1]],
+		[pot_goal[2]],
+		[pot_goal[3]];
+		marker = :star5,
+		markersize = 34,
+		color = SINGLE_INTEGRATOR_3D_POT_CENTER_COLOR,
+		strokecolor = :black,
+		strokewidth = 1,
+	)
 
 	legend_elements = Any[player1_path, player2_path]
-	legend_labels = ["Left gripper (P1)", "Right gripper (P2)"]
+	legend_labels = ["Left gripper (P1)", "Right gripper (P1)"]
 	if has_child
 		push!(legend_elements, player3_path)
-		push!(legend_labels, "Child/Pet (P3)")
+		push!(legend_labels, "Child (P2)")
 	end
 	append!(
 		legend_elements,
@@ -794,17 +884,18 @@ function _plot_single_integrator_3d_browser_trajectories(
 		legend_labels,
 		["Start 1", "Start 2", "Current 1", "Current 2", "Goal 1", "Goal 2"],
 	)
+	append!(legend_elements, Any[pot_start_marker, current_pot_marker, pot_goal_marker])
+	append!(legend_labels, ["Pot center initial", "Pot center current", "Pot center goal"])
 	if has_child
 		append!(legend_elements, Any[start3_marker, current3_marker])
-		append!(legend_labels, ["Child/Pet Start", "Child/Pet Current"])
+		append!(legend_labels, ["Child Start", "Child Current"])
 	end
 	if !isnothing(safety_handle)
 		push!(legend_elements, safety_handle)
 		push!(legend_labels, "Safety hemisphere")
 	end
-
 	makie.Legend(
-		figure[1, 2],
+		figure[1, 3],
 		legend_elements,
 		legend_labels;
 		framevisible = false,
@@ -815,7 +906,116 @@ function _plot_single_integrator_3d_browser_trajectories(
 	)
 	makie.center!(scene_axis.scene)
 
-	return figure, scene_axis
+	# ── Distance panel driven by the same time index as the 3D view ───────────
+	# Placed to the right of the trajectory so both are visible side-by-side.
+	# Mirrors the static inter_player_distance_plot: gripper separation against
+	# the handle reference distance, and pot-center-to-child distance against
+	# the safety radius. A slider-linked cursor and moving markers let the user
+	# inspect the distances at the currently selected time step.
+	horizon_steps = collect(0:time_horizon)
+	time_cursor = makie.lift(t -> [Float64(clamp(t, 0, time_horizon))], time_index)
+	distance_axis = makie.Axis(
+		figure[1, 2];
+		xlabel = "time step",
+		ylabel = "distance [m]",
+		xlabelsize = 18,
+		ylabelsize = 18,
+	)
+
+	gripper_distances = [
+		sqrt((x1[k] - x2[k])^2 + (y1[k] - y2[k])^2 + (z1[k] - z2[k])^2)
+		for k in 1:(time_horizon+1)
+	]
+	makie.lines!(
+		distance_axis,
+		horizon_steps,
+		gripper_distances;
+		color = :dodgerblue,
+		linewidth = 3,
+		label = "Gripper separation",
+	)
+	if !isnothing(reference_distance)
+		makie.hlines!(
+			distance_axis,
+			[reference_distance];
+			color = :black,
+			linestyle = :dash,
+			linewidth = 2,
+			label = "Handle distance [$(reference_distance) m]",
+		)
+	end
+
+	pot_child_distances = nothing
+	if has_child
+		pot_child_len = min(time_horizon + 1, length(x3))
+		pot_child_distances = [
+			sqrt(
+				(0.5 * (x1[k] + x2[k]) - x3[k])^2 +
+				(0.5 * (y1[k] + y2[k]) - y3[k])^2 +
+				(0.5 * (z1[k] + z2[k]) - z3[k])^2,
+			)
+			for k in 1:pot_child_len
+		]
+		makie.lines!(
+			distance_axis,
+			0:(pot_child_len-1),
+			pot_child_distances;
+			color = :darkorange,
+			linewidth = 3,
+			label = "Pot center–child distance",
+		)
+		if !isnothing(collision_avoidance)
+			makie.hlines!(
+				distance_axis,
+				[collision_avoidance];
+				color = :darkorange,
+				linestyle = :dot,
+				linewidth = 2,
+				label = "Safety distance [$(collision_avoidance) m]",
+			)
+		end
+	end
+
+	makie.vlines!(distance_axis, time_cursor; color = (:gray, 0.7), linewidth = 2)
+	current_marker_at_time(values) = makie.lift(
+		t -> [makie.Point2f(
+			clamp(t, 0, length(values) - 1),
+			values[clamp(t + 1, 1, length(values))],
+		)],
+		time_index,
+	)
+	makie.scatter!(
+		distance_axis,
+		current_marker_at_time(gripper_distances);
+		marker = :diamond,
+		markersize = 18,
+		color = :dodgerblue,
+		strokecolor = :black,
+		strokewidth = 1,
+	)
+	if !isnothing(pot_child_distances)
+		makie.scatter!(
+			distance_axis,
+			current_marker_at_time(pot_child_distances);
+			marker = :diamond,
+			markersize = 18,
+			color = :darkorange,
+			strokecolor = :black,
+			strokewidth = 1,
+		)
+	end
+	makie.axislegend(distance_axis; position = :rt, framevisible = false, labelsize = 13)
+	# Trajectory on the left stays dominant; the distance panel sits beside it
+	# and the legend takes the remaining right-hand column.
+	makie.colsize!(figure.layout, 1, makie.Relative(0.52))
+	makie.colsize!(figure.layout, 2, makie.Relative(0.30))
+
+	return figure, scene_axis, time_index, time_horizon
+end
+
+function _agent_position_at_time(makie, t, xs, ys, zs)
+	i = clamp(t + 1, 1, length(xs))
+	[makie.Point3f(xs[i], ys[i], zs[i])]
 end
 
 function plot_single_integrator_3d_trajectories(; kwargs...)
@@ -830,24 +1030,39 @@ end
 function plot_trajectory_3d_interactive(;
 	display_figure = true,
 	save_path = nothing,
-	figure_size = (1100, 850),
+	figure_size = (1600, 850),
 	exportable = true,
 	offline = true,
 	kwargs...,
 )
 	WGLMakie = _load_wglmakie()
+	Bonito = WGLMakie.Bonito
 	Base.invokelatest(WGLMakie.Page; exportable, offline)
 	Base.invokelatest(WGLMakie.activate!)
-	figure, ax = _plot_single_integrator_3d_browser_trajectories(
+	figure, ax, time_index, time_horizon = _plot_single_integrator_3d_browser_trajectories(
 		WGLMakie;
 		kwargs...,
 		figure_size,
 		legend_label_fontsize = 16,
 	)
+	app = Base.invokelatest(
+		_time_slider_app,
+		WGLMakie,
+		Bonito,
+		figure,
+		time_index,
+		time_horizon,
+	)
 	if !isnothing(save_path)
-		Base.invokelatest(WGLMakie.save, save_path, figure)
+		# Recording the slider states leaves the time observable at the final
+		# step, which matches the initial view — no reset needed.
+		_with_filesystem_retry(
+			() -> Base.invokelatest(Bonito.export_static, save_path, app);
+			description = "interactive trajectory export to $(save_path)",
+		)
 	end
-	display_figure && Base.invokelatest(display, figure)
+	display_figure &&
+		Base.invokelatest(display, Base.invokelatest(Bonito.BrowserDisplay), app)
 	return figure, ax
 end
 

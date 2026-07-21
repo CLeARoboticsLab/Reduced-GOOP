@@ -492,3 +492,66 @@ end
 	@test isapprox(reduced.primals, case.expected; atol = IP_ATOL, rtol = 0.0)
 	@test isapprox(reduced.primals, complete.primals; atol = IP_ATOL, rtol = 0.0)
 end
+
+@testset "FastDifferentiation Codegen Parity" begin
+	# The :fast_differentiation codegen path must produce the same KKT residual
+	# and Jacobian as the native Symbolics code generator: differentiation stays
+	# in Symbolics and only the compiled evaluators change. The hierarchy below
+	# includes an innermost prioritized inequality so the ifelse-based penalty
+	# terms (and their derivatives) are exercised through both generators.
+	num_players = 3
+	kind = :quadratic
+	primal_dims = fill(PRIMAL_DIM, num_players)
+	parameter_dims = fill(1, num_players)
+	x_template = BlockArray(zeros(sum(primal_dims)), primal_dims)
+	θ_template = BlockArray(zeros(sum(parameter_dims)), parameter_dims)
+	expected_blocks = [multiplayer_expected_block(player) for player in 1:num_players]
+	raw_targets = [multiplayer_raw_target(player) for player in 1:num_players]
+	coordinate_groups = preference_coordinate_groups(2)
+
+	preferences = [
+		Function[
+			objective_from_target(kind, player, coordinate_groups[1], raw_targets[player]),
+			objective_from_target(kind, player, coordinate_groups[2], raw_targets[player]),
+			multiplayer_constraint(kind, player, expected_blocks),
+		] for player in 1:num_players
+	]
+	problem = ReducedGOOP.ParametricGOOP(
+		x_template,
+		θ_template;
+		preferences,
+		is_prioritized_constraint = [[false, false, true] for _ in 1:num_players],
+		equality_constraints = fill(nothing, num_players),
+		inequality_constraints = fill(nothing, num_players),
+		shared_equality_constraint = nothing,
+		shared_inequality_constraint = nothing,
+	)
+
+	native = ReducedGOOP.generate_slacked_reduced_kkt_system(problem)
+	fdgen = ReducedGOOP.generate_slacked_reduced_kkt_system(
+		problem;
+		codegen = :fast_differentiation,
+	)
+
+	@test fdgen.kkt_dimension == native.kkt_dimension
+	@test fdgen.variable_dimension == native.variable_dimension
+
+	n = native.variable_dimension
+	m = sum(problem.parameter_dims)
+	for scale in (0.3, 1.7), (ϵ, η) in ((0.1, 1e-6), (0.01, 0.0))
+		z = scale .* sin.(1:n)
+		θ = scale .* cos.(1:m)
+
+		F_native = zeros(native.kkt_dimension)
+		F_fd = zeros(fdgen.kkt_dimension)
+		native.F!(F_native, z; θ, ϵ, η)
+		fdgen.F!(F_fd, z; θ, ϵ, η)
+		@test isapprox(F_native, F_fd; atol = 1e-12, rtol = 1e-12)
+
+		J_native = copy(native.∇F_z!.result_buffer)
+		J_fd = copy(fdgen.∇F_z!.result_buffer)
+		native.∇F_z!(J_native, z; θ, ϵ, η)
+		fdgen.∇F_z!(J_fd, z; θ, ϵ, η)
+		@test isapprox(J_native, J_fd; atol = 1e-12, rtol = 1e-12)
+	end
+end

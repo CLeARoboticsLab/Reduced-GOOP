@@ -18,6 +18,31 @@ function serif_figure(; kwargs...)
 	)
 end
 
+"""
+Run `f`, retrying on transient `SystemError`s such as the
+`close: Operation timed out` that iCloud-synced folders intermittently raise
+on freshly created files. Non-`SystemError`s and the final attempt rethrow.
+"""
+function _with_filesystem_retry(f; attempts = 3, description = "file write")
+	for attempt in 1:attempts
+		try
+			return f()
+		catch err
+			(err isa Base.SystemError && attempt < attempts) || rethrow()
+			@warn "$(description) hit a transient filesystem error; retrying" attempt exception = err
+			sleep(2.0^attempt)
+		end
+	end
+end
+
+"Save a Makie figure with retries on transient filesystem errors."
+function save_figure(path, figure)
+	_with_filesystem_retry(
+		() -> CairoMakie.save(path, figure);
+		description = "figure save to $(path)",
+	)
+end
+
 function draw_intersection_map!(ax; map_end, lane_width, offset = 0.2)
 	vertical_road_background = CairoMakie.Polygon(
 		CairoMakie.Point2f[
@@ -235,6 +260,341 @@ function plot_intersection_trajectories(;
 	return figure, ax
 end
 
+# ── Shared browser (WGLMakie/Bonito) helpers ────────────────────────────────────
+
+const WGLMAKIE_PKGID = Base.PkgId(Base.UUID("276b4fcb-3e11-5398-bf8b-a0c2d153d008"), "WGLMakie")
+
+function _load_wglmakie()
+	Base.require(WGLMAKIE_PKGID)
+end
+
+# Wraps the WGLMakie figure in a Bonito app with an HTML "Time" slider.
+# `Bonito.record_states` pre-records the scene updates for every slider value,
+# so the slider stays functional in the static HTML export (where no Julia
+# process is available); camera interaction is client-side and unaffected.
+function _time_slider_app(makie, Bonito, figure, time_index, time_horizon)
+	Bonito.App(; title = "GOOP interactive trajectory") do session
+		time_slider = Bonito.Slider(0:time_horizon; value = time_index[])
+		makie.on(time_slider.value) do t
+			time_index[] = t
+		end
+		time_readout = makie.map(t -> "t = $(t) / $(time_horizon)", time_slider.value)
+		slider_row = Bonito.DOM.div(
+			Bonito.DOM.span("Time"; style = "font-weight: 600; margin-right: 0.75em;"),
+			Bonito.DOM.div(time_slider; style = "flex: 1 1 auto; max-width: 640px;"),
+			Bonito.DOM.span(time_readout; style = "margin-left: 0.75em; min-width: 5em;");
+			style = "display: flex; align-items: center; justify-content: center; " *
+				"margin: 0.6em auto; width: 90%; font-family: Georgia, serif; " *
+				"font-size: 1.05rem;",
+		)
+		# Slider above the canvas so it stays visible regardless of figure height.
+		dom = Bonito.DOM.div(slider_row, figure)
+		return Bonito.record_states(session, dom)
+	end
+end
+
+function _plot_intersection_browser_trajectories(
+	makie;
+	map_end,
+	lane_width,
+	strategy,
+	θ1,
+	θ2,
+	goal_position1,
+	goal_position2,
+	speed_limit = nothing,
+	collision_avoidance = nothing,
+	figure_size = (1500, 850),
+	legend_label_fontsize = 16,
+)
+	if length(strategy) < 2
+		error("interactive intersection plot expects strategies for at least two players.")
+	end
+	xs1 = strategy[1].xs
+	xs2 = strategy[2].xs
+	if isempty(xs1) || isempty(xs2)
+		error("interactive intersection plot expects non-empty player trajectories.")
+	end
+
+	figure = serif_figure(size = figure_size)
+	# Same 2D look as the static intersection plot. Note: 2D Axis pan/zoom is
+	# processed by a live Julia process, so the static HTML export has a fixed
+	# view; the time slider works regardless via the pre-recorded states.
+	ax = makie.Axis(
+		figure[1:2, 1];
+		aspect = 1,
+		xgridvisible = false,
+		ygridvisible = false,
+		backgroundcolor = :white,
+	)
+	makie.hidedecorations!(ax)
+	makie.hidespines!(ax)
+
+	draw_intersection_map!(ax; map_end, lane_width)
+	# The 2D map relies on painter's order; in WebGL coplanar elements
+	# z-fight, so lift each map element slightly according to its draw order.
+	for (draw_order, map_plot) in enumerate(ax.scene.plots)
+		makie.translate!(map_plot, 0, 0, 0.002 * draw_order)
+	end
+	z_paths = 0.1
+	z_markers = 0.2
+
+	player1_trajectory = makie.scatterlines!(
+		ax,
+		[x[1] for x in xs1],
+		[x[2] for x in xs1];
+		color = :blue,
+		linewidth = 2,
+	)
+	player2_trajectory = makie.scatterlines!(
+		ax,
+		[x[1] for x in xs2],
+		[x[2] for x in xs2];
+		color = :red,
+		linewidth = 2,
+	)
+	makie.translate!(player1_trajectory, 0, 0, z_paths)
+	makie.translate!(player2_trajectory, 0, 0, z_paths)
+
+	time_horizon = min(length(xs1), length(xs2)) - 1
+	# Start at the final time step. Beyond matching the static plot's look,
+	# this is required for the HTML export: `Bonito.record_states` records the
+	# scene updates for slider values 0..T in order, and Makie's compute graph
+	# drops no-op updates — if the scene already sat at t = 0, the recorded
+	# entry for t = 0 would be empty and the exported slider could never
+	# return to the initial positions.
+	time_index = makie.Observable(time_horizon)
+	position_at_time(xs, t) = begin
+		x = xs[clamp(t + 1, 1, length(xs))]
+		[makie.Point2f(x[1], x[2])]
+	end
+	current1_position = makie.lift(t -> position_at_time(xs1, t), time_index)
+	current2_position = makie.lift(t -> position_at_time(xs2, t), time_index)
+	current1_marker = makie.scatter!(
+		ax,
+		current1_position;
+		marker = :diamond,
+		markersize = 24,
+		color = :blue,
+		strokecolor = :black,
+		strokewidth = 1,
+	)
+	current2_marker = makie.scatter!(
+		ax,
+		current2_position;
+		marker = :diamond,
+		markersize = 24,
+		color = :red,
+		strokecolor = :black,
+		strokewidth = 1,
+	)
+
+	start1_marker = makie.scatter!(
+		ax,
+		[makie.Point2f(θ1[1], θ1[2])];
+		markersize = 20,
+		color = :blue,
+	)
+	start2_marker = makie.scatter!(
+		ax,
+		[makie.Point2f(θ2[1], θ2[2])];
+		markersize = 20,
+		color = :red,
+	)
+	goal1_marker = makie.scatter!(
+		ax,
+		[makie.Point2f(goal_position1[1], goal_position1[2])];
+		markersize = 20,
+		marker = :star5,
+		color = :blue,
+	)
+	goal2_marker = makie.scatter!(
+		ax,
+		[makie.Point2f(goal_position2[1], goal_position2[2])];
+		markersize = 20,
+		marker = :star5,
+		color = :red,
+	)
+	for marker_plot in (
+		current1_marker,
+		current2_marker,
+		start1_marker,
+		start2_marker,
+		goal1_marker,
+		goal2_marker,
+	)
+		makie.translate!(marker_plot, 0, 0, z_markers)
+	end
+
+	makie.Legend(
+		figure[1:2, 2],
+		[
+			player1_trajectory,
+			player2_trajectory,
+			start1_marker,
+			start2_marker,
+			current1_marker,
+			current2_marker,
+			goal1_marker,
+			goal2_marker,
+		],
+		["Player 1", "Player 2", "Start 1", "Start 2", "Current 1", "Current 2", "Goal 1", "Goal 2"];
+		framevisible = false,
+		labelsize = legend_label_fontsize,
+		orientation = :vertical,
+		halign = :left,
+		valign = :top,
+	)
+
+	# ── Speed and distance panels driven by the same time index ──────────────
+	horizon_steps = collect(0:time_horizon)
+	time_cursor = makie.lift(t -> [Float64(t)], time_index)
+	axis_label_fontsize = 18
+
+	has_velocity = length(xs1[1]) >= 4 && length(xs2[1]) >= 4
+	if has_velocity
+		speeds = [
+			[sqrt(xs[k][3]^2 + xs[k][4]^2) for k in 1:(time_horizon+1)]
+			for xs in (xs1, xs2)
+		]
+		speed_ax = makie.Axis(
+			figure[1, 3];
+			xlabel = "",
+			ylabel = "speed [m/s]",
+			xlabelsize = axis_label_fontsize,
+			ylabelsize = axis_label_fontsize,
+		)
+		makie.lines!(
+			speed_ax,
+			horizon_steps,
+			speeds[1];
+			color = :blue,
+			linewidth = 3,
+			label = "Player 1",
+		)
+		makie.lines!(
+			speed_ax,
+			horizon_steps,
+			speeds[2];
+			color = :red,
+			linewidth = 3,
+			label = "Player 2",
+		)
+		if !isnothing(speed_limit)
+			makie.hlines!(
+				speed_ax,
+				[speed_limit];
+				color = :black,
+				linestyle = :dash,
+				linewidth = 2,
+				label = "Speed limit [$(speed_limit) m/s]",
+			)
+		end
+		makie.vlines!(speed_ax, time_cursor; color = (:gray, 0.7), linewidth = 2)
+		for (player_speeds, player_color) in zip(speeds, (:blue, :red))
+			current_speed = makie.lift(
+				t -> [makie.Point2f(t, player_speeds[clamp(t + 1, 1, length(player_speeds))])],
+				time_index,
+			)
+			makie.scatter!(
+				speed_ax,
+				current_speed;
+				marker = :diamond,
+				markersize = 18,
+				color = player_color,
+				strokecolor = :black,
+				strokewidth = 1,
+			)
+		end
+		makie.axislegend(speed_ax; position = :rb, framevisible = false, labelsize = 13)
+	end
+
+	distances = [
+		sqrt((xs1[k][1] - xs2[k][1])^2 + (xs1[k][2] - xs2[k][2])^2)
+		for k in 1:(time_horizon+1)
+	]
+	distance_ax = makie.Axis(
+		figure[2, 3];
+		xlabel = "time step",
+		ylabel = "inter-vehicle distance [m]",
+		xlabelsize = axis_label_fontsize,
+		ylabelsize = axis_label_fontsize,
+	)
+	makie.lines!(
+		distance_ax,
+		horizon_steps,
+		distances;
+		color = :dodgerblue,
+		linewidth = 3,
+		label = "Distance",
+	)
+	if !isnothing(collision_avoidance)
+		makie.hlines!(
+			distance_ax,
+			[collision_avoidance];
+			color = :black,
+			linestyle = :dash,
+			linewidth = 2,
+			label = "Collision avoidance [$(collision_avoidance) m]",
+		)
+	end
+	makie.vlines!(distance_ax, time_cursor; color = (:gray, 0.7), linewidth = 2)
+	current_distance = makie.lift(
+		t -> [makie.Point2f(t, distances[clamp(t + 1, 1, length(distances))])],
+		time_index,
+	)
+	makie.scatter!(
+		distance_ax,
+		current_distance;
+		marker = :diamond,
+		markersize = 18,
+		color = :dodgerblue,
+		strokecolor = :black,
+		strokewidth = 1,
+	)
+	makie.axislegend(distance_ax; position = :rt, framevisible = false, labelsize = 13)
+	has_velocity && makie.linkxaxes!(speed_ax, distance_ax)
+
+	return figure, ax, time_index, time_horizon
+end
+
+function plot_intersection_trajectories_interactive(;
+	display_figure = true,
+	save_path = nothing,
+	figure_size = (1500, 850),
+	exportable = true,
+	offline = true,
+	kwargs...,
+)
+	WGLMakie = _load_wglmakie()
+	Bonito = WGLMakie.Bonito
+	Base.invokelatest(WGLMakie.Page; exportable, offline)
+	Base.invokelatest(WGLMakie.activate!)
+	figure, ax, time_index, time_horizon = Base.invokelatest(
+		_plot_intersection_browser_trajectories,
+		WGLMakie;
+		kwargs...,
+		figure_size,
+	)
+	app = Base.invokelatest(
+		_time_slider_app,
+		WGLMakie,
+		Bonito,
+		figure,
+		time_index,
+		time_horizon,
+	)
+	if !isnothing(save_path)
+		_with_filesystem_retry(
+			() -> Base.invokelatest(Bonito.export_static, save_path, app);
+			description = "interactive trajectory export to $(save_path)",
+		)
+	end
+	display_figure &&
+		Base.invokelatest(display, Base.invokelatest(Bonito.BrowserDisplay), app)
+	return figure, ax
+end
+
 function dynamics_model_symbol(model)
 	model isa Symbol && return model
 	Symbol(nameof(typeof(model)))
@@ -261,11 +621,56 @@ function speed_limit_label(speed_limit, speed_limit_players)
 	"$(player_text) Speed Limit [$(speed_limit) m/s]"
 end
 
+function _additional_speed_limit_spec(spec, spec_idx)
+	default_colors = (:gray35, :gray55, :gray70)
+	default_linestyles = (:dot, :dashdot, :dashdotdot)
+	default_color = default_colors[mod1(spec_idx, length(default_colors))]
+	default_linestyle = default_linestyles[mod1(spec_idx, length(default_linestyles))]
+
+	if spec isa NamedTuple
+		limit = haskey(spec, :limit) ? spec.limit :
+			haskey(spec, :speed_limit) ? spec.speed_limit :
+			error("Additional speed limit specs require a `limit` or `speed_limit` field.")
+		players = haskey(spec, :players) ? spec.players :
+			haskey(spec, :speed_limit_players) ? spec.speed_limit_players :
+			nothing
+		color = haskey(spec, :color) ? spec.color : default_color
+		linestyle = haskey(spec, :linestyle) ? spec.linestyle : default_linestyle
+		return (; limit, players, color, linestyle)
+	elseif spec isa Pair
+		return (; limit = first(spec), players = last(spec), color = default_color, linestyle = default_linestyle)
+	elseif spec isa Tuple && length(spec) == 2
+		return (; limit = spec[1], players = spec[2], color = default_color, linestyle = default_linestyle)
+	end
+
+	error("Additional speed limit specs must be NamedTuples, Pairs, or `(limit, players)` tuples.")
+end
+
+function speed_limit_specs(speed_limit, speed_limit_players, additional_speed_limits)
+	specs = Any[]
+	if !isnothing(speed_limit)
+		push!(
+			specs,
+			(;
+				limit = speed_limit,
+				players = speed_limit_players,
+				color = :black,
+				linestyle = :dash,
+			),
+		)
+	end
+	for (spec_idx, spec) in enumerate(additional_speed_limits)
+		push!(specs, _additional_speed_limit_spec(spec, spec_idx))
+	end
+	specs
+end
+
 function speed_plot(;
 	strategy,
 	speed_limit = 1.5,
 	dynamics_model = PlanarDoubleIntegrator(),
 	speed_limit_players = nothing,
+	additional_speed_limits = (),
 )
 	if length(strategy) < 2
 		error("speed_plot expects strategies for at least two players.")
@@ -283,6 +688,7 @@ function speed_plot(;
 
 	horizon_steps = 0:(trajectory_len-1)
 	speed_limit_profile = fill(speed_limit, trajectory_len)
+	limit_specs = speed_limit_specs(speed_limit, speed_limit_players, additional_speed_limits)
 
 	figure = serif_figure(size = (1000, 650))
 	model = dynamics_model isa NamedTuple ? dynamics_model.model : dynamics_model
@@ -300,6 +706,16 @@ function speed_plot(;
 		speed_limit_profile = fill(speed_limit, speed_len)
 		speed_profiles = [
 			[first_three_norm(us_by_player[player][k], "Player $(player) control") for k in 1:speed_len]
+			for player in 1:num_players
+		]
+	elseif model_symbol in (:PlanarDoubleIntegrator, :planar_double_integrator)
+		# Vehicle speed ‖(vx, vy)‖ — the quantity bounded by the speed-limit
+		# preference (vx² + vy² ≤ speed_limit²).
+		speed_profiles = [
+			[
+				sqrt(xs_by_player[player][k][3]^2 + xs_by_player[player][k][4]^2)
+				for k in 1:trajectory_len
+			]
 			for player in 1:num_players
 		]
 	else
@@ -330,19 +746,25 @@ function speed_plot(;
 			push!(player_handles, player_handle)
 			push!(player_labels, "Player $(player)")
 		end
-		speed_limit_line = CairoMakie.lines!(
-			ax,
-			horizon_steps,
-			speed_limit_profile;
-			color = :black,
-			linestyle = :dash,
-			label = speed_limit_label(speed_limit, speed_limit_players),
-			linewidth = 2,
-		)
+		speed_limit_handles = Any[]
+		speed_limit_labels = String[]
+		for spec in limit_specs
+			speed_limit_line = CairoMakie.lines!(
+				ax,
+				horizon_steps,
+				fill(spec.limit, length(horizon_steps));
+				color = spec.color,
+				linestyle = spec.linestyle,
+				label = speed_limit_label(spec.limit, spec.players),
+				linewidth = 2,
+			)
+			push!(speed_limit_handles, speed_limit_line)
+			push!(speed_limit_labels, speed_limit_label(spec.limit, spec.players))
+		end
 		CairoMakie.Legend(
 			figure[1, 2],
-			vcat(player_handles, Any[speed_limit_line]),
-			vcat(player_labels, [speed_limit_label(speed_limit, speed_limit_players)]);
+			vcat(player_handles, speed_limit_handles),
+			vcat(player_labels, speed_limit_labels);
 			framevisible = false,
 			labelsize = legend_label_fontsize,
 			orientation = :vertical,
@@ -564,6 +986,7 @@ end
 function inter_player_distance_plot(;
 	strategy,
 	reference_distance = nothing,
+	safety_distance = nothing,
 )
 	if length(strategy) < 2
 		error("inter_player_distance_plot expects strategies for at least two players.")
@@ -588,6 +1011,20 @@ function inter_player_distance_plot(;
 		for k in 1:trajectory_len
 	]
 	vertical_differences = [abs(xs1[k][3] - xs2[k][3]) for k in 1:trajectory_len]
+
+	# Distance from the pot center c = (p₁ + p₂) / 2 to the child/pet (player 3),
+	# the quantity constrained by robot_child_safety_inequality.
+	pot_child_distances = nothing
+	if length(strategy) >= 3
+		xs3 = strategy[3].xs
+		pot_child_len = min(trajectory_len, length(xs3))
+		any(length(xs3[k]) < 3 for k in 1:pot_child_len) &&
+			error("inter_player_distance_plot expects at least 3D child states.")
+		pot_child_distances = [
+			sqrt(sum(abs2, 0.5 .* (xs1[k][1:3] .+ xs2[k][1:3]) .- xs3[k][1:3]))
+			for k in 1:pot_child_len
+		]
+	end
 
 	axis_label_fontsize = 24
 	tick_label_fontsize = 22
@@ -626,6 +1063,30 @@ function inter_player_distance_plot(;
 		)
 		push!(legend_elements, reference_handle)
 		push!(legend_labels, "Reference Distance [$(reference_distance) m]")
+	end
+	if !isnothing(pot_child_distances)
+		pot_child_handle = CairoMakie.scatterlines!(
+			distance_ax,
+			0:(length(pot_child_distances)-1),
+			pot_child_distances;
+			color = :darkorange,
+			linewidth = 3,
+			markersize = 7,
+		)
+		push!(legend_elements, pot_child_handle)
+		push!(legend_labels, "Pot Center–Child Distance")
+		if !isnothing(safety_distance)
+			safety_handle = CairoMakie.lines!(
+				distance_ax,
+				0:(length(pot_child_distances)-1),
+				fill(safety_distance, length(pot_child_distances));
+				color = :darkorange,
+				linestyle = :dot,
+				linewidth = 2,
+			)
+			push!(legend_elements, safety_handle)
+			push!(legend_labels, "Safety Distance [$(safety_distance) m]")
+		end
 	end
 
 	CairoMakie.Legend(
@@ -762,6 +1223,80 @@ function plot_eta_plot(;
 		eta_history = eta_history[1:total_iters]
 	end
 	CairoMakie.lines!(ax, iteration_axis, eta_history, color = :seagreen, linewidth = 4)
+
+	return figure, ax
+end
+
+function plot_alpha_plot(;
+	alpha_history,
+	total_iters = nothing,
+	show_ylabel = true,
+)
+	axis_label_fontsize = 30
+	tick_label_fontsize = 22
+	ylabel_text = show_ylabel ? L"$\alpha$" : ""
+	figure = serif_figure()
+	ax = CairoMakie.Axis(
+		figure[1, 1];
+		xlabel = "Newton iteration",
+		ylabel = ylabel_text,
+		xlabelsize = axis_label_fontsize,
+		ylabelsize = axis_label_fontsize,
+		xticklabelsize = tick_label_fontsize,
+		yticklabelsize = tick_label_fontsize,
+	)
+
+	iteration_axis = collect(1:length(alpha_history))
+	if !isnothing(total_iters) && total_iters > 0 && total_iters < length(iteration_axis)
+		iteration_axis = iteration_axis[1:total_iters]
+		alpha_history = alpha_history[1:total_iters]
+	end
+	CairoMakie.lines!(ax, iteration_axis, alpha_history, color = :dodgerblue, linewidth = 4)
+
+	return figure, ax
+end
+
+function plot_rho_plot(;
+	rho_history,
+	total_iters = nothing,
+	rho_threshold = 0.75,
+	clamp_limits = (-2.0, 2.0),
+	show_ylabel = true,
+)
+	axis_label_fontsize = 30
+	tick_label_fontsize = 22
+	ylabel_text = show_ylabel ? L"$\rho$ (clamped)" : ""
+	figure = serif_figure()
+	ax = CairoMakie.Axis(
+		figure[1, 1];
+		xlabel = "Newton iteration",
+		ylabel = ylabel_text,
+		xlabelsize = axis_label_fontsize,
+		ylabelsize = axis_label_fontsize,
+		xticklabelsize = tick_label_fontsize,
+		yticklabelsize = tick_label_fontsize,
+	)
+
+	iteration_axis = collect(1:length(rho_history))
+	if !isnothing(total_iters) && total_iters > 0 && total_iters < length(iteration_axis)
+		iteration_axis = iteration_axis[1:total_iters]
+		rho_history = rho_history[1:total_iters]
+	end
+	clamped_rho = [
+		isfinite(value) ? clamp(value, clamp_limits...) :
+		(isnan(value) ? NaN : clamp_limits[value > 0 ? 2 : 1])
+		for value in rho_history
+	]
+	CairoMakie.lines!(ax, iteration_axis, clamped_rho, color = :darkorange, linewidth = 4)
+	if !isnothing(rho_threshold)
+		CairoMakie.hlines!(
+			ax,
+			[rho_threshold];
+			color = :black,
+			linestyle = :dash,
+			linewidth = 2,
+		)
+	end
 
 	return figure, ax
 end
