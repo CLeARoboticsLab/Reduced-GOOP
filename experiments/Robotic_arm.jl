@@ -299,11 +299,11 @@ function get_setup(scenario_config::ScenarioConfig)
 		child_ground_speed_inequality,
 	]
 
-	# ── 1. GOOP formulation ──────────────────────────────────────────────────────────────────────────────
+# ── 1. GOOP formulation ──────────────────────────────────────────────────────────────────────────────
 	# Preference hierarchy: [lowest priority, ..., highest priority].
 	goop_preferences = [
 		[
-			# control_objective(; player = 1),
+			control_objective(; player = 1),
 			goal_objective,
 			load_balance_objective,
 			robot_inequality,
@@ -313,7 +313,7 @@ function get_setup(scenario_config::ScenarioConfig)
 			child_ground_speed_inequality
 		],
 	]
-	goop_is_prioritized_constraint = [[false, false, true], [false, true]]
+	goop_is_prioritized_constraint = [[false, false, false, true], [false, true]]
 
 	function build_goop_problem()
 		@timeit TO "ParametricGOOP construction" ReducedGOOP.ParametricGOOP(
