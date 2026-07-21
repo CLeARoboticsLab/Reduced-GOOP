@@ -7,6 +7,7 @@ end
 
 using CairoMakie: CairoMakie
 using JLD2, Random
+using LinearAlgebra: norm
 using Dates: Dates
 using Statistics: mean, median, std
 using ProgressMeter: ProgressMeter, @showprogress
@@ -23,6 +24,177 @@ else
     const RA = Robotic_arm
 end
 const TO = ReducedGOOP.TO
+
+const DUAL_WARMSTART_MODES = (
+    :primal_only,
+    :equality_duals,
+    :all_except_innermost_stationarity,
+    :full,
+) 
+
+"""Flat KKT coordinates used by the receding-horizon dual warm-start modes."""
+struct DualWarmstartLayout
+    equality_dual_indices::Vector{Int}
+    all_dual_indices::Vector{Int}
+    innermost_stationarity_dual_indices::Vector{Int}
+end
+
+_symbolic_block_name(sym) = first(split(string(sym), "["; limit = 2))
+
+function _symbolic_variable_groups(z_symbolic)
+    groups = Dict{String, Vector{Int}}()
+    for (index, sym) in enumerate(z_symbolic)
+        push!(get!(groups, _symbolic_block_name(sym), Int[]), index)
+    end
+    groups
+end
+
+_is_dual_block(name) = any(prefix -> startswith(name, prefix), ("λ", "γ", "ψ", "ϕ"))
+
+"""
+Build and validate the flat dual-coordinate map once for a generated reduced
+KKT system. A block `ψ_i_k` contains one primal-sized segment for every inner
+stationarity level `k+1:Kⁱ`; consequently its last segment targets the
+innermost stationarity equations at level `Kⁱ`.
+"""
+function build_dual_warmstart_layout(kkt_system, problem)
+    groups = _symbolic_variable_groups(kkt_system.z_symbolic)
+    equality_dual_indices = Int[]
+    innermost_stationarity_dual_indices = Int[]
+
+    for player in 1:problem.num_players
+        num_levels = length(problem.preferences[player])
+        primal_dimension = problem.primal_dims[player]
+        equality_dimension = problem.equality_dims[player]
+
+        if equality_dimension > 0
+            for level in 1:num_levels
+                block_name = "λ_$(player)_$(level)"
+                indices = get(groups, block_name, nothing)
+                isnothing(indices) && error("Missing expected KKT block $(block_name).")
+                length(indices) == equality_dimension || error(
+                    "KKT block $(block_name) has length $(length(indices)); " *
+                    "expected equality dimension $(equality_dimension).",
+                )
+                append!(equality_dual_indices, indices)
+            end
+        end
+
+        for level in 1:(num_levels-1)
+            block_name = "ψ_$(player)_$(level)"
+            indices = get(groups, block_name, nothing)
+            isnothing(indices) && error("Missing expected KKT block $(block_name).")
+            expected_length = (num_levels - level) * primal_dimension
+            length(indices) == expected_length || error(
+                "KKT block $(block_name) has length $(length(indices)); " *
+                "expected $(expected_length) for levels $((level+1):num_levels).",
+            )
+            append!(
+                innermost_stationarity_dual_indices,
+                @view(indices[(end-primal_dimension+1):end]),
+            )
+        end
+    end
+
+    dual_groups = values(filter(pair -> _is_dual_block(first(pair)), groups))
+    all_dual_indices = sort!(reduce(vcat, dual_groups; init = Int[]))
+    sort!(equality_dual_indices)
+    sort!(innermost_stationarity_dual_indices)
+
+    all(in(all_dual_indices), equality_dual_indices) ||
+        error("Equality-dual coordinates are not a subset of all dual coordinates.")
+    all(in(all_dual_indices), innermost_stationarity_dual_indices) ||
+        error("Innermost-stationarity coordinates are not a subset of all dual coordinates.")
+
+    DualWarmstartLayout(
+        equality_dual_indices,
+        all_dual_indices,
+        innermost_stationarity_dual_indices,
+    )
+end
+
+function selected_dual_indices(layout::DualWarmstartLayout, mode::Symbol)
+    mode in DUAL_WARMSTART_MODES || throw(
+        ArgumentError(
+            "Unknown dual_warmstart mode $(mode); expected one of " *
+            "$(join(DUAL_WARMSTART_MODES, ", ")).",
+        ),
+    )
+    mode === :equality_duals && return layout.equality_dual_indices
+    mode === :all_except_innermost_stationarity && return setdiff(
+        layout.all_dual_indices,
+        layout.innermost_stationarity_dual_indices,
+    )
+    mode === :full && return layout.all_dual_indices
+    Int[]
+end
+
+function dual_warmstart_diagnostics(
+    warmstart,
+    kkt_system,
+    layout::DualWarmstartLayout,
+    mode::Symbol,
+)
+    selected = selected_dual_indices(layout, mode)
+    equality = intersect(selected, layout.equality_dual_indices)
+    other = setdiff(selected, layout.equality_dual_indices)
+    full_length = length(warmstart) == kkt_system.variable_dimension
+    block_stats(indices) = if !full_length || isempty(indices)
+        (; max_abs = 0.0, norm = 0.0)
+    else
+        values = @view warmstart[indices]
+        (; max_abs = maximum(abs, values; init = 0.0), norm = norm(values))
+    end
+    (;
+        equality = block_stats(equality),
+        other = block_stats(other),
+    )
+end
+
+"""
+Assemble the next MPC warm start. Primals are shifted separately; selected
+duals retain their existing flat coordinates. All other variables use the same
+defaults as `ReducedGOOP.solve` (zero, with positive slacks/inequality duals).
+"""
+function build_receding_warmstart(
+    shifted_primal,
+    previous_z,
+    kkt_system,
+    layout::DualWarmstartLayout,
+    mode::Symbol,
+)
+    mode in DUAL_WARMSTART_MODES ||
+        throw(ArgumentError("Unknown dual_warmstart mode $(mode)."))
+    length(shifted_primal) == length(kkt_system.primal_dims) || throw(
+        DimensionMismatch(
+            "Shifted primal has length $(length(shifted_primal)); " *
+            "expected $(length(kkt_system.primal_dims)).",
+        ),
+    )
+    length(previous_z) == kkt_system.variable_dimension || throw(
+        DimensionMismatch(
+            "Previous KKT point has length $(length(previous_z)); " *
+            "expected $(kkt_system.variable_dimension).",
+        ),
+    )
+
+    mode === :primal_only && return copy(shifted_primal)
+    if mode === :full
+        warmstart = copy(previous_z)
+        warmstart[kkt_system.primal_dims] .= shifted_primal
+        return warmstart
+    end
+
+    T = promote_type(eltype(shifted_primal), eltype(previous_z))
+    warmstart = zeros(T, kkt_system.variable_dimension)
+    warmstart[kkt_system.preference_slack_dims] .= one(T)
+    warmstart[kkt_system.interior_point_slack_dims] .= one(T)
+    warmstart[kkt_system.inequality_constraint_dual_dims] .= one(T)
+    warmstart[kkt_system.primal_dims] .= shifted_primal
+    dual_indices = selected_dual_indices(layout, mode)
+    warmstart[dual_indices] .= previous_z[dual_indices]
+    warmstart
+end
 
 # ── Experiment entry point ─────────────────────────────────────────────────────
 
@@ -56,11 +228,13 @@ function demo(;
     # enormous RuntimeGeneratedFunction. Bounded chunks avoid pathological
     # first-call inference/lowering while preserving the same expressions.
     fd_codegen_chunk_size = 128,
-    # Carrying duals/slacks over from the shifted previous solution consistently
-    # hurts MPC convergence here (stale multipliers misalign with the shifted
-    # trajectory); primal-only warmstart with dual/slack reset converges in
-    # ~20-30 iterations per step.
-    full_warmstart = false,
+    # `:primal_only` resets every non-primal variable; `:equality_duals` carries
+    # λᵢₖ; `:all_except_innermost_stationarity` carries every dual except the ψ
+    # segments targeting preference level Kⁱ. `:full` retains the previous
+    # full-z behavior, including slacks. Only primals are horizon-shifted.
+    dual_warmstart = :primal_only,
+    # Compatibility alias for older invocations. Prefer `dual_warmstart`.
+    full_warmstart = nothing,
     reuse_factorization_iters = 0,
     # η_max = 1e6 lets a struggling step escalate the regularization into a
     # do-nothing limit cycle: LM steps scale like 1/η, so at η ~ 1e6 the solver
@@ -69,6 +243,13 @@ function demo(;
     # steps never use η above ~1e-4, so 1e2 is a generous ceiling that makes
     # genuinely stuck solves fail fast instead.
     η_max = 1e2,
+    # Growth used only after a singular KLU numeric factorization. Each retry
+    # rebuilds the failed factorization cache before applying this increase.
+    klu_singularity_eta_growth = 100.0,
+    # Optional same-warmstart probes for comparing singularity η-growth values
+    # without rebuilding the generated KKT system. Empty by default.
+    klu_singularity_probe_growths = Float64[],
+    klu_singularity_probe_steps = Int[],
     # Re-solve a failed step once from the default (cold) warmstart.
     rescue_failed_steps = true,
     # Armijo sufficient-decrease constant for the backtracking line search;
@@ -81,12 +262,32 @@ function demo(;
     # disables truncation. Digits ≥ 6 are far below tol = 0.01, so convergence
     # behavior is unaffected.
     truncate_carry_digits = nothing,
+    tol = 0.008,
+    save_outputs = true,
 )
     reset_timer!(TO)
     @timeit TO "experiment setup" Random.seed!(rng_seed)
 
+    if !isnothing(full_warmstart)
+        dual_warmstart === :primal_only || throw(
+            ArgumentError(
+                "Specify either dual_warmstart or the compatibility keyword " *
+                "full_warmstart, not both.",
+            ),
+        )
+        dual_warmstart = full_warmstart ? :full : :primal_only
+    end
+    dual_warmstart in DUAL_WARMSTART_MODES || throw(
+        ArgumentError(
+            "Unknown dual_warmstart mode $(dual_warmstart); expected one of " *
+            "$(join(DUAL_WARMSTART_MODES, ", ")).",
+        ),
+    )
+
     # ── Settings ───────────────────────────────────────────────────────────────
-    run_id = "Robotic_arm_receding_" * Dates.format(Dates.now(), "yyyy-mm-dd_HHMMSS")
+    run_id =
+        "Robotic_arm_receding_" * Dates.format(Dates.now(), "yyyy-mm-dd_HHMMSS") *
+        "_$(dual_warmstart)"
     solver = ReducedGOOP.InteriorPoint()
     linesearch = :backtracking
     ϵ₀ = 0.1 # placeholder in the robotic arm scenario (no inequality constraints here)
@@ -140,12 +341,21 @@ function demo(;
     )
     println("[Primal-Dual] KKT Dimension: ", GOOP_kkt_system.kkt_dimension)
     println("[Primal-Dual] variable Dimension: ", GOOP_kkt_system.variable_dimension)
+    dual_warmstart_layout =
+        build_dual_warmstart_layout(GOOP_kkt_system, problem)
+    selected_dual_count =
+        length(selected_dual_indices(dual_warmstart_layout, dual_warmstart))
+    println(
+        "dual warm-start mode: $(dual_warmstart) " *
+        "($(selected_dual_count)/$(length(dual_warmstart_layout.all_dual_indices)) " *
+        "dual coordinates carried)",
+    )
 
     # Same options as the open-loop demo, except record_condition_number stays a
     # kwarg (default false): it costs a dense SVD per Newton iteration, which is
     # prohibitive across an MPC loop.
     options = ReducedGOOP.InteriorPointOptions(;
-        tol = 0.008,
+        tol,
         η₀ = 1e-6,
         η_max,
         ϵ₀,
@@ -166,6 +376,7 @@ function demo(;
         tsvd_threshold = 0.0,
         use_marquardt_scaling = false,
         linear_solver,
+        klu_singularity_eta_growth,
         armijo_constant,
         reuse_factorization_iters,
         verbose,
@@ -177,8 +388,13 @@ function demo(;
     ]
 
     # ── Output directories ─────────────────────────────────────────────────────
-    dirs = @timeit TO "output directory setup" prepare_receding_output_dirs(run_id; debug)
-    visualization_config = RA.VisualizationConfig(; dirs, show_interactive_trajectory)
+    dirs = if save_outputs
+        @timeit TO "output directory setup" prepare_receding_output_dirs(run_id; debug)
+    else
+        nothing
+    end
+    visualization_config =
+        save_outputs ? RA.VisualizationConfig(; dirs, show_interactive_trajectory) : nothing
 
     # ── MPC state ──────────────────────────────────────────────────────────────
     current_state1 = copy(base_initial_state1)
@@ -214,7 +430,27 @@ function demo(;
     step_kkt_errors = Float64[]
     step_solve_times = Float64[]
     step_total_iters = Int[]
+    step_primary_statuses = Symbol[]
+    step_primary_kkt_errors = Float64[]
+    step_primary_iters = Int[]
+    step_rescue_statuses = Symbol[]
+    step_rescue_kkt_errors = Float64[]
+    step_rescue_iters = Int[]
+    step_attempt_iters = Int[]
+    step_klu_singular_retries = Int[]
+    step_svd_fallback_counts = Int[]
+    step_klu_singularity_diagnostics = Vector{NamedTuple}[]
+    step_warmstart_dual_diagnostics = NamedTuple[]
+    klu_singularity_probe_results = NamedTuple[]
     θ1_initial = θ2_initial = θ3_initial = nothing
+
+    replace_klu_growth(options, growth) = begin
+        names = fieldnames(typeof(options))
+        values = NamedTuple{names}(Tuple(getfield(options, name) for name in names))
+        ReducedGOOP.InteriorPointOptions(;
+            merge(values, (; klu_singularity_eta_growth = Float64(growth)))...,
+        )
+    end
 
     # ── MPC loop ───────────────────────────────────────────────────────────────
     for k in 1:num_mpc_steps
@@ -239,22 +475,60 @@ function demo(;
             θ1_initial, θ2_initial, θ3_initial = θ1, θ2, θ3
         end
 
+        warmstart_dual_diagnostics = dual_warmstart_diagnostics(
+            stage_warmstart,
+            GOOP_kkt_system,
+            dual_warmstart_layout,
+            dual_warmstart,
+        )
+        push!(step_warmstart_dual_diagnostics, warmstart_dual_diagnostics)
+
+        if k in klu_singularity_probe_steps
+            for growth in klu_singularity_probe_growths
+                probe_options = replace_klu_growth(options, growth)
+                probe_time = @elapsed probe_output = ReducedGOOP.solve(
+                    solver,
+                    GOOP_kkt_system,
+                    θ;
+                    z₀ = stage_warmstart,
+                    options = probe_options,
+                )
+                push!(
+                    klu_singularity_probe_results,
+                    (;
+                        step = k,
+                        growth = Float64(growth),
+                        status = probe_output.status,
+                        kkt_error = probe_output.kkt_error,
+                        total_iters = probe_output.total_iters,
+                        solve_time = probe_time,
+                        singular_retries = probe_output.klu_singular_retries,
+                        svd_fallbacks = probe_output.svd_fallback_count,
+                        singularity_diagnostics =
+                            probe_output.klu_singularity_diagnostics,
+                    ),
+                )
+            end
+        end
+
         # Plot the warm start used for this step's solve.
         # The interactive export of the previous step leaves WGLMakie active; static PDF saving needs the CairoMakie backend.
-        CairoMakie.activate!()
-        # A full-z warmstart carries duals and slacks; the visualization only
-        # understands the primal block.
-        stage_warmstart_primal =
-            length(stage_warmstart) == GOOP_kkt_system.variable_dimension ?
-            stage_warmstart[GOOP_kkt_system.primal_dims] : stage_warmstart
-        @timeit TO "warmstart visualization" RA.save_warmstart_visualizations(
-            stage_warmstart_primal;
-            filename_tag = "step_$(k)",
-            primal_dimensions,
-            instance_parameters,
-            scenario_config,
-            visualization_config,
-        )
+        if save_outputs
+            CairoMakie.activate!()
+            # A full-z warmstart carries duals and slacks; the visualization only
+            # understands the primal block.
+            stage_warmstart_primal =
+                length(stage_warmstart) == GOOP_kkt_system.variable_dimension ?
+                stage_warmstart[GOOP_kkt_system.primal_dims] : stage_warmstart
+            @timeit TO "warmstart visualization" RA.save_warmstart_visualizations(
+                stage_warmstart_primal;
+                filename_tag = "step_$(k)",
+                primal_dimensions,
+                instance_parameters,
+                scenario_config,
+                visualization_config,
+            )
+        end
 
         elapsed_time = @elapsed output = @timeit TO "solver invocation" ReducedGOOP.solve(
             solver,
@@ -263,6 +537,10 @@ function demo(;
             z₀ = stage_warmstart,
             options,
         )
+        primary_output = output
+        rescue_status = :not_run
+        rescue_kkt_error = NaN
+        rescue_iters = 0
         if output.status == :failed && rescue_failed_steps
             # The shifted warmstart occasionally lands in a bad basin (the solver
             # stalls with η pinned at η_max, or at a merit-function local minimum
@@ -284,6 +562,9 @@ function demo(;
                     z₀ = rescue_warmstart,
                     options,
                 )
+            rescue_status = rescue_output.status
+            rescue_kkt_error = rescue_output.kkt_error
+            rescue_iters = rescue_output.total_iters
             if rescue_output.status == :solved ||
                rescue_output.kkt_error < output.kkt_error
                 output = rescue_output
@@ -294,11 +575,28 @@ function demo(;
         push!(step_kkt_errors, output.kkt_error)
         push!(step_solve_times, elapsed_time)
         push!(step_total_iters, output.total_iters)
+        push!(step_primary_statuses, primary_output.status)
+        push!(step_primary_kkt_errors, primary_output.kkt_error)
+        push!(step_primary_iters, primary_output.total_iters)
+        push!(step_rescue_statuses, rescue_status)
+        push!(step_rescue_kkt_errors, rescue_kkt_error)
+        push!(step_rescue_iters, rescue_iters)
+        push!(step_attempt_iters, primary_output.total_iters + rescue_iters)
+        push!(step_klu_singular_retries, primary_output.klu_singular_retries)
+        push!(step_svd_fallback_counts, primary_output.svd_fallback_count)
+        push!(
+            step_klu_singularity_diagnostics,
+            primary_output.klu_singularity_diagnostics,
+        )
+        attempt_summary =
+            rescue_iters > 0 ?
+            ", primary_iters=$(primary_output.total_iters), rescue_iters=$(rescue_iters)" : ""
         println(
             "MPC step $(k)/$(num_mpc_steps): status=$(output.status), ",
             "iters=$(output.total_iters), ",
             "kkt_error=$(round(output.kkt_error; sigdigits = 4)), ",
             "time=$(round(elapsed_time; digits = 3)) sec",
+            attempt_summary,
         )
         if !converged
             println(
@@ -340,6 +638,7 @@ function demo(;
 
         solution_dict = Dict(
             "mpc_step" => k,
+            "dual_warmstart" => dual_warmstart,
             "strategies" => strategies,
             "z" => output.z,
             "x" => output.x,
@@ -349,6 +648,18 @@ function demo(;
             "ϵ" => output.ϵ,
             "status" => output.status,
             "total_iters" => output.total_iters,
+            "primary_status" => primary_output.status,
+            "primary_kkt_error" => primary_output.kkt_error,
+            "primary_iters" => primary_output.total_iters,
+            "rescue_status" => rescue_status,
+            "rescue_kkt_error" => rescue_kkt_error,
+            "rescue_iters" => rescue_iters,
+            "attempt_iters" => primary_output.total_iters + rescue_iters,
+            "klu_singular_retries" => primary_output.klu_singular_retries,
+            "svd_fallback_count" => primary_output.svd_fallback_count,
+            "klu_singularity_diagnostics" =>
+                primary_output.klu_singularity_diagnostics,
+            "warmstart_dual_diagnostics" => warmstart_dual_diagnostics,
             "kkt_error_history" => get(output, :kkt_error_history, Float64[]),
             "condition_number_history" =>
                 get(output, :condition_number_history, Float64[]),
@@ -359,48 +670,50 @@ function demo(;
             "child_speed_limit" => child_speed_limit,
         )
 
-        @timeit TO "solution output and plotting" begin
-            # The interactive export of the previous step leaves WGLMakie active;
-            # static PDF saving needs the CairoMakie backend.
-            CairoMakie.activate!()
-            status_suffix = converged ? "" : "_notconverged"
-            JLD2.save_object(
-                joinpath(
-                    dirs.solution_data_dir,
-                    "solution_dict_step_$(k)_eps$(ϵ₀)$(status_suffix).jld2",
-                ),
-                solution_dict,
-            )
-            RA.save_convergence_diagnostics(
-                solution_dict,
-                dirs.convergence_plots_dir,
-                k,
-                ϵ₀;
-                filename_suffix = status_suffix,
-            )
-            save_step_plots(
-                strategies,
-                k,
-                num_mpc_steps,
-                converged,
-                output.kkt_error,
-                dirs;
-                map_end,
-                lane_width,
-                θ1,
-                θ2,
-                θ3,
-                goal_position1,
-                goal_position2,
-                goal_position3,
-                collision_avoidance,
-                dₚ,
-                arm_speed_limit,
-                child_speed_limit,
-                control_bounds,
-                dynamics_model,
-                save_interactive = show_interactive_trajectory,
-            )
+        if save_outputs
+            @timeit TO "solution output and plotting" begin
+                # The interactive export of the previous step leaves WGLMakie active;
+                # static PDF saving needs the CairoMakie backend.
+                CairoMakie.activate!()
+                status_suffix = converged ? "" : "_notconverged"
+                JLD2.save_object(
+                    joinpath(
+                        dirs.solution_data_dir,
+                        "solution_dict_step_$(k)_eps$(ϵ₀)$(status_suffix).jld2",
+                    ),
+                    solution_dict,
+                )
+                RA.save_convergence_diagnostics(
+                    solution_dict,
+                    dirs.convergence_plots_dir,
+                    k,
+                    ϵ₀;
+                    filename_suffix = status_suffix,
+                )
+                save_step_plots(
+                    strategies,
+                    k,
+                    num_mpc_steps,
+                    converged,
+                    output.kkt_error,
+                    dirs;
+                    map_end,
+                    lane_width,
+                    θ1,
+                    θ2,
+                    θ3,
+                    goal_position1,
+                    goal_position2,
+                    goal_position3,
+                    collision_avoidance,
+                    dₚ,
+                    arm_speed_limit,
+                    child_speed_limit,
+                    control_bounds,
+                    dynamics_model,
+                    save_interactive = show_interactive_trajectory,
+                )
+            end
         end
 
         # Shifted previous solution warm-starts the next solve.
@@ -415,15 +728,13 @@ function demo(;
             [strategy.us for strategy in shifted_strategies],
         )
         stage_warmstart = _truncate_carry(
-            if full_warmstart
-                # Carry duals and slacks over unshifted from the previous solution;
-                # only the primal block is shifted by one stage.
-                splice = copy(output.z)
-                splice[GOOP_kkt_system.primal_dims] .= shifted_primal
-                splice
-            else
-                shifted_primal
-            end,
+            build_receding_warmstart(
+                shifted_primal,
+                output.z,
+                GOOP_kkt_system,
+                dual_warmstart_layout,
+                dual_warmstart,
+            ),
         )
     end
 
@@ -447,40 +758,56 @@ function demo(;
         )
     end
 
-    @timeit TO "closed-loop output and plotting" begin
-        JLD2.save_object(
-            joinpath(dirs.problem_data_dir, "closed_loop_trajectory.jld2"),
-            Dict(
-                "closed_loop_strategies" => closed_loop_strategies,
-                "closed_loop_xs" => closed_loop_xs,
-                "closed_loop_us" => closed_loop_us,
-                "step_statuses" => step_statuses,
-                "step_kkt_errors" => step_kkt_errors,
-                "step_solve_times" => step_solve_times,
-                "step_total_iters" => step_total_iters,
-            ),
-        )
-        save_closed_loop_plots(
-            closed_loop_strategies,
-            failed_steps,
-            num_mpc_steps,
-            dirs;
-            map_end,
-            lane_width,
-            θ1 = θ1_initial,
-            θ2 = θ2_initial,
-            θ3 = θ3_initial,
-            goal_position1,
-            goal_position2,
-            goal_position3,
-            collision_avoidance,
-            dₚ,
-            arm_speed_limit,
-            child_speed_limit,
-            control_bounds,
-            dynamics_model,
-            save_interactive = true,
-        )
+    if save_outputs
+        @timeit TO "closed-loop output and plotting" begin
+            JLD2.save_object(
+                joinpath(dirs.problem_data_dir, "closed_loop_trajectory.jld2"),
+                Dict(
+                    "closed_loop_strategies" => closed_loop_strategies,
+                    "closed_loop_xs" => closed_loop_xs,
+                    "closed_loop_us" => closed_loop_us,
+                    "step_statuses" => step_statuses,
+                    "step_kkt_errors" => step_kkt_errors,
+                    "step_solve_times" => step_solve_times,
+                    "step_total_iters" => step_total_iters,
+                    "step_primary_statuses" => step_primary_statuses,
+                    "step_primary_kkt_errors" => step_primary_kkt_errors,
+                    "step_primary_iters" => step_primary_iters,
+                    "step_rescue_statuses" => step_rescue_statuses,
+                    "step_rescue_kkt_errors" => step_rescue_kkt_errors,
+                    "step_rescue_iters" => step_rescue_iters,
+                    "step_attempt_iters" => step_attempt_iters,
+                    "step_klu_singular_retries" => step_klu_singular_retries,
+                    "step_svd_fallback_counts" => step_svd_fallback_counts,
+                    "step_klu_singularity_diagnostics" =>
+                        step_klu_singularity_diagnostics,
+                    "step_warmstart_dual_diagnostics" =>
+                        step_warmstart_dual_diagnostics,
+                    "dual_warmstart" => dual_warmstart,
+                ),
+            )
+            save_closed_loop_plots(
+                closed_loop_strategies,
+                failed_steps,
+                num_mpc_steps,
+                dirs;
+                map_end,
+                lane_width,
+                θ1 = θ1_initial,
+                θ2 = θ2_initial,
+                θ3 = θ3_initial,
+                goal_position1,
+                goal_position2,
+                goal_position3,
+                collision_avoidance,
+                dₚ,
+                arm_speed_limit,
+                child_speed_limit,
+                control_bounds,
+                dynamics_model,
+                save_interactive = true,
+            )
+        end
     end
 
     # ── Runtime report ─────────────────────────────────────────────────────────
@@ -491,57 +818,80 @@ function demo(;
             step_solve_times,
             step_statuses,
         )
-        save_solve_time_plots(step_solve_times, step_statuses, dirs.timing_plots_dir)
-        JLD2.save_object(
-            joinpath(dirs.problem_data_dir, "timing_summary.jld2"),
-            Dict(
-                "problem_setup_time_sec" => problem_setup_time_sec,
-                "kkt_build_time_sec" => kkt_build_time_sec,
-                "step_solve_times" => step_solve_times,
-                "step_statuses" => step_statuses,
-                "all_solve_stats" => stats.all_stats,
-                "warm_solve_stats" => stats.warm_stats,
-            ),
-        )
+        if save_outputs
+            save_solve_time_plots(step_solve_times, step_statuses, dirs.timing_plots_dir)
+            JLD2.save_object(
+                joinpath(dirs.problem_data_dir, "timing_summary.jld2"),
+                Dict(
+                    "problem_setup_time_sec" => problem_setup_time_sec,
+                    "kkt_build_time_sec" => kkt_build_time_sec,
+                    "step_solve_times" => step_solve_times,
+                    "step_statuses" => step_statuses,
+                    "all_solve_stats" => stats.all_stats,
+                    "warm_solve_stats" => stats.warm_stats,
+                ),
+            )
+        end
         stats
     end
 
-    @timeit TO "run metadata save" begin
-        JLD2.save_object(
-            joinpath(dirs.problem_data_dir, "run_metadata.jld2"),
-            Dict(
-                "run_id" => run_id,
-                "debug" => debug,
-                "run_dir" => dirs.run_dir,
-                "rng_seed" => rng_seed,
-                "dynamics_model" => RA.dynamics_model_name(dynamics_model),
-                "planning_horizon" => planning_horizon,
-                "num_mpc_steps" => num_mpc_steps,
-                "ϵ₀" => ϵ₀,
-                "max_inner_iters" => max_inner_iters,
-                "fd_codegen_chunk_size" => fd_codegen_chunk_size,
-                "arm_speed_limit" => arm_speed_limit,
-                "child_speed_limit" => child_speed_limit,
-                "collision_avoidance" => collision_avoidance,
-                "dₚ" => dₚ,
-                "initial_state1" => base_initial_state1,
-                "initial_state2" => base_initial_state2,
-                "initial_state3" => initial_state3,
-                "goal_position1" => goal_position1,
-                "goal_position2" => goal_position2,
-                "goal_position3" => goal_position3,
-                "step_statuses" => step_statuses,
-                "step_kkt_errors" => step_kkt_errors,
-                "step_solve_times" => step_solve_times,
-                "step_total_iters" => step_total_iters,
-                "problem_setup_time_sec" => problem_setup_time_sec,
-                "kkt_build_time_sec" => kkt_build_time_sec,
-                "total_solve_time_sec" => sum(step_solve_times),
-            ),
-        )
+    if save_outputs
+        @timeit TO "run metadata save" begin
+            JLD2.save_object(
+                joinpath(dirs.problem_data_dir, "run_metadata.jld2"),
+                Dict(
+                    "run_id" => run_id,
+                    "debug" => debug,
+                    "run_dir" => dirs.run_dir,
+                    "rng_seed" => rng_seed,
+                    "dual_warmstart" => dual_warmstart,
+                    "selected_dual_count" => selected_dual_count,
+                    "total_dual_count" => length(dual_warmstart_layout.all_dual_indices),
+                    "dynamics_model" => RA.dynamics_model_name(dynamics_model),
+                    "planning_horizon" => planning_horizon,
+                    "num_mpc_steps" => num_mpc_steps,
+                    "tol" => tol,
+                    "klu_singularity_eta_growth" => klu_singularity_eta_growth,
+                    "klu_singularity_probe_results" => klu_singularity_probe_results,
+                    "ϵ₀" => ϵ₀,
+                    "max_inner_iters" => max_inner_iters,
+                    "fd_codegen_chunk_size" => fd_codegen_chunk_size,
+                    "arm_speed_limit" => arm_speed_limit,
+                    "child_speed_limit" => child_speed_limit,
+                    "collision_avoidance" => collision_avoidance,
+                    "dₚ" => dₚ,
+                    "initial_state1" => base_initial_state1,
+                    "initial_state2" => base_initial_state2,
+                    "initial_state3" => initial_state3,
+                    "goal_position1" => goal_position1,
+                    "goal_position2" => goal_position2,
+                    "goal_position3" => goal_position3,
+                    "step_statuses" => step_statuses,
+                    "step_kkt_errors" => step_kkt_errors,
+                    "step_solve_times" => step_solve_times,
+                    "step_total_iters" => step_total_iters,
+                    "step_primary_statuses" => step_primary_statuses,
+                    "step_primary_kkt_errors" => step_primary_kkt_errors,
+                    "step_primary_iters" => step_primary_iters,
+                    "step_rescue_statuses" => step_rescue_statuses,
+                    "step_rescue_kkt_errors" => step_rescue_kkt_errors,
+                    "step_rescue_iters" => step_rescue_iters,
+                    "step_attempt_iters" => step_attempt_iters,
+                    "step_klu_singular_retries" => step_klu_singular_retries,
+                    "step_svd_fallback_counts" => step_svd_fallback_counts,
+                    "step_klu_singularity_diagnostics" =>
+                        step_klu_singularity_diagnostics,
+                    "step_warmstart_dual_diagnostics" =>
+                        step_warmstart_dual_diagnostics,
+                    "problem_setup_time_sec" => problem_setup_time_sec,
+                    "kkt_build_time_sec" => kkt_build_time_sec,
+                    "total_solve_time_sec" => sum(step_solve_times),
+                ),
+            )
+        end
     end
 
-    println("outputs saved under: ", dirs.run_dir)
+    save_outputs && println("outputs saved under: ", dirs.run_dir)
     println("\nTiming summary:")
     show(TO)
     println()
@@ -552,8 +902,22 @@ function demo(;
         step_kkt_errors,
         step_solve_times,
         step_total_iters,
+        step_primary_statuses,
+        step_primary_kkt_errors,
+        step_primary_iters,
+        step_rescue_statuses,
+        step_rescue_kkt_errors,
+        step_rescue_iters,
+        step_attempt_iters,
+        step_klu_singular_retries,
+        step_svd_fallback_counts,
+        step_klu_singularity_diagnostics,
+        step_warmstart_dual_diagnostics,
+        klu_singularity_probe_results,
+        dual_warmstart,
+        selected_dual_count,
         timing_stats,
-        run_dir = dirs.run_dir,
+        run_dir = isnothing(dirs) ? nothing : dirs.run_dir,
     )
 end
 

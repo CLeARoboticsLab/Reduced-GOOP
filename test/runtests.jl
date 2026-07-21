@@ -709,6 +709,42 @@ end
         end
     end
 
+    @testset "Singular numeric refactorization rebuilds its cache" begin
+        # Reproduce the cache state that matters here: a successful numeric
+        # factorization followed by a singular in-place `klu!` update. The
+        # retry must discard that failed numeric object, rebuild at escalated η,
+        # and avoid the dense-SVD fallback.
+        J = ReducedGOOP.SparseArrays.sparse([1], [1], [1.0], 1, 1)
+        cache = ReducedGOOP._build_augmented_kkt_cache(J, 1, 1)
+        ReducedGOOP._update_augmented_kkt!(cache, J, 1e-6)
+        δz = zeros(1)
+        F = ones(1)
+        ReducedGOOP._solve_augmented!(δz, cache, F)
+
+        # Make the next numeric update singular while retaining the same sparse
+        # pattern. The retry's η update restores a nonsingular diagonal system.
+        ReducedGOOP.SparseArrays.nonzeros(J) .= 0.0
+        ReducedGOOP.SparseArrays.nonzeros(cache.K) .= 0.0
+        singular_retries = Ref(0)
+        svd_fallbacks = Ref(0)
+        η_used = ReducedGOOP._klu_step_with_fallback!(
+            δz,
+            cache,
+            J,
+            F,
+            1e-6,
+            1e2,
+            false;
+            singular_retry_counter = singular_retries,
+            svd_fallback_counter = svd_fallbacks,
+        )
+
+        @test singular_retries[] == 1
+        @test svd_fallbacks[] == 0
+        @test η_used ≈ 1e-4
+        @test all(isfinite, δz)
+    end
+
     @testset "SVD-only features rejected on :klu" begin
         @test_throws ArgumentError ReducedGOOP.solve(
             ReducedGOOP.InteriorPoint(),

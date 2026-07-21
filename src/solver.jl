@@ -36,6 +36,8 @@ Base.@kwdef struct InteriorPointOptions
     warmstart_slack_floor::Float64 = 1e-4
     warmstart_dual_floor::Float64 = 1e-4
     warmstart_dual_cap::Float64 = 1e8
+    klu_singularity_eta_growth::Float64 = 100.0
+    klu_singularity_max_retries::Int = 3
     reuse_factorization_iters::Int = 0
     reuse_quality_threshold::Float64 = 0.9
     verbose::Bool
@@ -112,6 +114,12 @@ Keyword arguments:
 	- `warmstart_slack_floor`, `warmstart_dual_floor`, `warmstart_dual_cap`: positivity
 	  safeguards applied to slacks/inequality duals when `z₀` has full length
 	  (`variable_dimension`), which warmstarts duals and slacks in addition to primals.
+	- `klu_singularity_eta_growth::Float64 = 100.0`: factor applied to η after a
+	  singular KLU factorization. The failed numeric object is discarded before
+	  retrying. This is independent of `eta_retry_growth`, which handles an
+	  exhausted line search.
+	- `klu_singularity_max_retries::Int = 3`: maximum number of fresh KLU rebuilds
+	  at successively escalated η values before using the dense-SVD fallback.
 	- `reuse_factorization_iters::Int = 0`: with `:klu` + backtracking, reuse the
 	  Jacobian/factorization for up to this many consecutive iterations while the
 	  last step was full and reduced ‖F‖ below `reuse_quality_threshold` (modified
@@ -153,11 +161,19 @@ function solve(
     use_marquardt_scaling = options.use_marquardt_scaling
     linear_solver = options.linear_solver
     armijo_constant = options.armijo_constant
+    klu_singularity_eta_growth = options.klu_singularity_eta_growth
+    klu_singularity_max_retries = options.klu_singularity_max_retries
     reuse_factorization_iters = options.reuse_factorization_iters
     reuse_quality_threshold = options.reuse_quality_threshold
 
     linear_solver ∈ (:svd, :klu) || throw(
         ArgumentError("Unsupported linear_solver $(linear_solver). Use :svd or :klu."),
+    )
+    klu_singularity_eta_growth >= 1 || throw(
+        ArgumentError("klu_singularity_eta_growth must be at least 1."),
+    )
+    klu_singularity_max_retries >= 0 || throw(
+        ArgumentError("klu_singularity_max_retries must be nonnegative."),
     )
     use_klu = linear_solver === :klu
     if use_klu && (record_condition_number || tsvd_threshold > 0 || use_marquardt_scaling)
@@ -283,6 +299,9 @@ function solve(
         eta_history = Float64[]
         alpha_history = Float64[]
         rho_history = Float64[]
+        klu_singular_retries = Ref(0)
+        svd_fallback_count = Ref(0)
+        klu_singularity_diagnostics = NamedTuple[]
     end
     while outer_iters < max_outer_iters || iszero(total_iters)
         inner_iters = 1
@@ -319,6 +338,11 @@ function solve(
                                 η,
                                 η_max,
                                 verbose,
+                                eta_growth = klu_singularity_eta_growth,
+                                max_retries = klu_singularity_max_retries,
+                                singular_retry_counter = klu_singular_retries,
+                                svd_fallback_counter = svd_fallback_count,
+                                singularity_diagnostics = klu_singularity_diagnostics,
                             )
                     else
                         @timeit TO "KKT system assembly" _densify!(
@@ -507,6 +531,11 @@ function solve(
                                     η_max,
                                     verbose;
                                     refactor = needs_refactor,
+                                    eta_growth = klu_singularity_eta_growth,
+                                    max_retries = klu_singularity_max_retries,
+                                    singular_retry_counter = klu_singular_retries,
+                                    svd_fallback_counter = svd_fallback_count,
+                                    singularity_diagnostics = klu_singularity_diagnostics,
                                 )
                                 if η_used != η
                                     η = η_used
@@ -782,7 +811,21 @@ function solve(
     # outer_iters to 2 before the check.
     status = (kkt_error <= tol) ? :solved : :failed
 
-    result = (; status, z, x, s, σ, γ, kkt_error, ϵ, outer_iters, total_iters)
+    result = (;
+        status,
+        z,
+        x,
+        s,
+        σ,
+        γ,
+        kkt_error,
+        ϵ,
+        outer_iters,
+        total_iters,
+        klu_singular_retries = klu_singular_retries[],
+        svd_fallback_count = svd_fallback_count[],
+        klu_singularity_diagnostics,
+    )
     if record_convergence || record_condition_number
         return (;
             result...,
@@ -1024,10 +1067,11 @@ function _solve_augmented!(δz, cache::AugmentedKKTCache, F; refactor = true)
 end
 
 """
-KLU step with escalation: on a singular factorization, grow η (diagonal-only
-rewrite) and retry up to 3 times; if still singular, fall back to a dense SVD
-step for this iteration. Returns the η actually used, so the caller can keep
-its regularization bookkeeping consistent.
+KLU step with recovery and escalation: on a singular factorization, discard
+the failed numeric object, grow η, and rebuild so KLU can choose new numeric
+pivots. Falls back to a dense SVD only after trying the final escalated η.
+Returns the η actually used, so the caller can keep its regularization
+bookkeeping consistent.
 """
 function _klu_step_with_fallback!(
     δz,
@@ -1038,16 +1082,47 @@ function _klu_step_with_fallback!(
     η_max,
     verbose;
     refactor = true,
+    eta_growth = 100.0,
+    max_retries = 3,
+    singular_retry_counter = nothing,
+    svd_fallback_counter = nothing,
+    singularity_diagnostics = nothing,
 )
     η_used = η
     needs_refactor = refactor
-    for _ in 1:3
+    # Attempts include the original η plus `max_retries` successively escalated
+    # values. The previous fixed loop escalated after its last failure but never
+    # actually tried the final η before invoking dense SVD.
+    for attempt in 0:max_retries
+        had_numeric_factorization = !isnothing(cache.klu_fact[])
         try
             _solve_augmented!(δz, cache, F; refactor = needs_refactor)
             return η_used
         catch error
             error isa LinearAlgebra.SingularException || rethrow()
-            η_used = min(max(η_used, 1e-8) * 100, η_max)
+            !isnothing(singular_retry_counter) && (singular_retry_counter[] += 1)
+            if !isnothing(singularity_diagnostics)
+                jacobian_values = SparseArrays.nonzeros(∇F)
+                max_abs = maximum(abs, jacobian_values; init = 0.0)
+                min_abs_nonzero = minimum(
+                    (abs(value) for value in jacobian_values if !iszero(value));
+                    init = Inf,
+                )
+                push!(
+                    singularity_diagnostics,
+                    (;
+                        η = η_used,
+                        jacobian_max_abs = max_abs,
+                        jacobian_min_abs_nonzero = min_abs_nonzero,
+                        attempted_inplace_refactor = had_numeric_factorization,
+                    ),
+                )
+            end
+            # KLU's failed in-place numeric refactorization is not guaranteed to
+            # remain reusable. Force a fresh factorization on the next attempt.
+            cache.klu_fact[] = nothing
+            attempt == max_retries && break
+            η_used = min(max(η_used, 1e-8) * eta_growth, η_max)
             verbose && printstyled(
                 "KLU factorization singular. Retrying with η = $η_used.\n";
                 color = :yellow,
@@ -1058,6 +1133,7 @@ function _klu_step_with_fallback!(
     end
     verbose &&
         @warn "KLU factorization singular after η escalation; falling back to a dense SVD step for this iteration."
+    !isnothing(svd_fallback_counter) && (svd_fallback_counter[] += 1)
     _svd_fallback_step!(δz, ∇F, F, η_used)
     η_used
 end
