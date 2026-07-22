@@ -656,9 +656,6 @@ function demo(;
 				eta_retry_growth = 2.0,
 				ρ_low = 0.75,
 				ρ_high = 0.75,
-				perturbation_enabled = false,
-				stagnation_rtol = 1e-1,
-				perturbation_scale = 1e-6,
 				tsvd_threshold = 0.0, # 0.0: pure Tikhonov, > 0 and η = 0: pure TSVD
 				use_marquardt_scaling = false,
 				verbose,

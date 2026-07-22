@@ -1,5 +1,4 @@
 using Test
-using InvertedIndices: Not
 
 include(joinpath(@__DIR__, "..", "experiments", "Robotic_arm_receding.jl"))
 const RAR = Robotic_arm_receding
@@ -45,7 +44,6 @@ symbolic_block(name, count) = [Symbol("$(name)[$(i)]") for i in 1:count]
     @test length(layout.equality_dual_indices) == 8
     @test length(layout.all_dual_indices) == 23
     @test length(layout.innermost_stationarity_dual_indices) == 7
-    @test RAR.selected_dual_indices(layout, :full) == layout.all_dual_indices
 
     expected_innermost = sort!(vcat(
         groups["ψ_1_3"],
@@ -96,13 +94,4 @@ symbolic_block(name, count) = [Symbol("$(name)[$(i)]") for i in 1:count]
     @test without_innermost[selected] == previous_z[selected]
     @test all(iszero, without_innermost[layout.innermost_stationarity_dual_indices])
 
-    full = RAR.build_receding_warmstart(
-        shifted_primal,
-        previous_z,
-        kkt,
-        layout,
-        :full,
-    )
-    @test full[kkt.primal_dims] == shifted_primal
-    @test full[Not(kkt.primal_dims)] == previous_z[Not(kkt.primal_dims)]
 end

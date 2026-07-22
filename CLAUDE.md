@@ -37,34 +37,31 @@ The package models and solves **Games of Ordered Preference (GOOP)**: multi-play
 
 | File                 | Role                                                                                            |
 | -------------------- | ----------------------------------------------------------------------------------------------- |
-| `goop.jl`            | `ParametricGOOP` struct and all six KKT/MCP generator functions                                 |
+| `goop.jl`            | `ParametricGOOP` struct and the complete, reduced, and quasi KKT generators                     |
 | `goop_kkt_system.jl` | `GOOPKKTSystem` container; `BuildGOOPKKTSystem` compiles symbolic equations to sparse Jacobians |
-| `solver.jl`          | `InteriorPoint` (KKT path) and `PATHSolver` (MCP path) with their option structs                |
+| `solver.jl`          | `InteriorPoint` solver and its options                                                          |
 | `ReducedGOOP.jl`     | Module boundary: imports, includes, exports only                                                |
 
 ### Core data flow
 
 1. **Define** a `ParametricGOOP` (in `src/goop.jl`) — the central struct that holds player preferences, constraint flags, equality/inequality constraints (per-player and shared), and all dimension metadata.
-2. **Reformulate** via one of six generator functions into either a KKT system or an MCP system.
-3. **Solve** with `InteriorPoint` (KKT path) or `PATHSolver` (MCP path), both in `src/solver.jl`.
+2. **Reformulate** with the complete, reduced, or quasi generator into a KKT system.
+3. **Solve** with `InteriorPoint` in `src/solver.jl`.
 4. **Extract** the primal equilibrium strategies.
 
-### Two solver paths
+### Solver path
 
-| Path | Reformulation                        | Solver                                                                   | Key type        |
-| ---- | ------------------------------------ | ------------------------------------------------------------------------ | --------------- |
-| KKT  | `generate_slacked_*_kkt_system(...)` | `InteriorPoint` (Newton, fraction-to-boundary line search, outer ϵ loop) | `GOOPKKTSystem` |
-| MCP  | `generate_mcp_*_kkt_system(...)`     | `PATHSolver` via `ParametricMCPs.jl`                                     | `ParametricMCP` |
+| Reformulation                        | Solver                                                                   | Key type        |
+| ------------------------------------ | ------------------------------------------------------------------------ | --------------- |
+| `generate_slacked_*_kkt_system(...)` | `InteriorPoint` (Newton, fraction-to-boundary or backtracking line search, outer ϵ loop) | `GOOPKKTSystem` |
 
-### Three formulation variants (both paths)
+### Three formulation variants
 
 | Variant    | Description                                                                                                                                                 |
 | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `complete` | Explicit nested KKT — keeps inner-level stationarity, constraints, and decision variables fully expanded in outer levels                                    |
 | `reduced`  | Recursive compact encoding — lower-level stationarity is propagated through policy multipliers; smaller system                                              |
 | `quasi`    | Same as `reduced` with `drop_higher_order_terms = true`; implemented via `QuasiLagrangianTerm` objects that truncate derivative contributions above order 2 |
-
-For the MCP path, inequality constraints are encoded through MCP variable bounds instead of interior-point slack variables. The relaxation parameter `ϵ` is appended to the parameter vector.
 
 ### `GOOPKKTSystem` (`src/goop_kkt_system.jl`)
 

@@ -7,10 +7,8 @@ end
 
 using CairoMakie: CairoMakie
 using JLD2, Random
-using LinearAlgebra: norm
 using Dates: Dates
 using Statistics: mean, median, std
-using ProgressMeter: ProgressMeter, @showprogress
 using ReducedGOOP
 using TimerOutputs: @timeit, reset_timer!
 
@@ -29,8 +27,7 @@ const DUAL_WARMSTART_MODES = (
     :primal_only,
     :equality_duals,
     :all_except_innermost_stationarity,
-    :full,
-) 
+)
 
 """Flat KKT coordinates used by the receding-horizon dual warm-start modes."""
 struct DualWarmstartLayout
@@ -125,30 +122,7 @@ function selected_dual_indices(layout::DualWarmstartLayout, mode::Symbol)
         layout.all_dual_indices,
         layout.innermost_stationarity_dual_indices,
     )
-    mode === :full && return layout.all_dual_indices
     Int[]
-end
-
-function dual_warmstart_diagnostics(
-    warmstart,
-    kkt_system,
-    layout::DualWarmstartLayout,
-    mode::Symbol,
-)
-    selected = selected_dual_indices(layout, mode)
-    equality = intersect(selected, layout.equality_dual_indices)
-    other = setdiff(selected, layout.equality_dual_indices)
-    full_length = length(warmstart) == kkt_system.variable_dimension
-    block_stats(indices) = if !full_length || isempty(indices)
-        (; max_abs = 0.0, norm = 0.0)
-    else
-        values = @view warmstart[indices]
-        (; max_abs = maximum(abs, values; init = 0.0), norm = norm(values))
-    end
-    (;
-        equality = block_stats(equality),
-        other = block_stats(other),
-    )
 end
 
 """
@@ -179,11 +153,6 @@ function build_receding_warmstart(
     )
 
     mode === :primal_only && return copy(shifted_primal)
-    if mode === :full
-        warmstart = copy(previous_z)
-        warmstart[kkt_system.primal_dims] .= shifted_primal
-        return warmstart
-    end
 
     T = promote_type(eltype(shifted_primal), eltype(previous_z))
     warmstart = zeros(T, kkt_system.variable_dimension)
@@ -230,11 +199,8 @@ function demo(;
     fd_codegen_chunk_size = 128,
     # `:primal_only` resets every non-primal variable; `:equality_duals` carries
     # λᵢₖ; `:all_except_innermost_stationarity` carries every dual except the ψ
-    # segments targeting preference level Kⁱ. `:full` retains the previous
-    # full-z behavior, including slacks. Only primals are horizon-shifted.
+    # segments targeting preference level Kⁱ. Only primals are horizon-shifted.
     dual_warmstart = :primal_only,
-    # Compatibility alias for older invocations. Prefer `dual_warmstart`.
-    full_warmstart = nothing,
     reuse_factorization_iters = 0,
     # η_max = 1e6 lets a struggling step escalate the regularization into a
     # do-nothing limit cycle: LM steps scale like 1/η, so at η ~ 1e6 the solver
@@ -246,37 +212,17 @@ function demo(;
     # Growth used only after a singular KLU numeric factorization. Each retry
     # rebuilds the failed factorization cache before applying this increase.
     klu_singularity_eta_growth = 100.0,
-    # Optional same-warmstart probes for comparing singularity η-growth values
-    # without rebuilding the generated KKT system. Empty by default.
-    klu_singularity_probe_growths = Float64[],
-    klu_singularity_probe_steps = Int[],
     # Re-solve a failed step once from the default (cold) warmstart.
     rescue_failed_steps = true,
     # Armijo sufficient-decrease constant for the backtracking line search;
     # 0.0 recovers the pre-Armijo accept-any-decrease behavior.
     armijo_constant = 1e-4,
-    # When set (e.g. 8), round the warmstart AND the closed-loop states carried
-    # into the next MPC step to this many decimal digits. Quantizes away any
-    # bit-level noise before it can cascade through the (chaotic) Newton path,
-    # making runs comparable step-by-step even across environments. `nothing`
-    # disables truncation. Digits ≥ 6 are far below tol = 0.01, so convergence
-    # behavior is unaffected.
-    truncate_carry_digits = nothing,
     tol = 0.008,
     save_outputs = true,
 )
     reset_timer!(TO)
     @timeit TO "experiment setup" Random.seed!(rng_seed)
 
-    if !isnothing(full_warmstart)
-        dual_warmstart === :primal_only || throw(
-            ArgumentError(
-                "Specify either dual_warmstart or the compatibility keyword " *
-                "full_warmstart, not both.",
-            ),
-        )
-        dual_warmstart = full_warmstart ? :full : :primal_only
-    end
     dual_warmstart in DUAL_WARMSTART_MODES || throw(
         ArgumentError(
             "Unknown dual_warmstart mode $(dual_warmstart); expected one of " *
@@ -370,9 +316,6 @@ function demo(;
         eta_retry_growth = 2.0,
         ρ_low = 0.75,
         ρ_high = 0.75,
-        perturbation_enabled = false,
-        stagnation_rtol = 1e-1,
-        perturbation_scale = 1e-6,
         tsvd_threshold = 0.0,
         use_marquardt_scaling = false,
         linear_solver,
@@ -414,9 +357,7 @@ function demo(;
             instance_states,
             scenario_config,
         )
-    _truncate_carry(v) =
-        isnothing(truncate_carry_digits) ? v : round.(v; digits = truncate_carry_digits)
-    stage_warmstart = _truncate_carry(warmstart_solution)
+    stage_warmstart = warmstart_solution
     initial_controls = RA.extract_initial_controls(
         stage_warmstart,
         primal_dimensions,
@@ -439,18 +380,7 @@ function demo(;
     step_attempt_iters = Int[]
     step_klu_singular_retries = Int[]
     step_svd_fallback_counts = Int[]
-    step_klu_singularity_diagnostics = Vector{NamedTuple}[]
-    step_warmstart_dual_diagnostics = NamedTuple[]
-    klu_singularity_probe_results = NamedTuple[]
     θ1_initial = θ2_initial = θ3_initial = nothing
-
-    replace_klu_growth(options, growth) = begin
-        names = fieldnames(typeof(options))
-        values = NamedTuple{names}(Tuple(getfield(options, name) for name in names))
-        ReducedGOOP.InteriorPointOptions(;
-            merge(values, (; klu_singularity_eta_growth = Float64(growth)))...,
-        )
-    end
 
     # ── MPC loop ───────────────────────────────────────────────────────────────
     for k in 1:num_mpc_steps
@@ -473,42 +403,6 @@ function demo(;
         (; θ1, θ2, θ3, θ) = instance_parameters
         if k == 1
             θ1_initial, θ2_initial, θ3_initial = θ1, θ2, θ3
-        end
-
-        warmstart_dual_diagnostics = dual_warmstart_diagnostics(
-            stage_warmstart,
-            GOOP_kkt_system,
-            dual_warmstart_layout,
-            dual_warmstart,
-        )
-        push!(step_warmstart_dual_diagnostics, warmstart_dual_diagnostics)
-
-        if k in klu_singularity_probe_steps
-            for growth in klu_singularity_probe_growths
-                probe_options = replace_klu_growth(options, growth)
-                probe_time = @elapsed probe_output = ReducedGOOP.solve(
-                    solver,
-                    GOOP_kkt_system,
-                    θ;
-                    z₀ = stage_warmstart,
-                    options = probe_options,
-                )
-                push!(
-                    klu_singularity_probe_results,
-                    (;
-                        step = k,
-                        growth = Float64(growth),
-                        status = probe_output.status,
-                        kkt_error = probe_output.kkt_error,
-                        total_iters = probe_output.total_iters,
-                        solve_time = probe_time,
-                        singular_retries = probe_output.klu_singular_retries,
-                        svd_fallbacks = probe_output.svd_fallback_count,
-                        singularity_diagnostics =
-                            probe_output.klu_singularity_diagnostics,
-                    ),
-                )
-            end
         end
 
         # Plot the warm start used for this step's solve.
@@ -541,6 +435,8 @@ function demo(;
         rescue_status = :not_run
         rescue_kkt_error = NaN
         rescue_iters = 0
+        rescue_klu_singular_retries = 0
+        rescue_svd_fallback_count = 0
         if output.status == :failed && rescue_failed_steps
             # The shifted warmstart occasionally lands in a bad basin (the solver
             # stalls with η pinned at η_max, or at a merit-function local minimum
@@ -551,9 +447,8 @@ function demo(;
                 "(kkt_error=$(round(output.kkt_error; sigdigits = 3))); ",
                 "retrying from the default warmstart.",
             )
-            rescue_warmstart = _truncate_carry(
-                RA.build_default_warmstart(instance_states, scenario_config).warmstart_solution,
-            )
+            rescue_warmstart =
+                RA.build_default_warmstart(instance_states, scenario_config).warmstart_solution
             elapsed_time += @elapsed rescue_output =
                 @timeit TO "solver invocation (rescue)" ReducedGOOP.solve(
                     solver,
@@ -565,6 +460,8 @@ function demo(;
             rescue_status = rescue_output.status
             rescue_kkt_error = rescue_output.kkt_error
             rescue_iters = rescue_output.total_iters
+            rescue_klu_singular_retries = rescue_output.klu_singular_retries
+            rescue_svd_fallback_count = rescue_output.svd_fallback_count
             if rescue_output.status == :solved ||
                rescue_output.kkt_error < output.kkt_error
                 output = rescue_output
@@ -582,11 +479,13 @@ function demo(;
         push!(step_rescue_kkt_errors, rescue_kkt_error)
         push!(step_rescue_iters, rescue_iters)
         push!(step_attempt_iters, primary_output.total_iters + rescue_iters)
-        push!(step_klu_singular_retries, primary_output.klu_singular_retries)
-        push!(step_svd_fallback_counts, primary_output.svd_fallback_count)
         push!(
-            step_klu_singularity_diagnostics,
-            primary_output.klu_singularity_diagnostics,
+            step_klu_singular_retries,
+            primary_output.klu_singular_retries + rescue_klu_singular_retries,
+        )
+        push!(
+            step_svd_fallback_counts,
+            primary_output.svd_fallback_count + rescue_svd_fallback_count,
         )
         attempt_summary =
             rescue_iters > 0 ?
@@ -618,60 +517,54 @@ function demo(;
             push!(closed_loop_xs[player], collect(strategies[player].xs[2]))
         end
         combined_arm_state = closed_loop_xs[1][end]
-        current_state1 = _truncate_carry(combined_arm_state[1:arm_state_dimension])
+        current_state1 = combined_arm_state[1:arm_state_dimension]
         current_state2 =
-            _truncate_carry(
-                combined_arm_state[(arm_state_dimension + 1):(2 * arm_state_dimension)],
-            )
-        current_state_child = _truncate_carry(closed_loop_xs[2][end])
+            combined_arm_state[(arm_state_dimension + 1):(2 * arm_state_dimension)]
+        current_state_child = closed_loop_xs[2][end]
         # The shifted warm start begins at the old second knot, so carry those
         # controls into θ as the next solve's fixed initial controls.
         combined_arm_control = strategies[1].us[2]
-        current_control1 =
-            _truncate_carry(combined_arm_control[1:arm_control_dimension])
-        current_control2 = _truncate_carry(
+        current_control1 = combined_arm_control[1:arm_control_dimension]
+        current_control2 =
             combined_arm_control[
                 (arm_control_dimension+1):(2*arm_control_dimension)
-            ],
-        )
-        current_control_child = _truncate_carry(strategies[2].us[2])
-
-        solution_dict = Dict(
-            "mpc_step" => k,
-            "dual_warmstart" => dual_warmstart,
-            "strategies" => strategies,
-            "z" => output.z,
-            "x" => output.x,
-            "warmstart" => stage_warmstart,
-            "solve_time_sec" => elapsed_time,
-            "kkt_error" => output.kkt_error,
-            "ϵ" => output.ϵ,
-            "status" => output.status,
-            "total_iters" => output.total_iters,
-            "primary_status" => primary_output.status,
-            "primary_kkt_error" => primary_output.kkt_error,
-            "primary_iters" => primary_output.total_iters,
-            "rescue_status" => rescue_status,
-            "rescue_kkt_error" => rescue_kkt_error,
-            "rescue_iters" => rescue_iters,
-            "attempt_iters" => primary_output.total_iters + rescue_iters,
-            "klu_singular_retries" => primary_output.klu_singular_retries,
-            "svd_fallback_count" => primary_output.svd_fallback_count,
-            "klu_singularity_diagnostics" =>
-                primary_output.klu_singularity_diagnostics,
-            "warmstart_dual_diagnostics" => warmstart_dual_diagnostics,
-            "kkt_error_history" => get(output, :kkt_error_history, Float64[]),
-            "condition_number_history" =>
-                get(output, :condition_number_history, Float64[]),
-            "eta_history" => get(output, :eta_history, Float64[]),
-            "alpha_history" => get(output, :alpha_history, Float64[]),
-            "rho_history" => get(output, :rho_history, Float64[]),
-            "arm_speed_limit" => arm_speed_limit,
-            "child_speed_limit" => child_speed_limit,
-        )
+            ]
+        current_control_child = strategies[2].us[2]
 
         if save_outputs
             @timeit TO "solution output and plotting" begin
+                solution_dict = Dict(
+                    "mpc_step" => k,
+                    "dual_warmstart" => dual_warmstart,
+                    "strategies" => strategies,
+                    "z" => output.z,
+                    "x" => output.x,
+                    "warmstart" => stage_warmstart,
+                    "solve_time_sec" => elapsed_time,
+                    "kkt_error" => output.kkt_error,
+                    "ϵ" => output.ϵ,
+                    "status" => output.status,
+                    "total_iters" => output.total_iters,
+                    "primary_status" => primary_output.status,
+                    "primary_kkt_error" => primary_output.kkt_error,
+                    "primary_iters" => primary_output.total_iters,
+                    "rescue_status" => rescue_status,
+                    "rescue_kkt_error" => rescue_kkt_error,
+                    "rescue_iters" => rescue_iters,
+                    "attempt_iters" => primary_output.total_iters + rescue_iters,
+                    "klu_singular_retries" =>
+                        primary_output.klu_singular_retries + rescue_klu_singular_retries,
+                    "svd_fallback_count" =>
+                        primary_output.svd_fallback_count + rescue_svd_fallback_count,
+                    "kkt_error_history" => get(output, :kkt_error_history, Float64[]),
+                    "condition_number_history" =>
+                        get(output, :condition_number_history, Float64[]),
+                    "eta_history" => get(output, :eta_history, Float64[]),
+                    "alpha_history" => get(output, :alpha_history, Float64[]),
+                    "rho_history" => get(output, :rho_history, Float64[]),
+                    "arm_speed_limit" => arm_speed_limit,
+                    "child_speed_limit" => child_speed_limit,
+                )
                 # The interactive export of the previous step leaves WGLMakie active;
                 # static PDF saving needs the CairoMakie backend.
                 CairoMakie.activate!()
@@ -727,14 +620,12 @@ function demo(;
             [strategy.xs for strategy in shifted_strategies],
             [strategy.us for strategy in shifted_strategies],
         )
-        stage_warmstart = _truncate_carry(
-            build_receding_warmstart(
-                shifted_primal,
-                output.z,
-                GOOP_kkt_system,
-                dual_warmstart_layout,
-                dual_warmstart,
-            ),
+        stage_warmstart = build_receding_warmstart(
+            shifted_primal,
+            output.z,
+            GOOP_kkt_system,
+            dual_warmstart_layout,
+            dual_warmstart,
         )
     end
 
@@ -779,10 +670,6 @@ function demo(;
                     "step_attempt_iters" => step_attempt_iters,
                     "step_klu_singular_retries" => step_klu_singular_retries,
                     "step_svd_fallback_counts" => step_svd_fallback_counts,
-                    "step_klu_singularity_diagnostics" =>
-                        step_klu_singularity_diagnostics,
-                    "step_warmstart_dual_diagnostics" =>
-                        step_warmstart_dual_diagnostics,
                     "dual_warmstart" => dual_warmstart,
                 ),
             )
@@ -852,7 +739,6 @@ function demo(;
                     "num_mpc_steps" => num_mpc_steps,
                     "tol" => tol,
                     "klu_singularity_eta_growth" => klu_singularity_eta_growth,
-                    "klu_singularity_probe_results" => klu_singularity_probe_results,
                     "ϵ₀" => ϵ₀,
                     "max_inner_iters" => max_inner_iters,
                     "fd_codegen_chunk_size" => fd_codegen_chunk_size,
@@ -879,10 +765,6 @@ function demo(;
                     "step_attempt_iters" => step_attempt_iters,
                     "step_klu_singular_retries" => step_klu_singular_retries,
                     "step_svd_fallback_counts" => step_svd_fallback_counts,
-                    "step_klu_singularity_diagnostics" =>
-                        step_klu_singularity_diagnostics,
-                    "step_warmstart_dual_diagnostics" =>
-                        step_warmstart_dual_diagnostics,
                     "problem_setup_time_sec" => problem_setup_time_sec,
                     "kkt_build_time_sec" => kkt_build_time_sec,
                     "total_solve_time_sec" => sum(step_solve_times),
@@ -911,9 +793,6 @@ function demo(;
         step_attempt_iters,
         step_klu_singular_retries,
         step_svd_fallback_counts,
-        step_klu_singularity_diagnostics,
-        step_warmstart_dual_diagnostics,
-        klu_singularity_probe_results,
         dual_warmstart,
         selected_dual_count,
         timing_stats,

@@ -1146,15 +1146,6 @@ function generate_slacked_complete_kkt_system(
 	)
 end
 
-"""[PATH Solver] Build the reduced KKT system as a `ParametricMCP`.
-	- Shared constraints are not modeled separately; they are embedded in each player's constraints.
-	- No interior-point slack variables ('σ') are introduced for inequality constraints.
-	- The relaxation parameter `ϵ` is stored in `θ[end]`.
-	- Relaxed complementarity is represented by the inequality `γ .* g - ϵ ≤ 0`.
-	- Stores inequality duals in `y` instead of `z`
-	- Preference constraints are stored explicitly by player and level, then flattened locally when needed.
-"""
-
 # Helper functions
 make_blocks(vec, b) = (@assert length(vec) % b == 0; BlockArray(vec, fill(b, length(vec) ÷ b)))
 

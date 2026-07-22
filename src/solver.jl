@@ -2,7 +2,6 @@ using LinearAlgebra
 
 abstract type SolverType end
 struct InteriorPoint <: SolverType end
-struct PATHSolver <: SolverType end
 
 Base.@kwdef struct InteriorPointOptions
     tol::Float64
@@ -22,13 +21,6 @@ Base.@kwdef struct InteriorPointOptions
     η_max::Float64 = 1e-1
     ρ_low::Float64 = 0.75
     ρ_high::Float64 = 0.75
-    eta_increase_factor::Float64 = 2.0
-    eta_decrease_factor::Float64 = 0.5
-    perturbation_enabled::Bool = false
-    stagnation_iters::Int = 50
-    stagnation_rtol::Float64 = 1e-3
-    perturbation_scale::Float64 = 1e-4
-    max_perturbations::Int = 20
     tsvd_threshold::Float64 = 0.0
     use_marquardt_scaling::Bool = false
     linear_solver::Symbol = :svd
@@ -40,26 +32,6 @@ Base.@kwdef struct InteriorPointOptions
     klu_singularity_max_retries::Int = 3
     reuse_factorization_iters::Int = 0
     reuse_quality_threshold::Float64 = 0.9
-    verbose::Bool
-end
-
-Base.@kwdef struct PATHOptions
-    convergence_tolerance::Float64
-    ϵ₀::Union{Float64,Symbol}
-    cumulative_iteration_limit::Int
-    proximal_perturbation::Float64
-    major_iteration_limit::Int
-    minor_iteration_limit::Int
-    nms_initial_reference_factor::Int
-    nms_maximum_watchdogs::Int
-    nms_memory_size::Int
-    nms_mstep_frequency::Int
-    lemke_start_type::String
-    lemke_rank_deficiency_iterations::Int
-    restart_limit::Int
-    gradient_step_limit::Int
-    use_basics::Bool
-    use_start::Bool
     verbose::Bool
 end
 
@@ -82,31 +54,15 @@ Positional arguments:
 	- `θ::AbstractVector{<:Real}`: the parameter vector.
 
 Keyword arguments:
-	- `x₀::AbstractVector{<:Real}`: the initial primal variable.
-	- `y₀::AbstractVector{<:Real}`: the initial dual variable.
-	- `s₀::AbstractVector{<:Real}`: the initial slack variable.
-	- `ϵ₀::Real`: the initial relaxation scale.
-	- `tol::Real = 1e-4`: the tolerance for the KKT error.
-	- `max_inner_iters::Int = 20`: the maximum number of inner iterations.
-	- `max_outer_iters::Int = 50`: the maximum number of outer iterations.
-	- `tightening_rate::Real = 0.1`: the rate at which to tighten the tolerance.
-	- `loosening_rate::Real = 0.5`: the rate at which to loosen the tolerance.
-	- `min_stepsize::Real = 1e-2`: the minimum step size for the linesearch.
-	- `linesearch::Symbol = :backtracking`: linesearch mode (`:backtracking` or `:fraction_to_boundary`).
-	- `verbose::Bool = false`: whether to print debug information.
-	- `record_convergence::Bool = false`: if true, record and return `kkt_error_history` and `eta_history`.
-	- `record_condition_number::Bool = false`: if true, record and return `condition_number_history`.
-	- `perturbation_enabled::Bool = false`: if true, perturb `x` after repeated KKT residual stagnation.
-	- `stagnation_iters::Int = 5`: accepted iterations without relative KKT improvement before perturbing.
-	- `stagnation_rtol::Real = 1e-3`: relative KKT improvement threshold used to reset the stagnation counter.
-	- `perturbation_scale::Real = 1e-4`: fixed standard deviation for random perturbations.
-	- `max_perturbations::Int = 2`: maximum number of perturbation attempts per solve.
-	- `measure_solve_time::Bool = false`: if true, returns solve time measured with `@btime` (warmup run excludes compile) and includes `solve_time_sec`/`solve_time_ns` fields.
-	- `benchmark_samples::Int = 1`: number of @btime samples when `measure_solve_time = true`.
-	- `benchmark_evals::Int = 1`: number of evals per sample when `measure_solve_time = true`.
+	- `z₀`: optional primal-only or full-length warm start.
+	- `options::InteriorPointOptions`: solver and diagnostic settings.
+
+Selected `InteriorPointOptions` fields:
+	- `record_convergence`: record KKT-error, η, step-size, and gain-ratio histories.
+	- `record_condition_number`: record dense-SVD condition-number history.
 	- `linear_solver::Symbol = :svd`: `:svd` (dense SVD with Tikhonov filter) or `:klu`
-	  (sparse KLU on the augmented system `[I J; Jᵀ -ηI]`, same step direction, one
-	  symbolic analysis then numeric-only refactorizations). `:klu` does not support
+	  (sparse KLU on the balanced augmented system `[√ηI J; Jᵀ -√ηI]`, with one
+	  symbolic analysis followed by numeric refactorizations). `:klu` does not support
 	  `record_condition_number`, `tsvd_threshold > 0`, or `use_marquardt_scaling`.
 	- `armijo_constant::Float64 = 1e-4`: sufficient-decrease constant `c` of the
 	  backtracking Armijo condition on φ(z) = ‖F‖²/2; `0.0` recovers the plain
@@ -150,13 +106,6 @@ function solve(
     η_max = options.η_max
     ρ_low = options.ρ_low
     ρ_high = options.ρ_high
-    eta_increase_factor = options.eta_increase_factor
-    eta_decrease_factor = options.eta_decrease_factor
-    perturbation_enabled = options.perturbation_enabled
-    stagnation_iters = options.stagnation_iters
-    stagnation_rtol = options.stagnation_rtol
-    perturbation_scale = options.perturbation_scale
-    max_perturbations = options.max_perturbations
     tsvd_threshold = options.tsvd_threshold
     use_marquardt_scaling = options.use_marquardt_scaling
     linear_solver = options.linear_solver
@@ -290,9 +239,6 @@ function solve(
         inner_iters = 1
         outer_iters = 1
         kkt_error = Inf
-        best_kkt_error = Inf
-        iters_since_improvement = 0
-        num_perturbations = 0
         is_fraction_to_boundary_linesearch = (linesearch == :fraction_to_boundary)
         kkt_error_history = Float64[]
         condition_number_history = Float64[]
@@ -301,7 +247,6 @@ function solve(
         rho_history = Float64[]
         klu_singular_retries = Ref(0)
         svd_fallback_count = Ref(0)
-        klu_singularity_diagnostics = NamedTuple[]
     end
     while outer_iters < max_outer_iters || iszero(total_iters)
         inner_iters = 1
@@ -342,7 +287,6 @@ function solve(
                                 max_retries = klu_singularity_max_retries,
                                 singular_retry_counter = klu_singular_retries,
                                 svd_fallback_counter = svd_fallback_count,
-                                singularity_diagnostics = klu_singularity_diagnostics,
                             )
                     else
                         @timeit TO "KKT system assembly" _densify!(
@@ -535,7 +479,6 @@ function solve(
                                     max_retries = klu_singularity_max_retries,
                                     singular_retry_counter = klu_singular_retries,
                                     svd_fallback_counter = svd_fallback_count,
-                                    singularity_diagnostics = klu_singularity_diagnostics,
                                 )
                                 if η_used != η
                                     η = η_used
@@ -681,13 +624,13 @@ function solve(
                             full_step_taken = α ≥ 0.99
                             if ρ ≤ ρ_low || !full_step_taken
                                 verbose && printstyled(
-                                    "Poor gain ratio or backtracked step (ρ = $ρ, α = $α)... Increasing η. ($η -> $(min(η * eta_increase_factor, η_max)))\n";
+                                    "Poor gain ratio or backtracked step (ρ = $ρ, α = $α)... Increasing η. ($η -> $(min(η * (1 + exp(-loosening_rate)), η_max)))\n";
                                     color = :red,
                                 )
                                 η = min(η * (1 + exp(-loosening_rate)), η_max) # 1 < (1 + e⁻ʳ) ≤ 2
                             elseif ρ > ρ_high
                                 verbose && printstyled(
-                                    "Good gain ratio on full step (ρ = $ρ)... Decreasing η. ($η -> $(max(η * eta_decrease_factor, η_min)))\n";
+                                    "Good gain ratio on full step (ρ = $ρ)... Decreasing η. ($η -> $(max(η * (1 - exp(-tightening_rate)), η_min)))\n";
                                     color = :blue,
                                 )
                                 η = max(η * (1 - exp(-tightening_rate)), η_min) # 0 ≤ (1 - e⁻ʳ) < 1
@@ -720,57 +663,6 @@ function solve(
                     @. γ += α_γ * δγ
 
                     kkt_error = norm(F, 2)
-                    if kkt_error < best_kkt_error * (1 - stagnation_rtol)
-                        best_kkt_error = kkt_error
-                        iters_since_improvement = 0
-                    else
-                        iters_since_improvement += 1
-                        verbose && println(
-                            "No significant improvement in KKT error for $iters_since_improvement iterations (best_kkt_error = $best_kkt_error, current kkt_error = $kkt_error).",
-                        )
-                    end
-                end
-
-                if perturbation_enabled &&
-                   kkt_error > tol &&
-                   iters_since_improvement >= stagnation_iters &&
-                   #    num_perturbations < max_perturbations &&
-                   kkt_error < 1.0
-                    @timeit TO "perturbation" begin
-                        verbose && println(
-                            "Stagnation detected: perturbing x to escape local minimum (num_perturbations = $num_perturbations).",
-                        )
-
-                        z_trial .= z
-                        z_trial[x_dims] .+= perturbation_scale .* randn(length(x))
-                        @timeit TO "residual evaluation" mcp.F!(
-                            F_trial,
-                            z_trial;
-                            θ,
-                            ϵ,
-                            η = 0.0,
-                        )
-                        trial_kkt_error = norm(F_trial, 2)
-                        num_perturbations += 1
-
-                        if isfinite(trial_kkt_error) &&
-                           all(isfinite, F_trial) &&
-                           trial_kkt_error <= 1.05 * kkt_error
-                            z .= z_trial
-                            F .= F_trial
-                            kkt_error = trial_kkt_error
-                            best_kkt_error = min(best_kkt_error, kkt_error)
-                            iters_since_improvement = 0
-                            verbose && printstyled(
-                                "...Applied perturbation to x; KKT error = $kkt_error\n",
-                                color = :green,
-                            )
-                        else
-                            verbose && println(
-                                "...Rejected perturbation; trial KKT error = $trial_kkt_error",
-                            )
-                        end
-                    end
                 end
 
                 @timeit TO "iterate update and bookkeeping" begin
@@ -824,7 +716,6 @@ function solve(
         total_iters,
         klu_singular_retries = klu_singular_retries[],
         svd_fallback_count = svd_fallback_count[],
-        klu_singularity_diagnostics,
     )
     if record_convergence || record_condition_number
         return (;
@@ -1086,7 +977,6 @@ function _klu_step_with_fallback!(
     max_retries = 3,
     singular_retry_counter = nothing,
     svd_fallback_counter = nothing,
-    singularity_diagnostics = nothing,
 )
     η_used = η
     needs_refactor = refactor
@@ -1094,30 +984,12 @@ function _klu_step_with_fallback!(
     # values. The previous fixed loop escalated after its last failure but never
     # actually tried the final η before invoking dense SVD.
     for attempt in 0:max_retries
-        had_numeric_factorization = !isnothing(cache.klu_fact[])
         try
             _solve_augmented!(δz, cache, F; refactor = needs_refactor)
             return η_used
         catch error
             error isa LinearAlgebra.SingularException || rethrow()
             !isnothing(singular_retry_counter) && (singular_retry_counter[] += 1)
-            if !isnothing(singularity_diagnostics)
-                jacobian_values = SparseArrays.nonzeros(∇F)
-                max_abs = maximum(abs, jacobian_values; init = 0.0)
-                min_abs_nonzero = minimum(
-                    (abs(value) for value in jacobian_values if !iszero(value));
-                    init = Inf,
-                )
-                push!(
-                    singularity_diagnostics,
-                    (;
-                        η = η_used,
-                        jacobian_max_abs = max_abs,
-                        jacobian_min_abs_nonzero = min_abs_nonzero,
-                        attempted_inplace_refactor = had_numeric_factorization,
-                    ),
-                )
-            end
             # KLU's failed in-place numeric refactorization is not guaranteed to
             # remain reusable. Force a fresh factorization on the next attempt.
             cache.klu_fact[] = nothing
