@@ -51,6 +51,7 @@ Base.@kwdef struct ScenarioConfig{DM,D,CB}
 	obstacle_position::Vector{Float64} = [0.25, 0.15, 0.0]
 	use_scalarized_baseline::Bool = false
 	use_social_equilibrium_baseline::Bool = false
+	use_world_frame::Bool = false
 end
 
 """Output locations and display/file-format choices for experiment plots."""
@@ -457,8 +458,6 @@ function demo_scenario_config(;
 	map_end = 10,
 	lane_width = 2,
 	planning_horizon = 6,
-	plot = false,
-	save = false,
 	use_scalarized_baseline = false,
 	use_social_equilibrium_baseline = false,
 	# ── Real-world simulation kwargs (pass from Python after grip) ──────────
@@ -483,27 +482,6 @@ function demo_scenario_config(;
 	arm_speed_limit      = use_world_frame ? 0.5  : 5.0   # m/s (world) or abstract
 	child_speed_limit    = use_world_frame ? 0.3  : 3.0   # m/s (world) or abstract
 	dₚ                   = 2.0
-
-
-	# ── Solver schedule ────────────────────────────────────────────────────────
-	epsilon_schedule         = [0.1]
-	max_inner_iters_schedule = fill(1000, length(epsilon_schedule))
-
-
-	# ── Cache paths ───────────────────────────────────────────────────────────
-	# Use separate cache files for world-frame vs abstract-coordinate modes so the
-	# two parameter sets (different dₚ, speed_limit, etc.) don't share a KKT cache.
-	root_path           = joinpath(@__DIR__, "data", run_id)
-	cache_suffix        = use_world_frame ? "_world" : ""
-	kkt_cache_file      = joinpath(root_path, "cache_kkt_system$(cache_suffix).jld2")
-	solution_cache_file = joinpath(root_path, "cache_solution$(cache_suffix).jld2")
-
-	# Disable plotting, saving, and interactive trajectory if cache exists
-	if isfile(kkt_cache_file)
-		plot = false
-		save = false
-		show_interactive_trajectory = false
-	end
 
 	# ── Scenario ───────────────────────────────────────────────────────────────
 	# Single Integrator 3D: state = [px, py, pz]
@@ -570,19 +548,28 @@ function demo_scenario_config(;
 		obstacle_position,
 		use_scalarized_baseline,
 		use_social_equilibrium_baseline,
+		use_world_frame,
 	)
 end
 
 function demo(;
 	map_end = 10,
 	lane_width = 2,
+	planning_horizon = 6,
 	verbose = false,
 	rng_seed = 123,
 	random_initial_state = false,
 	debug = false,
+	plot = false,
+	save = false,
 	use_scalarized_baseline = false,
 	use_social_equilibrium_baseline = false,
 	show_interactive_trajectory = false,
+	# ── Real-world simulation kwargs (forwarded to demo_scenario_config) ──────
+	sim_eef0 = nothing,
+	sim_eef1 = nothing,
+	sim_eef2 = nothing,
+	sim_lift_height = 0.35,
 )
 	reset_timer!(TO)
 	@timeit TO "experiment setup" Random.seed!(rng_seed)
@@ -615,8 +602,13 @@ function demo(;
 	scenario_config = demo_scenario_config(;
 		map_end,
 		lane_width,
+		planning_horizon,
 		use_scalarized_baseline,
 		use_social_equilibrium_baseline,
+		sim_eef0,
+		sim_eef1,
+		sim_eef2,
+		sim_lift_height,
 	)
 	(;
 		dynamics_model,
@@ -633,8 +625,16 @@ function demo(;
 		collision_avoidance,
 		child_initial_buffer,
 		dₚ,
+		use_world_frame,
 	) = scenario_config
 	state_dimension = scenario_config.position_dimension
+
+	# ── Cache paths ───────────────────────────────────────────────────────────
+	root_path           = joinpath(@__DIR__, "data", run_id)
+	mkpath(root_path)
+	cache_suffix        = use_world_frame ? "_world" : ""
+	kkt_cache_file      = joinpath(root_path, "cache_kkt_system$(cache_suffix).jld2")
+	solution_cache_file = joinpath(root_path, "cache_solution$(cache_suffix).jld2")
 
 	(; problem, flatten_parameters) = @timeit TO "problem setup" get_setup(scenario_config)
 	# This example currently supports only the interior-point solver.
@@ -660,7 +660,25 @@ function demo(;
 	GOOP_kkt_system = @timeit TO "KKT construction" begin
 		if isfile(kkt_cache_file)
 			@info "Loading cached KKT system from $(kkt_cache_file)"
-			JLD2.load_object(kkt_cache_file)
+			cached = JLD2.load_object(kkt_cache_file)
+			# RuntimeGeneratedFunctions are session-local: their bodies are
+			# registered in an in-process lookup table that is lost when Julia
+			# restarts, so a cached GOOPKKTSystem loaded from a previous session
+			# will throw KeyError on first call. Probe F! here; KeyError means
+			# the cache is stale and we must rebuild.
+			stale = try
+				_probe = zeros(cached.kkt_dimension)
+				cached.F!(_probe, zeros(cached.variable_dimension); θ = Float64[], ϵ = 0.1, η = 0.0)
+				false
+			catch e
+				e isa KeyError
+			end
+			if stale
+				@warn "Cached KKT system has stale compiled functions (previous Julia session). Rebuilding in current session (JLD2 cannot serialize RuntimeGeneratedFunctions across sessions)."
+				GOOP_kkt_generator(problem)
+			else
+				cached
+			end
 		elseif problem isa ReducedGOOP.GOOPKKTSystem
 			problem
 		else
@@ -831,10 +849,6 @@ function demo(;
 		(; θ1, θ2, θ3, θ) = instance_parameters
 
 		(; warmstart_solution) = @timeit TO "warmstart construction" if compute_warmstart
-			# World-frame hint: lift straight up. Abstract: move in −y and +z.
-			robot_control_hint = use_world_frame ?
-				[0.0, 0.0, sim_lift_height / (Δt * (planning_horizon - 1))] :
-				[0.0, -1.0, 1.0]
 			build_default_warmstart(
 				instance_states,
 				scenario_config,
@@ -865,7 +879,7 @@ function demo(;
 				if loaded_from_cache
 					@info "Loading cached solution from $(solution_cache_file)"
 					cached_dict = JLD2.load_object(solution_cache_file)
-					cached_strategies = extract_player_strategies(cached_dict["x"], num_players, primal_dimension, dynamics)
+					cached_strategies = extract_player_strategies(cached_dict["x"], primal_dimensions, dynamics)
 					(; strategies = cached_strategies, solution_dict = cached_dict)
 				else
 					r = solve_game_instance(θ; z₀ = stage_warmstart, ϵ₀, max_inner_iters)
@@ -1140,107 +1154,6 @@ function save_warmstart_visualizations(
 		),
 		warmstart_distance_fig,
 	)
-end
-
-"""Save the standard static plots and optional interactive trajectory for one solution."""
-function save_solution_visualizations(
-	strategies,
-	instance_idx,
-	ϵ₀;
-	instance_parameters::InstanceParameters,
-	scenario_config::ScenarioConfig,
-	visualization_config::VisualizationConfig,
-)
-	(; θ1, θ2, θ3) = instance_parameters
-	(;
-		dynamics_model,
-		control_bounds,
-		map_end,
-		lane_width,
-		goal_position1,
-		goal_position2,
-		goal_position3,
-		collision_avoidance,
-		dₚ,
-		arm_speed_limit,
-		child_speed_limit,
-	) = scenario_config
-	(;
-		trajectory_plots_dir,
-		speed_plots_dir,
-		control_plots_dir,
-		distance_plots_dir,
-	) = visualization_config.dirs
-	static_extension = visualization_config.static_extension
-	interactive_extension = visualization_config.interactive_extension
-
-	# Plots keep the per-arm view of the combined two-arm agent.
-	plot_strategies = split_arm_strategies(strategies)
-	trajectory_fig, _ = plot_single_integrator_3d_trajectories(;
-		map_end,
-		lane_width,
-		strategy = plot_strategies,
-		θ1,
-		θ2,
-		θ3,
-		goal_position1,
-		goal_position2,
-		goal_position3,
-		collision_avoidance,
-	)
-	speed_fig, _ = speed_plot(;
-		strategy = plot_strategies,
-		speed_limit = arm_speed_limit,
-		dynamics_model,
-		speed_limit_players = 1:2,
-		additional_speed_limits = [(; limit = child_speed_limit, players = 3)],
-	)
-	control_fig, _ = control_plot(;
-		strategy = plot_strategies,
-		control_lb = control_bounds.lb,
-		control_ub = control_bounds.ub,
-	)
-	distance_fig, _ = inter_player_distance_plot(;
-		strategy = plot_strategies,
-		reference_distance = dₚ,
-		safety_distance = collision_avoidance,
-	)
-
-	plot_specs = (
-		(trajectory_plots_dir, "trajectory", trajectory_fig),
-		(speed_plots_dir, "speed", speed_fig),
-		(control_plots_dir, "control", control_fig),
-		(distance_plots_dir, "distance", distance_fig),
-	)
-	for (output_dir, plot_name, figure) in plot_specs
-		save_figure(
-			joinpath(output_dir, "$(plot_name)_instance_$(instance_idx)_eps$(ϵ₀).$(static_extension)"),
-			figure,
-		)
-	end
-
-	if visualization_config.show_interactive_trajectory
-		interactive_trajectory_path = joinpath(
-			trajectory_plots_dir,
-			"trajectory_interactive_instance_$(instance_idx)_eps$(ϵ₀).$(interactive_extension)",
-		)
-		plot_trajectory_3d_interactive(;
-			map_end,
-			lane_width,
-			strategy = plot_strategies,
-			θ1,
-			θ2,
-			θ3,
-			goal_position1,
-			goal_position2,
-			goal_position3,
-			collision_avoidance,
-			reference_distance = dₚ,
-			display_figure = false,
-			save_path = interactive_trajectory_path,
-		)
-		println("saved interactive trajectory browser file: ", interactive_trajectory_path)
-	end
 end
 
 """Save the standard static plots and optional interactive trajectory for one solution."""

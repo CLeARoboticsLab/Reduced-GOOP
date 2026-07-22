@@ -846,4 +846,187 @@ function prepare_receding_output_dirs(run_id; debug)
 	)
 end
 
+# ── Python-facing receding-horizon planner API ────────────────────────────────
+#
+# Exposes the same `plan_next(planner, obs)` interface as the open-loop planner
+# in trajectory.jl (loaded into Main), so test.py's run_receding_horizon loop
+# does not need to change regardless of which planner is active.
+#
+# Usage (from Python):
+#   ctx = jl.Robotic_arm_receding.build_kkt_context(obs, r2_dim)   # once after grip
+#   planner = jl.Robotic_arm_receding.create_planner_from_context(ctx, obs, 20)
+#   # ... run_receding_horizon uses jl.plan_next(planner, obs) per step ...
+
+"""
+Pre-built context that holds every expensive artefact that is reused across
+multiple calls to `create_planner_from_context`: the KKT system, scenario
+config, and solver options.  Call `build_kkt_context` once after gripping.
+"""
+struct RecedingHorizonContext
+	GOOP_kkt_system::Any
+	scenario_config::Any
+	flatten_parameters::Any
+	primal_dimensions::Vector{Int}
+	options::Any
+	r2_action_dim::Int
+	planning_horizon::Int
+end
+
+"""
+Build the KKT system once for the given initial EEF positions (world frame).
+
+`obs` is the Python observation dict immediately after gripping; the positions
+are used to configure world-frame goals via `demo_scenario_config`.
+`r2_action_dim` is `env.robots[2].action_dim` (GR1 full action length).
+"""
+function build_kkt_context(
+	obs,
+	r2_action_dim::Integer;
+	planning_horizon::Integer = 6,
+	verbose::Bool = false,
+)
+	sim_eef0 = collect(Float64, obs["robot0_eef_pos"])
+	sim_eef1 = collect(Float64, obs["robot1_eef_pos"])
+	sim_eef2 = collect(Float64, obs["robot2_eef_pos"])
+
+	@info "Building KKT context for receding-horizon planner (T = $(planning_horizon))..."
+	scenario_config = RA.demo_scenario_config(; planning_horizon, sim_eef0, sim_eef1, sim_eef2)
+
+	problem_setup_time = @elapsed begin
+		(; problem, flatten_parameters) = RA.get_setup(scenario_config)
+	end
+
+	kkt_build_time = @elapsed GOOP_kkt_system = ReducedGOOP.generate_slacked_reduced_kkt_system(
+		problem;
+		backend = ReducedGOOP.SymbolicTracingUtils.SymbolicsBackend(),
+		backend_options = (;),
+		codegen = :fast_differentiation,
+	)
+	println(
+		"[build_kkt_context] problem $(round(problem_setup_time; digits = 2)) s, ",
+		"KKT build $(round(kkt_build_time; digits = 2)) s",
+	)
+
+	primal_dimensions = [
+		(dyn.state_dimension + dyn.control_dimension) * planning_horizon
+		for dyn in scenario_config.dynamics
+	]
+
+	options = ReducedGOOP.InteriorPointOptions(;
+		tol = 0.01,
+		η₀ = 1e-6,
+		η_max = 1e6,
+		ϵ₀ = 0.1,
+		max_inner_iters = 500,
+		max_outer_iters = 1,
+		tightening_rate = 1.2,
+		loosening_rate = 3.0,
+		min_stepsize = 1e-20,
+		linesearch = :backtracking,
+		linear_solve_algorithm = ReducedGOOP.LinearSolve.KrylovJL_LSMR(),
+		use_linsolve = false,
+		record_convergence = false,
+		record_condition_number = false,
+		eta_retry_growth = 2.0,
+		ρ_low = 0.75,
+		ρ_high = 0.75,
+		perturbation_enabled = false,
+		stagnation_rtol = 1e-1,
+		perturbation_scale = 1e-6,
+		tsvd_threshold = 0.0,
+		use_marquardt_scaling = false,
+		verbose,
+	)
+
+	RecedingHorizonContext(
+		GOOP_kkt_system,
+		scenario_config,
+		flatten_parameters,
+		primal_dimensions,
+		options,
+		Int(r2_action_dim),
+		Int(planning_horizon),
+	)
+end
+
+"""
+Create a fresh `Main.ClosedLoopPlanner` from a pre-built `RecedingHorizonContext`.
+
+Each call resets the warm start to the current `obs`, so it is safe to call
+after `restore_state` when replaying the same grip state multiple times.
+`num_mpc_steps` caps the number of `plan_next` calls before the planner signals
+completion by returning `Float64[]`.
+"""
+function create_planner_from_context(
+	ctx::RecedingHorizonContext,
+	obs,
+	num_mpc_steps::Integer = 20,
+)
+	(;
+		GOOP_kkt_system,
+		scenario_config,
+		flatten_parameters,
+		primal_dimensions,
+		options,
+		r2_action_dim,
+		planning_horizon,
+	) = ctx
+
+	# Build warm start from the current (post-restore) EEF positions.
+	sim_eef0 = collect(Float64, obs["robot0_eef_pos"])
+	sim_eef1 = collect(Float64, obs["robot1_eef_pos"])
+	sim_eef2 = collect(Float64, obs["robot2_eef_pos"])
+	instance_states = (; initial_state1 = sim_eef0, initial_state2 = sim_eef1, initial_state3 = sim_eef2)
+	(; warmstart_solution) = RA.build_default_warmstart(instance_states, scenario_config)
+
+	# Mutable warm start: updated after each solve via shift_strategies.
+	stage_warmstart = Ref(warmstart_solution)
+	# GR1 (robot 2) is frozen at its grip position to avoid controller instability.
+	r2_hold = copy(sim_eef2)
+
+	solver = ReducedGOOP.InteriorPoint()
+	state_dimension = scenario_config.position_dimension
+	dynamics = scenario_config.dynamics
+
+	function solve_fn(obs)
+		current_eef0 = collect(Float64, obs["robot0_eef_pos"])
+		current_eef1 = collect(Float64, obs["robot1_eef_pos"])
+		current_eef2 = collect(Float64, obs["robot2_eef_pos"])
+
+		current_states = (;
+			initial_state1 = current_eef0,
+			initial_state2 = current_eef1,
+			initial_state3 = current_eef2,
+		)
+		(; θ) = RA.build_instance_parameters(flatten_parameters, current_states, scenario_config)
+
+		output = ReducedGOOP.solve(solver, GOOP_kkt_system, θ; z₀ = stage_warmstart[], options)
+		println(
+			"[receding-horizon] status=$(output.status), ",
+			"iters=$(output.total_iters), ",
+			"kkt_err=$(round(output.kkt_error; sigdigits = 4))",
+		)
+
+		strategies = RA.extract_player_strategies(output.x, primal_dimensions, dynamics)
+
+		# Shift warm start for next solve.
+		shifted = shift_strategies(strategies, dynamics, planning_horizon)
+		stage_warmstart[] = RA.flatten_warmstart_solution(
+			planning_horizon,
+			[s.xs for s in shifted],
+			[s.us for s in shifted],
+		)
+
+		# Next target: planned position of the combined two-arm agent at t=1.
+		combined_next = collect(Float64, strategies[1].xs[2])
+		r0_pos = combined_next[1:state_dimension]
+		r1_pos = combined_next[(state_dimension + 1):(2 * state_dimension)]
+		r2_full = vcat(r2_hold, zeros(r2_action_dim - 3))
+
+		vcat(r0_pos, [1.0], r1_pos, [1.0], r2_full)  # 1.0 = GRIP_CLOSED
+	end
+
+	Main.ClosedLoopPlanner(solve_fn, 0, Int(num_mpc_steps))
+end
+
 end
