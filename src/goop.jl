@@ -218,6 +218,7 @@ function generate_slacked_reduced_kkt_system(
 
 	# Keep track of all lower level policy constraint duals (ψ) that we create.
 	Ψ = symbolic_type[]
+	innermost_stationarity_dual_offsets = Int[]
 
 	# Recursive function to construct a player's KKT conditions.
 	function construct_player_kkt_conditions(
@@ -403,7 +404,12 @@ function generate_slacked_reduced_kkt_system(
 			Symbol("ψ_$(player)_$(level)"),
 			length(π),
 		)
+		ψ_start = length(Ψ) + 1
 		push!(Ψ, ψ...)
+		append!(
+			innermost_stationarity_dual_offsets,
+			(ψ_start+length(ψ)-goop.primal_dims[player]):(ψ_start+length(ψ)-1),
+		)
 
 		# 10/25: added duals for complementarity slackness for lower levels
 		ϕ = SymbolicTracingUtils.make_variables(
@@ -640,6 +646,13 @@ function generate_slacked_reduced_kkt_system(
 		preference_slack_dims = idx[Block(2)] # s
 		interior_point_slack_dims = vcat(idx[Block(3)], idx[Block(9)]) # Σ, σₛ
 		inequality_constraint_dual_dims = vcat(idx[Block(5)], idx[Block(8)]) # Γ, γₛ
+		equality_constraint_dual_dims = idx[Block(4)] # Λ
+		stationarity_dual_dims = idx[Block(6)] # Ψ
+		all_equality_stationarity_dual_dims =
+			vcat(equality_constraint_dual_dims, stationarity_dual_dims)
+		stationarity_offset = sum(length, (x, s, Σ, Λ, Γ))
+		innermost_stationarity_dual_dims =
+			stationarity_offset .+ innermost_stationarity_dual_offsets
 	end
 
 	@timeit TO "Jacobian / KKT construction" BuildGOOPKKTSystem(
@@ -652,6 +665,10 @@ function generate_slacked_reduced_kkt_system(
 		preference_slack_dims,
 		interior_point_slack_dims,
 		inequality_constraint_dual_dims;
+		equality_constraint_dual_dims,
+		stationarity_dual_dims,
+		all_equality_stationarity_dual_dims,
+		innermost_stationarity_dual_dims,
 		backend_options,
 		codegen,
 		fd_codegen_chunk_size,

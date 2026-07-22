@@ -117,8 +117,9 @@ interior-point solver. It stores:
 
 - in-place residual and Jacobian evaluators for the KKT residual and its
   derivative with respect to the decision vector;
-- index sets for primal variables, preference slacks, interior-point slacks, and
-  inequality duals;
+- index sets for primal variables, preference slacks, interior-point slacks,
+  inequality duals, and the equality/stationarity dual subsets used by selective
+  warm starts;
 - KKT and variable dimensions;
 - the symbolic residual and symbolic variable vector used to build the system.
 

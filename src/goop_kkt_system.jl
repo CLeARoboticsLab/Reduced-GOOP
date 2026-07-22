@@ -11,7 +11,7 @@ TODO (@Jingqi/@DongHo): Please flesh this comment out with more of the math,
 or with a pointer to a LaTeX derivation somewhere in this repository.
 """
 
-struct GOOPKKTSystem{T1, T2, T3, T4, T5, T6, T7}
+struct GOOPKKTSystem{T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11}
 	"A callable function that computes F!(val, z; θ, ϵ) in-place for 'val'"
 	F!::T1
 	"A callable function that computes ∇F!(val, z; θ, ϵ) in-place for 'val'"
@@ -24,14 +24,22 @@ struct GOOPKKTSystem{T1, T2, T3, T4, T5, T6, T7}
 	interior_point_slack_dims::T4
 	"Coordinates of z associated to inequality constraint duals"
 	inequality_constraint_dual_dims::T5
+	"Coordinates of z associated to equality constraint duals"
+	equality_constraint_dual_dims::T6
+	"Coordinates of z associated to stationarity duals"
+	stationarity_dual_dims::T7
+	"Coordinates of z associated to equality or stationarity duals"
+	all_equality_stationarity_dual_dims::T8
+	"Coordinates of stationarity duals associated with innermost preferences"
+	innermost_stationarity_dual_dims::T9
 	"KKT dimension"
-	kkt_dimension::T6
+	kkt_dimension::T10
 	"Length of z vector"
-	variable_dimension::T6
+	variable_dimension::T10
 	"F in symbolics"
-	F_symbolic::T7
+	F_symbolic::T11
 	"z in symbolics"
-	z_symbolic::T7
+	z_symbolic::T11
 end
 
 """
@@ -206,6 +214,10 @@ function BuildGOOPKKTSystem(
 	preference_slack_dims,
 	interior_point_slack_dims,
 	inequality_constraint_dual_dims;
+	equality_constraint_dual_dims = Int[],
+	stationarity_dual_dims = Int[],
+	all_equality_stationarity_dual_dims = Int[],
+	innermost_stationarity_dual_dims = Int[],
 	backend_options = (;),
 	codegen = :native,
 	fd_codegen_chunk_size = nothing,
@@ -315,6 +327,10 @@ function BuildGOOPKKTSystem(
 			preference_slack_dims,
 			interior_point_slack_dims,
 			inequality_constraint_dual_dims,
+			equality_constraint_dual_dims,
+			stationarity_dual_dims,
+			all_equality_stationarity_dual_dims,
+			innermost_stationarity_dual_dims,
 			length(F_symbolic),
 			length(z_symbolic),
 			F_symbolic,

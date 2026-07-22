@@ -492,6 +492,49 @@ end
     @test isapprox(reduced.primals, complete.primals; atol = IP_ATOL, rtol = 0.0)
 end
 
+@testset "Reduced KKT dual-coordinate metadata" begin
+    x_template = BlockArray(zeros(2), [2])
+    θ_template = BlockArray(zeros(1), [1])
+    problem = ReducedGOOP.ParametricGOOP(
+        x_template,
+        θ_template;
+        preferences = [Function[
+            (x, θ) -> sum(abs2, x[Block(1)]),
+            (x, θ) -> sum(abs2, x[Block(1)] .- 1.0),
+        ]],
+        is_prioritized_constraint = [[false, false]],
+        equality_constraints = [(x, θ) -> [x[Block(1)][1]]],
+        inequality_constraints = [(x, θ) -> [x[Block(1)][2]]],
+        shared_equality_constraint = nothing,
+        shared_inequality_constraint = nothing,
+    )
+    kkt = reduced_kkt_system(problem)
+
+    @test length(kkt.equality_constraint_dual_dims) == 2
+    @test length(kkt.stationarity_dual_dims) == 2
+    @test kkt.all_equality_stationarity_dual_dims == vcat(
+        kkt.equality_constraint_dual_dims,
+        kkt.stationarity_dual_dims,
+    )
+    @test kkt.innermost_stationarity_dual_dims == kkt.stationarity_dual_dims
+    @test isempty(intersect(
+        kkt.all_equality_stationarity_dual_dims,
+        kkt.inequality_constraint_dual_dims,
+    ))
+    other_dims = setdiff(
+        1:kkt.variable_dimension,
+        vcat(
+            kkt.primal_dims,
+            kkt.preference_slack_dims,
+            kkt.interior_point_slack_dims,
+            kkt.inequality_constraint_dual_dims,
+            kkt.all_equality_stationarity_dual_dims,
+        ),
+    )
+    @test length(other_dims) == 1 # Block 10 (Φ) is not carried.
+    @test isempty(intersect(kkt.all_equality_stationarity_dual_dims, other_dims))
+end
+
 @testset "FastDifferentiation Codegen Parity" begin
     # The :fast_differentiation codegen path must produce the same KKT residual
     # and Jacobian as the native Symbolics code generator: differentiation stays

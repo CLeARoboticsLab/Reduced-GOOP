@@ -65,7 +65,7 @@ The package models and solves **Games of Ordered Preference (GOOP)**: multi-play
 
 ### `GOOPKKTSystem` (`src/goop_kkt_system.jl`)
 
-Built by `BuildGOOPKKTSystem(...)`, which selects either the `Symbolics` or `FastDifferentiation` backend to compile symbolic residuals into in-place functions and build a static sparse Jacobian. Stores index sets for primal variables, preference slacks, interior-point slacks, and inequality duals — used by `InteriorPoint` to initialize positive slack variables and perform bounded Newton steps.
+Built by `BuildGOOPKKTSystem(...)`, which selects either the `Symbolics` or `FastDifferentiation` backend to compile symbolic residuals into in-place functions and build a static sparse Jacobian. Stores index sets for primal variables, preference slacks, interior-point slacks, inequality duals, and selective equality/stationarity dual warm starts — used by `InteriorPoint` to initialize positive slack variables and perform bounded Newton steps.
 
 ### Non-obvious conventions
 

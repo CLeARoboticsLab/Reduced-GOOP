@@ -29,142 +29,6 @@ const DUAL_WARMSTART_MODES = (
     :all_except_innermost_stationarity,
 )
 
-"""Flat KKT coordinates used by the receding-horizon dual warm-start modes."""
-struct DualWarmstartLayout
-    equality_dual_indices::Vector{Int}
-    all_dual_indices::Vector{Int}
-    innermost_stationarity_dual_indices::Vector{Int}
-end
-
-_symbolic_block_name(sym) = first(split(string(sym), "["; limit = 2))
-
-function _symbolic_variable_groups(z_symbolic)
-    groups = Dict{String, Vector{Int}}()
-    for (index, sym) in enumerate(z_symbolic)
-        push!(get!(groups, _symbolic_block_name(sym), Int[]), index)
-    end
-    groups
-end
-
-_is_dual_block(name) = any(prefix -> startswith(name, prefix), ("λ", "γ", "ψ", "ϕ"))
-
-"""
-Build and validate the flat dual-coordinate map once for a generated reduced
-KKT system. A block `ψ_i_k` contains one primal-sized segment for every inner
-stationarity level `k+1:Kⁱ`; consequently its last segment targets the
-innermost stationarity equations at level `Kⁱ`.
-"""
-function build_dual_warmstart_layout(kkt_system, problem)
-    groups = _symbolic_variable_groups(kkt_system.z_symbolic)
-    equality_dual_indices = Int[]
-    innermost_stationarity_dual_indices = Int[]
-
-    for player in 1:problem.num_players
-        num_levels = length(problem.preferences[player])
-        primal_dimension = problem.primal_dims[player]
-        equality_dimension = problem.equality_dims[player]
-
-        if equality_dimension > 0
-            for level in 1:num_levels
-                block_name = "λ_$(player)_$(level)"
-                indices = get(groups, block_name, nothing)
-                isnothing(indices) && error("Missing expected KKT block $(block_name).")
-                length(indices) == equality_dimension || error(
-                    "KKT block $(block_name) has length $(length(indices)); " *
-                    "expected equality dimension $(equality_dimension).",
-                )
-                append!(equality_dual_indices, indices)
-            end
-        end
-
-        for level in 1:(num_levels-1)
-            block_name = "ψ_$(player)_$(level)"
-            indices = get(groups, block_name, nothing)
-            isnothing(indices) && error("Missing expected KKT block $(block_name).")
-            expected_length = (num_levels - level) * primal_dimension
-            length(indices) == expected_length || error(
-                "KKT block $(block_name) has length $(length(indices)); " *
-                "expected $(expected_length) for levels $((level+1):num_levels).",
-            )
-            append!(
-                innermost_stationarity_dual_indices,
-                @view(indices[(end-primal_dimension+1):end]),
-            )
-        end
-    end
-
-    dual_groups = values(filter(pair -> _is_dual_block(first(pair)), groups))
-    all_dual_indices = sort!(reduce(vcat, dual_groups; init = Int[]))
-    sort!(equality_dual_indices)
-    sort!(innermost_stationarity_dual_indices)
-
-    all(in(all_dual_indices), equality_dual_indices) ||
-        error("Equality-dual coordinates are not a subset of all dual coordinates.")
-    all(in(all_dual_indices), innermost_stationarity_dual_indices) ||
-        error("Innermost-stationarity coordinates are not a subset of all dual coordinates.")
-
-    DualWarmstartLayout(
-        equality_dual_indices,
-        all_dual_indices,
-        innermost_stationarity_dual_indices,
-    )
-end
-
-function selected_dual_indices(layout::DualWarmstartLayout, mode::Symbol)
-    mode in DUAL_WARMSTART_MODES || throw(
-        ArgumentError(
-            "Unknown dual_warmstart mode $(mode); expected one of " *
-            "$(join(DUAL_WARMSTART_MODES, ", ")).",
-        ),
-    )
-    mode === :equality_duals && return layout.equality_dual_indices
-    mode === :all_except_innermost_stationarity && return setdiff(
-        layout.all_dual_indices,
-        layout.innermost_stationarity_dual_indices,
-    )
-    Int[]
-end
-
-"""
-Assemble the next MPC warm start. Primals are shifted separately; selected
-duals retain their existing flat coordinates. All other variables use the same
-defaults as `ReducedGOOP.solve` (zero, with positive slacks/inequality duals).
-"""
-function build_receding_warmstart(
-    shifted_primal,
-    previous_z,
-    kkt_system,
-    layout::DualWarmstartLayout,
-    mode::Symbol,
-)
-    mode in DUAL_WARMSTART_MODES ||
-        throw(ArgumentError("Unknown dual_warmstart mode $(mode)."))
-    length(shifted_primal) == length(kkt_system.primal_dims) || throw(
-        DimensionMismatch(
-            "Shifted primal has length $(length(shifted_primal)); " *
-            "expected $(length(kkt_system.primal_dims)).",
-        ),
-    )
-    length(previous_z) == kkt_system.variable_dimension || throw(
-        DimensionMismatch(
-            "Previous KKT point has length $(length(previous_z)); " *
-            "expected $(kkt_system.variable_dimension).",
-        ),
-    )
-
-    mode === :primal_only && return copy(shifted_primal)
-
-    T = promote_type(eltype(shifted_primal), eltype(previous_z))
-    warmstart = zeros(T, kkt_system.variable_dimension)
-    warmstart[kkt_system.preference_slack_dims] .= one(T)
-    warmstart[kkt_system.interior_point_slack_dims] .= one(T)
-    warmstart[kkt_system.inequality_constraint_dual_dims] .= one(T)
-    warmstart[kkt_system.primal_dims] .= shifted_primal
-    dual_indices = selected_dual_indices(layout, mode)
-    warmstart[dual_indices] .= previous_z[dual_indices]
-    warmstart
-end
-
 # ── Experiment entry point ─────────────────────────────────────────────────────
 
 """
@@ -287,14 +151,20 @@ function demo(;
     )
     println("[Primal-Dual] KKT Dimension: ", GOOP_kkt_system.kkt_dimension)
     println("[Primal-Dual] variable Dimension: ", GOOP_kkt_system.variable_dimension)
-    dual_warmstart_layout =
-        build_dual_warmstart_layout(GOOP_kkt_system, problem)
-    selected_dual_count =
-        length(selected_dual_indices(dual_warmstart_layout, dual_warmstart))
+    total_equality_stationarity_dual_count =
+        length(GOOP_kkt_system.all_equality_stationarity_dual_dims)
+    selected_dual_count = if dual_warmstart === :primal_only
+        0
+    elseif dual_warmstart === :equality_duals
+        length(GOOP_kkt_system.equality_constraint_dual_dims)
+    else
+        total_equality_stationarity_dual_count -
+        length(GOOP_kkt_system.innermost_stationarity_dual_dims)
+    end
     println(
         "dual warm-start mode: $(dual_warmstart) " *
-        "($(selected_dual_count)/$(length(dual_warmstart_layout.all_dual_indices)) " *
-        "dual coordinates carried)",
+        "($(selected_dual_count)/$(total_equality_stationarity_dual_count) " *
+        "equality/stationarity dual coordinates carried)",
     )
 
     # Same options as the open-loop demo, except record_condition_number stays a
@@ -624,7 +494,6 @@ function demo(;
             shifted_primal,
             output.z,
             GOOP_kkt_system,
-            dual_warmstart_layout,
             dual_warmstart,
         )
     end
@@ -733,7 +602,8 @@ function demo(;
                     "rng_seed" => rng_seed,
                     "dual_warmstart" => dual_warmstart,
                     "selected_dual_count" => selected_dual_count,
-                    "total_dual_count" => length(dual_warmstart_layout.all_dual_indices),
+                    "total_equality_stationarity_dual_count" =>
+                        total_equality_stationarity_dual_count,
                     "dynamics_model" => RA.dynamics_model_name(dynamics_model),
                     "planning_horizon" => planning_horizon,
                     "num_mpc_steps" => num_mpc_steps,
@@ -801,6 +671,53 @@ function demo(;
 end
 
 # ── MPC utilities ──────────────────────────────────────────────────────────────
+
+"""
+Assemble the next MPC warm start. Primals are shifted separately; selected
+equality and stationarity duals retain their existing flat coordinates. All
+other variables use the same defaults as `ReducedGOOP.solve` (zero, with
+positive slacks/inequality duals).
+"""
+function build_receding_warmstart(
+    shifted_primal,
+    previous_z,
+    kkt_system,
+    mode::Symbol,
+)
+    mode in DUAL_WARMSTART_MODES ||
+        throw(ArgumentError("Unknown dual_warmstart mode $(mode)."))
+    length(shifted_primal) == length(kkt_system.primal_dims) || throw(
+        DimensionMismatch(
+            "Shifted primal has length $(length(shifted_primal)); " *
+            "expected $(length(kkt_system.primal_dims)).",
+        ),
+    )
+    length(previous_z) == kkt_system.variable_dimension || throw(
+        DimensionMismatch(
+            "Previous KKT point has length $(length(previous_z)); " *
+            "expected $(kkt_system.variable_dimension).",
+        ),
+    )
+
+    mode === :primal_only && return copy(shifted_primal)
+
+    T = promote_type(eltype(shifted_primal), eltype(previous_z))
+    warmstart = zeros(T, kkt_system.variable_dimension)
+    warmstart[kkt_system.preference_slack_dims] .= one(T)
+    warmstart[kkt_system.interior_point_slack_dims] .= one(T)
+    warmstart[kkt_system.inequality_constraint_dual_dims] .= one(T)
+    warmstart[kkt_system.primal_dims] .= shifted_primal
+    if mode === :equality_duals
+        dims = kkt_system.equality_constraint_dual_dims
+        warmstart[dims] .= previous_z[dims]
+    else
+        # Carry all equality/stationarity duals except those tied to the innermost level.
+        dims = kkt_system.all_equality_stationarity_dual_dims
+        warmstart[dims] .= previous_z[dims]
+        warmstart[kkt_system.innermost_stationarity_dual_dims] .= zero(T)
+    end
+    warmstart
+end
 
 """
 Shift a per-player trajectory one stage forward to warm-start the next MPC
