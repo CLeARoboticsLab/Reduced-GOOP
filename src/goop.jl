@@ -74,7 +74,7 @@ end
 
 function Symbolics.gradient(f::QuasiLagrangianTerm, x::AbstractVector{<:Symbolics.Num})
 	next_order = f.deriv_order + 1
-	if f.deriv_order > 2
+	if f.deriv_order >= 2 # retain terms up to order 2
 		return QuasiLagrangianTerm(zero.(x), f.duals, next_order)
 	end
 

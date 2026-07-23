@@ -480,7 +480,7 @@ function demo_scenario_config(;
 	lane_width = 2
 
 	# ── Build dynamics ─────────────────────────────────────────────────────────
-	planning_horizon = 20
+	planning_horizon = 30
 	Δt = 0.1
 	state_dimension = 3
 	control_dimension = 3
@@ -540,9 +540,9 @@ function demo(;
 	# ── Settings ───────────────────────────────────────────────────────────────
 	run_id = something(
 		run_id,
-		 "challenging-scenario1_runcost_dt0.1_T10_line_copy"
+		 "challenging-scenario1"
 	)
-	goop_version = :reduced      # :complete | :reduced | :quasi
+	goop_version = :quasi     # :complete | :reduced | :quasi
 	# Tracing/differentiation backend. The :fast_differentiation tracing backend
 	# is unusable here: FD 0.4.5 has an upstream factoring bug on ≥3rd-order
 	# derivatives of kinked (abs/ifelse) preference penalties, which this
@@ -614,7 +614,7 @@ function demo(;
 	backend = get(symbolic_backends, kkt_backend, nothing)
 	isnothing(backend) && error("Unknown KKT backend: $(kkt_backend)")
 
-	@info "Building KKT system for $(goop_version) GOOP formulation ($(kkt_backend) backend, $(kkt_codegen) codegen) and $(solver) solver..."
+	@info "Building $(goop_version) KKT system with ($(kkt_backend) backend, $(kkt_codegen) codegen) and $(solver) solver..."
 	# Check if problem is not an instance of GOOPKKTSystem. Otherwise, build GOOPKKTSystem.
 	GOOP_kkt_system = @timeit TO "KKT construction" begin
 		if problem isa ReducedGOOP.GOOPKKTSystem
