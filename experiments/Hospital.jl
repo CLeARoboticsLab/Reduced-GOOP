@@ -470,20 +470,27 @@ function plot_hospital_trajectories(; strategy, initial_states, goal_positions, 
 	end
 
 	if !isnothing(urgency_clearance)
-		"Urgency-clearance circle around the highest-urgency agent's final position: other agents' final positions should fall outside it."
-		protected_player = argmax(urgency_levels)
-		final_position = strategy[protected_player].xs[end]
+		"""
+		One circle per player, centered at their *current* position — i.e. `xs[1]`,
+		the first (earliest/"now") point of this plan, not `xs[end]` (the most
+		future point) — with radius = clearance/2. Two agents' circles overlap
+		exactly when their current separation < clearance (r_i + r_j =
+		clearance/2 + clearance/2), so overlapping circles visually flag a
+		clearance violation right now.
+		"""
 		θ_circle = range(0, 2π; length = 100)
-		circle_line = CairoMakie.lines!(
-			ax,
-			final_position[1] .+ urgency_clearance .* cos.(θ_circle),
-			final_position[2] .+ urgency_clearance .* sin.(θ_circle);
-			color = colors[protected_player],
-			linestyle = :dot,
-			linewidth = 2,
-		)
-		push!(legend_handles, circle_line)
-		push!(legend_labels, "Urgency clearance ($(urgency_clearance)) around Agent $(protected_player)'s final position")
+		radius = urgency_clearance / 2
+		for i in 1:num_players
+			current_position = strategy[i].xs[1]
+			CairoMakie.lines!(
+				ax,
+				current_position[1] .+ radius .* cos.(θ_circle),
+				current_position[2] .+ radius .* sin.(θ_circle);
+				color = colors[i],
+				linestyle = :dot,
+				linewidth = 2,
+			)
+		end
 	end
 
 	CairoMakie.Legend(
