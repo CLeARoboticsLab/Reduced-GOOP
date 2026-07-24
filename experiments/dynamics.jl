@@ -170,3 +170,7 @@ end
 function single_integrator_3d_step(x, u; Δt)
 	x .+ Δt .* u
 end
+
+function single_integrator_2d_step(x, u; Δt)
+	x .+ Δt .* u
+end

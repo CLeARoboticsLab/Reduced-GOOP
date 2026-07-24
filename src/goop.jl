@@ -836,11 +836,6 @@ function generate_slacked_complete_kkt_system(
 				# push!(Γ, μₛ...)
 
 				# Form Lagrangian at this stage.
-				(; xs, us) = unflatten_trajectory(
-					x[Block(player)],
-					4, #state_dimension,
-					2, # control_dimnesion
-				)
 				# L =
 				# 	sum(preference_slack) - γₚ' * (h .+ preference_slack) - μₛ' * preference_slack -
 				# 	(isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
@@ -1012,11 +1007,6 @@ function generate_slacked_complete_kkt_system(
 			# push!(Γ, μₛ...)
 
 			# Form Lagrangian at this stage.
-			(; xs, us) = unflatten_trajectory(
-				x[Block(player)],
-				4, #state_dimension,
-				2, # control_dimnesion
-			)
 			# L = sum(preference_slack) + 0.001sum(sum(u .^ 2) for u in us) - γₚ' * (h .+ preference_slack) - μₛ' * preference_slack -λ' * F - γ' * G
 			L = sum(preference_slack .^ 2) - γₚ' * (h .+ preference_slack) - λ' * F - γ' * G
 			∇L = SymbolicTracingUtils.gradient(L, vcat(z, preference_slack))

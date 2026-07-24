@@ -220,10 +220,7 @@ function get_setup(
 	end
 
 	equality_constraints = [
-		(z, θ) -> vcat(
-			player_equality_constraints[i](z, θ),
-			shared_equality_constraint(z, θ)
-		)
+		(z, θ) -> vcat(player_equality_constraints[i](z, θ), shared_equality_constraint(z, θ))
 		for i in 1:num_players
 	]
 
@@ -355,26 +352,23 @@ end
 function demo(;
 	map_end = 7,
 	lane_width = 2,
-	eta_0 = 5e-5,
 	verbose = true,
 	rng_seed = 123,
 	random_initial_state = false,
 	debug = false,
-	run_id = "0_IP_test_cleanup_trial_again",
 	use_scalarized_baseline = false,
 	use_social_equilibrium_baseline = false,
-	show_interactive_trajectory = false,
 )
 	reset_timer!(TO)
 	@timeit TO "experiment setup" Random.seed!(rng_seed)
 
 	# ── Settings ───────────────────────────────────────────────────────────────
+	run_id = "0_IP_test_cleanup"
 	dynamics_model = Intersection.PlanarDoubleIntegrator()
 	goop_version = :reduced                    # :complete | :reduced | :quasi
-	solver = ReducedGOOP.InteriorPoint()
+	solver = ReducedGOOP.InteriorPoint() # ReducedGOOP.InteriorPoint() | ReducedGOOP.PATHSolver()
 	linesearch = :backtracking          # :backtracking | :fraction_to_boundary
 	compute_warmstart = true # Whether to compute a warmstart trajectory via rollout (true) or load from file (false)
-	use_marquardt_scaling = true
 
 	# ── Problem parameters ─────────────────────────────────────────────────────
 	num_players         = 2
@@ -385,7 +379,7 @@ function demo(;
 	perturbation_scale  = 0.3
 
 	# ── Solver schedule ────────────────────────────────────────────────────────
-	epsilon_schedule         = [0.3, 0.1]
+	epsilon_schedule         = [0.1]
 	max_inner_iters_schedule = fill(1000, length(epsilon_schedule))
 
 	# ── Scenario ───────────────────────────────────────────────────────────────
@@ -422,11 +416,18 @@ function demo(;
 			use_social_equilibrium_baseline,
 		)
 	end
-	kkt_generators = Dict(
-		:complete => ReducedGOOP.generate_slacked_complete_kkt_system,
-		:reduced  => ReducedGOOP.generate_slacked_reduced_kkt_system,
-		:quasi    => ReducedGOOP.generate_slacked_quasi_kkt_system,
-	)
+	kkt_generators = if solver isa ReducedGOOP.InteriorPoint
+		Dict(
+			:complete => ReducedGOOP.generate_slacked_complete_kkt_system,
+			:reduced  => ReducedGOOP.generate_slacked_reduced_kkt_system,
+			:quasi    => ReducedGOOP.generate_slacked_quasi_kkt_system,
+		)
+	else
+		Dict(
+			:complete => ReducedGOOP.generate_mcp_complete_kkt_system,
+			:reduced  => ReducedGOOP.generate_mcp_reduced_kkt_system,
+		)
+	end
 
 	GOOP_kkt_generator = get(kkt_generators, goop_version, nothing)
 	isnothing(GOOP_kkt_generator) && error("Unknown GOOP version: $(goop_version)")
@@ -441,31 +442,63 @@ function demo(;
 		end
 	end
 
-	println("[Primal-Dual] KKT Dimension: ", GOOP_kkt_system.kkt_dimension)
-	println("[Primal-Dual] variable Dimension: ", GOOP_kkt_system.variable_dimension)
+	if solver isa ReducedGOOP.InteriorPoint
+		println("[Primal-Dual] KKT Dimension: ", GOOP_kkt_system.kkt_dimension)
+		println("[Primal-Dual] variable Dimension: ", GOOP_kkt_system.variable_dimension)
+	else
+		println("[PATH] MCP Dimension: ", GOOP_kkt_system.problem_size)
+		println("[PATH] Variable Dimension: ", length(GOOP_kkt_system.lower_bounds))
+	end
 
 	dynamics_dimension = dynamics.state_dimension + dynamics.control_dimension
 	primal_dimension   = dynamics_dimension * planning_horizon
 
 	# ── Per-instance solver ────────────────────────────────────────────────────
 	function solve_game_instance(θ; z₀, ϵ₀, max_inner_iters)
-		options = @timeit TO "solver options construction" ReducedGOOP.InteriorPointOptions(;
-			tol = 1e-3, #1e-4
-			η₀ = eta_0, # 5e-5, 0.0 to turn off Tikhonov
-			ϵ₀,
-			max_inner_iters,
-			max_outer_iters = 1,
-			tightening_rate = 1.2, # high => weak decrease in η
-			loosening_rate = 4.0, # low => strong increase in η
-			min_stepsize = 1e-20,
-			linesearch,
-			record_convergence = true,
-			record_condition_number = true,
-			eta_retry_growth = 0.3,
-			tsvd_threshold = 0.0, # 0.0: pure Tikhonov, > 0 and η = 0: pure TSVD
-			use_marquardt_scaling = true,
-			verbose,
-		)
+		options = @timeit TO "solver options construction" if solver isa ReducedGOOP.InteriorPoint
+			ReducedGOOP.InteriorPointOptions(;
+				tol = 3e-3, #1e-4
+				η₀ = 5e-5, # 5e-5, 0.0 to turn off Tikhonov
+				ϵ₀,
+				max_inner_iters,
+				max_outer_iters = 1,
+				tightening_rate = 1.2, # high => weak decrease in η
+				loosening_rate = 3.0, # low => strong increase in η
+				min_stepsize = 1e-20,
+				linesearch,
+				linear_solve_algorithm = ReducedGOOP.LinearSolve.KrylovJL_LSMR(),
+				use_linsolve = false,
+				record_convergence = true,
+				record_condition_number = true,
+				eta_retry_growth = 0.3,
+				perturbation_enabled = false,
+				stagnation_rtol = 1e-1,
+				perturbation_scale = 1e-6,
+				tsvd_threshold = 0.0, # 0.0: pure Tikhonov, > 0 and η = 0: pure TSVD
+				use_marquardt_scaling = true,
+				verbose,
+			)
+		else
+			ReducedGOOP.PATHOptions(;
+				convergence_tolerance = 1e-4,
+				ϵ₀,
+				cumulative_iteration_limit = 1_000_000,
+				proximal_perturbation = 1e-2,
+				major_iteration_limit = 10_000,
+				minor_iteration_limit = 15_000,
+				nms_initial_reference_factor = 50_000,
+				nms_maximum_watchdogs = 8_000,
+				nms_memory_size = 16_000,
+				nms_mstep_frequency = 5_000,
+				lemke_start_type = "advanced",
+				lemke_rank_deficiency_iterations = 50,
+				restart_limit = 120,
+				gradient_step_limit = 120,
+				use_basics = true,
+				use_start = true,
+				verbose,
+			)
+		end
 
 		@info "Solving game instance with $(solver)..."
 		kkt_error_history = Float64[]
@@ -475,35 +508,44 @@ function demo(;
 		solver_status = :solved
 		elapsed_time = @elapsed begin
 			output = @timeit TO "solver invocation" ReducedGOOP.solve(
-				solver,
-				GOOP_kkt_system,
-				θ;
-				z₀,
-				options,
-			)
-			(;
-				status,
-				z,
-				x,
-				kkt_error,
-				ϵ,
-				total_iters,
-				kkt_error_history,
-				condition_number_history,
-			) = output
-			eta_history = hasproperty(output, :eta_history) ? output.eta_history : Float64[]
-			if status == :failed
-				println("  [solver exit] total_iters=$(total_iters), kkt_error=$(round(kkt_error; sigdigits=4)), tol=$(options.tol)")
+					solver,
+					GOOP_kkt_system,
+					θ;
+					z₀,
+					options,
+				)
+			if solver isa ReducedGOOP.InteriorPoint
+				(;
+					status,
+					z,
+					x,
+					kkt_error,
+					ϵ,
+					total_iters,
+					kkt_error_history,
+					condition_number_history,
+				) = output
+				eta_history = hasproperty(output, :eta_history) ? output.eta_history : Float64[]
+				if status == :failed
+					println("  [solver exit] total_iters=$(total_iters), kkt_error=$(round(kkt_error; sigdigits=4)), tol=$(options.tol)")
+				end
+				solver_status = status
+			else
+				(; status, z, ϵ, info) = output
+				@show status
+				Int(status) != 1 && return nothing
+				kkt_error = info.residual
+				x = z[1:(num_players*primal_dimension)]
+				solver_status = :solved
 			end
-			solver_status = status
 		end
 
 		strategies = @timeit TO "solution postprocessing" extract_player_strategies(
-			x,
-			num_players,
-			primal_dimension,
-			dynamics,
-		)
+				x,
+				num_players,
+				primal_dimension,
+				dynamics,
+			)
 
 		solution_dict = Dict(
 			"strategies" => strategies,
@@ -569,13 +611,13 @@ function demo(;
 		println("goal_position2:", goal_position2)
 
 		(; θ1, θ2, θ) = @timeit TO "instance parameter construction" build_instance_parameters(
-			flatten_parameters,
-			initial_state1,
-			initial_state2,
-			goal_position1,
-			goal_position2,
-			obstacle_position,
-		)
+				flatten_parameters,
+				initial_state1,
+				initial_state2,
+				goal_position1,
+				goal_position2,
+				obstacle_position,
+			)
 
 		(; warmstart_solution) = @timeit TO "warmstart construction" if compute_warmstart
 			build_default_warmstart(
@@ -637,9 +679,7 @@ function demo(;
 				solve_sequence_succeeded = false
 				break
 			end
-			# Chain stages: warmstart the next (tighter) ϵ stage from this stage's
-			# primal solution instead of the initial rollout.
-			stage_warmstart = result.solution_dict["x"][1:(num_players*primal_dimension)]
+			stage_warmstart = warmstart_solution
 		end
 
 		if !solve_sequence_succeeded
@@ -726,48 +766,27 @@ function demo(;
 					control_ub = control_bounds.ub,
 				)
 
-				save_figure(
+				CairoMakie.save(
 					joinpath(
 						trajectory_plots_dir,
 						"trajectory_instance_$(solved_attempts)_eps$(ϵ₀).pdf",
 					),
 					trajectory_fig,
 				)
-				save_figure(
+				CairoMakie.save(
 					joinpath(
 						speed_plots_dir,
 						"speed_instance_$(solved_attempts)_eps$(ϵ₀).pdf",
 					),
 					speed_fig,
 				)
-				save_figure(
+				CairoMakie.save(
 					joinpath(
 						control_plots_dir,
 						"control_instance_$(solved_attempts)_eps$(ϵ₀).pdf",
 					),
 					control_fig,
 				)
-				if show_interactive_trajectory
-					interactive_trajectory_path = joinpath(
-						trajectory_plots_dir,
-						"trajectory_interactive_instance_$(solved_attempts)_eps$(ϵ₀).html",
-					)
-					plot_intersection_trajectories_interactive(
-						;
-						map_end,
-						lane_width,
-						strategy = result.strategies,
-						θ1,
-						θ2,
-						goal_position1,
-						goal_position2,
-						speed_limit,
-						collision_avoidance,
-						display_figure = false,
-						save_path = interactive_trajectory_path,
-					)
-					println("saved interactive trajectory browser file: ", interactive_trajectory_path)
-				end
 			end
 		end
 	end
@@ -785,17 +804,12 @@ function demo(;
 				"random_initial_state" => random_initial_state,
 				"use_scalarized_baseline" => use_scalarized_baseline,
 				"use_social_equilibrium_baseline" => use_social_equilibrium_baseline,
-				"show_interactive_trajectory" => show_interactive_trajectory,
-					"epsilon_schedule" => epsilon_schedule,
-					"max_inner_iters_schedule" => max_inner_iters_schedule,
-					"eta_0" => eta_0,
-					"tightening_rate" => tightening_rate,
-					"loosening_rate" => loosening_rate,
-					"use_marquardt_scaling" => use_marquardt_scaling,
-					"speed_limit" => speed_limit,
-					"perturbation_scale" => perturbation_scale,
-				),
-			)
+				"epsilon_schedule" => epsilon_schedule,
+				"max_inner_iters_schedule" => max_inner_iters_schedule,
+				"speed_limit" => speed_limit,
+				"perturbation_scale" => perturbation_scale,
+			),
+		)
 	end
 
 	println("\nTiming summary:")
@@ -852,21 +866,21 @@ function save_warmstart_visualizations(
 		control_ub = control_bounds.ub,
 	)
 
-	save_figure(
+	CairoMakie.save(
 		joinpath(
 			warmstart_plots_dir,
 			"warmstart_attempt_$(total_attempts)_instance_$(instance_idx).pdf",
 		),
 		warmstart_fig,
 	)
-	save_figure(
+	CairoMakie.save(
 		joinpath(
 			warmstart_plots_dir,
 			"warmstart_speed_attempt_$(total_attempts)_instance_$(instance_idx).pdf",
 		),
 		warmstart_speed_fig,
 	)
-	save_figure(
+	CairoMakie.save(
 		joinpath(
 			warmstart_plots_dir,
 			"warmstart_control_attempt_$(total_attempts)_instance_$(instance_idx).pdf",
@@ -971,9 +985,12 @@ end
 
 function speed_limit_constraints(::PlanarDoubleIntegrator, x; speed_limit = 1.5)
 	vx, vy = x[3], x[4]
-	# Vehicle speed may not exceed the limit: vx² + vy² ≤ speed_limit².
-	# Kept squared so the residual stays smooth at zero velocity.
-	return [speed_limit^2 - (vx^2 + vy^2)]
+	return vcat(
+		vx + speed_limit,
+		-vx + speed_limit,
+		vy + speed_limit,
+		-vy + speed_limit,
+	)
 end
 
 function speed_limit_constraints(::Unicycle, x; speed_limit = 1.5)
@@ -1173,7 +1190,7 @@ function save_convergence_diagnostics(solution_dict, convergence_plots_dir, inst
 			kkt_error_history = safe_log10_history(kkt_error_history),
 			total_iters = solution_dict["total_iters"],
 		)
-		save_figure(
+		CairoMakie.save(
 			joinpath(
 				convergence_plots_dir,
 				"convergence_instance_$(instance_idx)_eps$(ϵ₀)$(filename_suffix).pdf",
@@ -1188,7 +1205,7 @@ function save_convergence_diagnostics(solution_dict, convergence_plots_dir, inst
 			condition_number_history = safe_log10_history(condition_number_history),
 			total_iters = solution_dict["total_iters"],
 		)
-		save_figure(
+		CairoMakie.save(
 			joinpath(
 				convergence_plots_dir,
 				"condition_number_instance_$(instance_idx)_eps$(ϵ₀)$(filename_suffix).pdf",
@@ -1203,7 +1220,7 @@ function save_convergence_diagnostics(solution_dict, convergence_plots_dir, inst
 			eta_history = safe_log10_history(eta_history),
 			total_iters = solution_dict["total_iters"],
 		)
-		save_figure(
+		CairoMakie.save(
 			joinpath(
 				convergence_plots_dir,
 				"eta_instance_$(instance_idx)_eps$(ϵ₀)$(filename_suffix).pdf",
