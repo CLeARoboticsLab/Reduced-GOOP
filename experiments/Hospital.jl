@@ -142,10 +142,14 @@ function get_setup(
 		the paper's design (there, interference is the *highest-priority
 		preference*, not a hard constraint).
 
-		This is the version that got kkt_error down to ~0.19 (vs. stuck at 23-30
-		for the preference-level vector form) before plateauing, with player 2's
-		residual stuck at a fixed nonzero value. A min-then-square variant (worst
-		point only) was tried and reverted — this sum form is the one to keep.
+		This is the confirmed-working version: kkt_error ~0.19 (vs. stuck at
+		23-30 for the preference-level vector form), reproduced exactly on
+		re-test. A "worst-point" variant (`minimum` over points, then
+		`squared_violation` just that one value) was tried and abandoned — like
+		the earlier CPA clamp, the `minimum` reintroduced catastrophic symbolic
+		differentiation cost (killed after 84 minutes with no result). This sum
+		form — `squared_violation` applied per-point *before* summing, no min/max
+		anywhere — is the one to keep.
 		"""
 		clearance_sq = urgency_clearance^2
 		trajectory_i = trajectory(z; player = agent)
