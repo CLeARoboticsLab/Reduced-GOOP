@@ -151,8 +151,9 @@ Keyword arguments:
 - `rescue_failed_steps`: re-solve a failed step once from the default warm start.
 
 Returns a named tuple of `closed_loop_strategies`, `closed_loop_xs`,
-`closed_loop_us`, the per-step diagnostics, `timing_stats`, and `timer` (the
-`TimerOutputs` object, for programmatic access to the section timings).
+`closed_loop_us`, the per-step diagnostics, and `timing_stats`. The section
+timings are printed at the end of the run; they live in ReducedGOOP's global
+timer `TO`, which the next `demo` call resets.
 """
 function demo(;
 	num_mpc_steps = 20,
@@ -510,7 +511,6 @@ function demo(;
 		dual_warmstart,
 		selected_dual_count,
 		timing_stats,
-		timer = TO,
 	)
 end
 
