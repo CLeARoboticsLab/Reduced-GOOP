@@ -28,10 +28,17 @@ function run_mpc(;
 	max_inner_iters = 100,
 	verbose = false,
 	debug = false,
+	linear_solver = :klu, # :svd (dense) or :klu (sparse); per Robotic_arm_receding.jl's defaults
+	kkt_backend = :symbolics, # :symbolics or :fast_differentiation
+	kkt_codegen = :fast_differentiation,
+	fd_codegen_chunk_size = 128, # bounds RuntimeGeneratedFunction size for :fast_differentiation codegen
+	make_gif = true, # combine the per-step plan plots into an animated GIF after the run
+	gif_fps = 3,
+	warmstart_speed_scale = nothing, # per-player scale on warmstart speed; defaults to 0.5 (of v_max) for every player
 )
 	num_players = 3
 	urgency_levels = [1, 0, 0] # agent 1 = emergency robot; agents 2, 3 = routine, equal priority
-	initial_states = [[-2.0, 0.0], [0.0, -2.0], [1.0, 2.0]]
+	initial_states = [[-2.0, 0.0], [0.0, -2.2], [1.0, 2.0]]
 	goal_positions = [[2.0, 0.0], [0.0, 2.0], [1.0, -2.0]]
 
 	num_mpc_steps = round(Int, total_time / Δt)
@@ -55,8 +62,21 @@ function run_mpc(;
 	GOOP_kkt_generator = get(kkt_generators, goop_version, nothing)
 	isnothing(GOOP_kkt_generator) && error("Unknown GOOP version: $(goop_version)")
 
-	@info "Building KKT system once for $(num_mpc_steps) MPC steps ($(total_time)s at Δt=$(Δt))..."
-	GOOP_kkt_system = GOOP_kkt_generator(problem)
+	symbolic_backends = Dict(
+		:symbolics => Hospital.ReducedGOOP.SymbolicTracingUtils.SymbolicsBackend(),
+		:fast_differentiation => Hospital.ReducedGOOP.SymbolicTracingUtils.FastDifferentiationBackend(),
+	)
+	backend = get(symbolic_backends, kkt_backend, nothing)
+	isnothing(backend) && error("Unknown KKT tracing backend: $(kkt_backend)")
+
+	@info "Building KKT system once for $(num_mpc_steps) MPC steps ($(total_time)s at Δt=$(Δt)), $(kkt_backend) backend, $(kkt_codegen) codegen..."
+	GOOP_kkt_system = GOOP_kkt_generator(
+		problem;
+		backend,
+		backend_options = (;),
+		codegen = kkt_codegen,
+		fd_codegen_chunk_size,
+	)
 	println("[MPC] KKT Dimension: ", GOOP_kkt_system.kkt_dimension)
 
 	primal_dimension = (state_dimension + control_dimension) * planning_horizon
@@ -71,19 +91,16 @@ function run_mpc(;
 		loosening_rate = 3.0,
 		min_stepsize = 1e-20,
 		linesearch = :backtracking,
-		linear_solve_algorithm = Hospital.ReducedGOOP.LinearSolve.KrylovJL_LSMR(),
-		use_linsolve = false,
 		record_convergence = false,
 		record_condition_number = false,
 		eta_retry_growth = 0.3,
-		perturbation_enabled = false,
-		stagnation_rtol = 1e-1,
-		perturbation_scale = 1e-6,
 		tsvd_threshold = 0.0,
-		use_marquardt_scaling = true,
+		use_marquardt_scaling = (linear_solver == :svd),
+		linear_solver,
 		verbose,
 	)
 
+	speed_scale = something(warmstart_speed_scale, fill(0.5, num_players))
 	current_states = [collect(p) for p in initial_states]
 	z₀ = Hospital.build_straight_line_warmstart(
 		num_players,
@@ -92,7 +109,7 @@ function run_mpc(;
 		goal_positions,
 		Δt;
 		v_max,
-		speed_scale = fill(0.5, num_players),
+		speed_scale,
 	)
 
 	closed_loop_positions = [[collect(initial_states[i])] for i in 1:num_players]
@@ -187,6 +204,7 @@ function run_mpc(;
 			v_max,
 			planning_horizon,
 			num_players,
+			speed_scale,
 		)
 		current_states = next_states
 	end
@@ -212,18 +230,51 @@ function run_mpc(;
 	)
 	println("Saved MPC closed-loop trajectory to $(run_dir) (per-step solves in $(steps_dir))")
 
+	make_gif && _build_mpc_animation(steps_dir, run_dir; fps = gif_fps)
+
 	(; closed_loop_positions, closed_loop_controls, step_statuses, step_kkt_errors, run_dir)
 end
 
-function shift_and_extend_warmstart(strategies, next_states, goal_positions, Δt, v_max, planning_horizon, num_players)
+"""
+	_build_mpc_animation(steps_dir, run_dir; fps = 3)
+
+Combine the per-step `step_*_plan.pdf` plots already saved under `steps_dir`
+into `run_dir/mpc_animation.gif`, without re-running the solver. Uses macOS's
+`qlmanage` to rasterize each PDF to PNG and `ffmpeg` (palette-based, for
+GIF-quality color) to assemble the sequence at `fps` frames per second.
+"""
+function _build_mpc_animation(steps_dir, run_dir; fps = 3)
+	pdf_files = sort(filter(f -> endswith(f, "_plan.pdf"), readdir(steps_dir; join = true)))
+	isempty(pdf_files) && return nothing
+
+	frames_dir = mktempdir()
+	for (i, pdf) in enumerate(pdf_files)
+		run(pipeline(`qlmanage -t -s 800 -o $frames_dir $pdf`; stdout = devnull, stderr = devnull))
+		mv(joinpath(frames_dir, basename(pdf) * ".png"), joinpath(frames_dir, "frame_$(lpad(i, 3, '0')).png"))
+	end
+
+	gif_path = joinpath(run_dir, "mpc_animation.gif")
+	frame_pattern = joinpath(frames_dir, "frame_%03d.png")
+	run(
+		pipeline(
+			`ffmpeg -y -framerate $fps -i $frame_pattern -vf "split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse" $gif_path`;
+			stdout = devnull,
+			stderr = devnull,
+		),
+	)
+	println("Saved MPC animation ($(fps)Hz) to $(gif_path)")
+	gif_path
+end
+
+function shift_and_extend_warmstart(strategies, next_states, goal_positions, Δt, v_max, planning_horizon, num_players, speed_scale)
 	"""
 	Standard MPC warmstart: drop the just-applied first step, shift the rest of
 	the previous plan up by one, and append one fresh tail point. The new tail
-	point is not a "hold last control" — it heads toward the goal at half
-	`v_max` (matching `Hospital.build_straight_line_warmstart`'s own nominal-
-	speed convention), since holding the last (possibly stale, corridor/
-	interference-shaped) control would drift away from the goal instead of
-	continuing to approach it.
+	point is not a "hold last control" — it heads toward the goal at
+	`speed_scale[i] * v_max` (matching `Hospital.build_straight_line_warmstart`'s
+	own nominal-speed convention), since holding the last (possibly stale,
+	corridor/interference-shaped) control would drift away from the goal
+	instead of continuing to approach it.
 	"""
 	warmstart = Float64[]
 	for i in 1:num_players
@@ -243,7 +294,7 @@ function shift_and_extend_warmstart(strategies, next_states, goal_positions, Δt
 
 		tail_direction = goal_positions[i] .- new_xs[planning_horizon-1]
 		tail_distance = sqrt(sum(tail_direction .^ 2))
-		tail_velocity = tail_distance > 0 ? tail_direction .* (0.5 * v_max / tail_distance) : zeros(2)
+		tail_velocity = tail_distance > 0 ? tail_direction .* (speed_scale[i] * v_max / tail_distance) : zeros(2)
 		new_us[planning_horizon-1] = tail_velocity
 		new_xs[planning_horizon] = new_xs[planning_horizon-1] .+ Δt .* tail_velocity
 		new_us[planning_horizon] = zeros(2)

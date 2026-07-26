@@ -280,6 +280,10 @@ function demo(;
 	η₀ = 5e-5,
 	tsvd_threshold = 0.0,
 	warmstart_speed_scale = nothing, # per-player scale on warmstart speed; defaults to 0.5 (of v_max) for every player
+	linear_solver = :klu, # :svd (dense) or :klu (sparse); per Robotic_arm_receding.jl's defaults
+	kkt_backend = :symbolics, # :symbolics or :fast_differentiation
+	kkt_codegen = :fast_differentiation,
+	fd_codegen_chunk_size = 128, # bounds RuntimeGeneratedFunction size for :fast_differentiation codegen
 )
 	reset_timer!(TO)
 	@timeit TO "experiment setup" Random.seed!(rng_seed)
@@ -287,7 +291,7 @@ function demo(;
 	# ── Scenario: paper Sec. 10, three-agent crossing-corridor toy example ─────
 	num_players = 3
 	urgency_levels = [1, 0, 0] # agent 1 = emergency robot; agents 2, 3 = routine, equal priority
-	initial_states = [[-2.0, 0.0], [0.0, -2.0], [1.0, 2.0]]
+	initial_states = [[-2.0, 0.0], [0.0, -2.2], [1.0, 2.0]]
 	goal_positions = [[2.0, 0.0], [0.0, 2.0], [1.0, -2.0]]
 
 	(; problem, flatten_parameters, state_dimension, control_dimension) = @timeit TO "problem setup" begin
@@ -310,8 +314,21 @@ function demo(;
 	GOOP_kkt_generator = get(kkt_generators, goop_version, nothing)
 	isnothing(GOOP_kkt_generator) && error("Unknown GOOP version: $(goop_version)")
 
-	@info "Building KKT system for $(goop_version) hospital GOOP formulation..."
-	GOOP_kkt_system = @timeit TO "KKT construction" GOOP_kkt_generator(problem)
+	symbolic_backends = Dict(
+		:symbolics => ReducedGOOP.SymbolicTracingUtils.SymbolicsBackend(),
+		:fast_differentiation => ReducedGOOP.SymbolicTracingUtils.FastDifferentiationBackend(),
+	)
+	backend = get(symbolic_backends, kkt_backend, nothing)
+	isnothing(backend) && error("Unknown KKT tracing backend: $(kkt_backend)")
+
+	@info "Building KKT system for $(goop_version) hospital GOOP formulation ($(kkt_backend) backend, $(kkt_codegen) codegen)..."
+	GOOP_kkt_system = @timeit TO "KKT construction" GOOP_kkt_generator(
+		problem;
+		backend,
+		backend_options = (;),
+		codegen = kkt_codegen,
+		fd_codegen_chunk_size,
+	)
 	println("[Primal-Dual] KKT Dimension: ", GOOP_kkt_system.kkt_dimension)
 	println("[Primal-Dual] variable Dimension: ", GOOP_kkt_system.variable_dimension)
 
@@ -344,16 +361,12 @@ function demo(;
 		loosening_rate = 3.0,
 		min_stepsize = 1e-20,
 		linesearch = :backtracking,
-		linear_solve_algorithm = ReducedGOOP.LinearSolve.KrylovJL_LSMR(),
-		use_linsolve = false,
 		record_convergence = true,
-		record_condition_number = true,
+		record_condition_number = (linear_solver == :svd),
 		eta_retry_growth = 0.3,
-		perturbation_enabled = false,
-		stagnation_rtol = 1e-1,
-		perturbation_scale = 1e-6,
 		tsvd_threshold,
-		use_marquardt_scaling = true,
+		use_marquardt_scaling = (linear_solver == :svd),
+		linear_solver,
 		verbose,
 	)
 

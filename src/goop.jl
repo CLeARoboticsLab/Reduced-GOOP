@@ -36,8 +36,15 @@ function ParametricGOOP(
 	shared_equality_constraint,
 	shared_inequality_constraint,
 )
-	primal_dims = BlockArrays.blocklengths(axes(x, 1)) # only(BlockArrays.blocksizes(x))
-	parameter_dims = BlockArrays.blocklengths(axes(θ, 1))
+	# [2026-07-26, Jaehan] Wrapped in `collect` since a newer BlockArrays release
+	# changed `blocklengths`'s return type to a lazy `BlockedUnitRangeLengths`
+	# view rather than a concrete `Vector{Int}` (which the struct's `primal_dims`/
+	# `parameter_dims` fields require exactly) -- this was breaking construction
+	# for every caller of this convenience constructor (Hospital.jl and
+	# Robotic_arm.jl alike) with a `MethodError`. Confirmed on Robotic_arm.demo()
+	# before/after. Ping me if this needs to change.
+	primal_dims = collect(BlockArrays.blocklengths(axes(x, 1))) # only(BlockArrays.blocksizes(x))
+	parameter_dims = collect(BlockArrays.blocklengths(axes(θ, 1)))
 	equality_dims = map(equality_constraints) do f
 		isnothing(f) ? 0 : length(f(x, θ))
 	end
