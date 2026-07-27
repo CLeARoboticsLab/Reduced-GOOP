@@ -23,6 +23,7 @@ function run_mpc(;
 	planning_horizon = 4,
 	v_max = 3.0,
 	urgency_clearance = 0.5,
+	interference_formula = :pointwise, # :pointwise (recommended) or :cpa (legacy, kept for comparison)
 	safety_radius = fill(0.3, 3),
 	goop_version = :complete,
 	max_inner_iters = 100,
@@ -33,8 +34,10 @@ function run_mpc(;
 	kkt_codegen = :fast_differentiation,
 	fd_codegen_chunk_size = 128, # bounds RuntimeGeneratedFunction size for :fast_differentiation codegen
 	make_gif = true, # combine the per-step plan plots into an animated GIF after the run
-	gif_fps = 3,
+	gif_fps = 5,
 	warmstart_speed_scale = nothing, # per-player scale on warmstart speed; defaults to 0.5 (of v_max) for every player
+	stagnation_patience = 3, # stop early if kkt_error fails to improve on its best-seen value for this many consecutive steps
+	stagnation_tolerance = 0.05, # relative wobble around the best-seen kkt_error that still counts as "no regression" (avoids false triggers from noise-level fluctuations)
 )
 	num_players = 3
 	urgency_levels = [1, 0, 0] # agent 1 = emergency robot; agents 2, 3 = routine, equal priority
@@ -52,6 +55,7 @@ function run_mpc(;
 		v_max,
 		safety_radius,
 		urgency_clearance,
+		interference_formula,
 	)
 
 	kkt_generators = Dict(
@@ -130,6 +134,11 @@ function run_mpc(;
 	fixed_xlim = (minimum(p[1] for p in all_points) - margin, maximum(p[1] for p in all_points) + margin)
 	fixed_ylim = (minimum(p[2] for p in all_points) - margin, maximum(p[2] for p in all_points) + margin)
 
+	best_kkt_error = Inf
+	best_step = 0
+	no_improve_streak = 0
+	stagnation_triggered = false
+
 	for step in 1:num_mpc_steps
 		θ = vcat(
 			(
@@ -138,6 +147,7 @@ function run_mpc(;
 			)...,
 		)
 
+		Hospital.reset_timer!(Hospital.TO)
 		output = Hospital.ReducedGOOP.solve(
 			Hospital.ReducedGOOP.InteriorPoint(),
 			GOOP_kkt_system,
@@ -151,6 +161,24 @@ function run_mpc(;
 		println(
 			"[MPC step $(step)/$(num_mpc_steps)] status = $(status), kkt_error = $(round(kkt_error; sigdigits = 4))",
 		)
+
+		step_tag_for_log = lpad(step, 3, '0')
+		open(joinpath(steps_dir, "step_$(step_tag_for_log)_console.log"), "w") do io
+			println(io, "MPC step $(step)/$(num_mpc_steps): status = $(status), kkt_error = $(kkt_error)")
+			println(io, "\nTiming summary (this step's solve only -- reset before each step, so this is NOT cumulative):")
+			show(io, Hospital.TO)
+			println(io)
+		end
+
+		if kkt_error < best_kkt_error
+			best_kkt_error = kkt_error
+			best_step = step
+			no_improve_streak = 0
+		elseif kkt_error <= best_kkt_error * (1 + stagnation_tolerance)
+			no_improve_streak = 0 # within noise tolerance of the best-seen value; not a real regression
+		else
+			no_improve_streak += 1
+		end
 
 		strategies = Hospital.extract_player_strategies(
 			x,
@@ -191,6 +219,7 @@ function run_mpc(;
 			goal_positions,
 			urgency_levels,
 			urgency_clearance,
+			safety_radius,
 		)
 		Hospital.CairoMakie.xlims!(step_ax, fixed_xlim...)
 		Hospital.CairoMakie.ylims!(step_ax, fixed_ylim...)
@@ -207,9 +236,25 @@ function run_mpc(;
 			speed_scale,
 		)
 		current_states = next_states
+
+		if no_improve_streak >= stagnation_patience
+			@warn "MPC stalled: kkt_error has not improved for $(stagnation_patience) consecutive steps (best was step $(best_step), kkt_error = $(round(best_kkt_error; sigdigits = 4))). Stopping early at step $(step)."
+			stagnation_triggered = true
+			break
+		end
 	end
 
-	fig, ax = plot_mpc_trajectories(; closed_loop_positions, initial_states, goal_positions, urgency_levels, urgency_clearance)
+	if stagnation_triggered && best_step < length(step_kkt_errors)
+		println(
+			"Truncating MPC output to best-performing step $(best_step)/$(length(step_kkt_errors)) (kkt_error = $(round(best_kkt_error; sigdigits = 4))).",
+		)
+		closed_loop_positions = [pos[1:(best_step + 1)] for pos in closed_loop_positions]
+		closed_loop_controls = [ctrl[1:best_step] for ctrl in closed_loop_controls]
+		step_statuses = step_statuses[1:best_step]
+		step_kkt_errors = step_kkt_errors[1:best_step]
+	end
+
+	fig, ax = plot_mpc_trajectories(; closed_loop_positions, initial_states, goal_positions, urgency_levels, urgency_clearance, safety_radius)
 	Hospital.CairoMakie.xlims!(ax, fixed_xlim...)
 	Hospital.CairoMakie.ylims!(ax, fixed_ylim...)
 	Hospital.CairoMakie.save(joinpath(run_dir, "mpc_trajectories.pdf"), fig)
@@ -307,7 +352,7 @@ function shift_and_extend_warmstart(strategies, next_states, goal_positions, Δt
 	warmstart
 end
 
-function plot_mpc_trajectories(; closed_loop_positions, initial_states, goal_positions, urgency_levels, urgency_clearance = nothing)
+function plot_mpc_trajectories(; closed_loop_positions, initial_states, goal_positions, urgency_levels, urgency_clearance = nothing, safety_radius = nothing)
 	num_players = length(closed_loop_positions)
 	palette = [:crimson, :dodgerblue, :seagreen, :darkorange, :purple]
 	colors = palette[mod1.(1:num_players, length(palette))]
@@ -371,6 +416,27 @@ function plot_mpc_trajectories(; closed_loop_positions, initial_states, goal_pos
 				color = colors[i],
 				linestyle = :dot,
 				linewidth = 2,
+			)
+		end
+	end
+
+	if !isnothing(safety_radius)
+		"""
+		Physical no-overlap safety circle per player, centered at their *current*
+		(most recent) closed-loop position, radius = safety_radius[i] -- the plain
+		`shared_pairwise_collision_avoidance` clearance, distinct from (and
+		smaller than) the urgency-interference buffer above.
+		"""
+		θ_circle = range(0, 2π; length = 100)
+		for i in 1:num_players
+			current_position = closed_loop_positions[i][end]
+			Hospital.CairoMakie.lines!(
+				ax,
+				current_position[1] .+ safety_radius[i] .* cos.(θ_circle),
+				current_position[2] .+ safety_radius[i] .* sin.(θ_circle);
+				color = colors[i],
+				linestyle = :dashdot,
+				linewidth = 1,
 			)
 		end
 	end

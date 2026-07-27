@@ -61,6 +61,7 @@ function get_setup(
 	v_max = 3.0,
 	safety_radius = fill(0.3, num_players),
 	urgency_clearance = 1.0,
+	interference_formula::Symbol = :pointwise, # :pointwise (recommended; stable) or :cpa (legacy closest-point-of-approach; kept for comparison, see urgency_interference_equality_violation)
 )
 	length(urgency_levels) == num_players ||
 		error("urgency_levels must have one entry per player.")
@@ -107,6 +108,14 @@ function get_setup(
 		end
 	end
 
+	function control_objective(; player)
+		"Control-effort regularizer (matches Intersection.jl/robotic_arm_core.jl's convention): lowest-priority tie-breaker, not in the paper."
+		function (z, _)
+			(; us) = trajectory(z; player)
+			sum(sum(u .^ 2) for u in us)
+		end
+	end
+
 	function corridor_objective(; player)
 		"""
 		J_cor (paper eq. 15): summed squared distance to the start→goal corridor
@@ -131,10 +140,7 @@ function get_setup(
 
 	function urgency_interference_equality_violation(z, agent, neighbors)
 		"""
-		Hard (equality-embedded) version of the urgency-interference margin: per
-		neighbor, sum `squared_violation(margin_t)` (0 when clear, positive when
-		violated) across every lookahead point into one "total violation" scalar,
-		then constrain that scalar to equal 0 — i.e. no violation at *any* point,
+		Hard (equality-embedded) version of the urgency-interference margin,
 		enforced the same way as `control_bound_violation`/`shared_pairwise_
 		collision_avoidance` rather than as a lexicographic preference level. This
 		removes urgency-avoidance from the preference hierarchy entirely (it
@@ -142,29 +148,59 @@ function get_setup(
 		the paper's design (there, interference is the *highest-priority
 		preference*, not a hard constraint).
 
-		This is the confirmed-working version: kkt_error ~0.19 (vs. stuck at
-		23-30 for the preference-level vector form), reproduced exactly on
-		re-test. A "worst-point" variant (`minimum` over points, then
-		`squared_violation` just that one value) was tried and abandoned — like
-		the earlier CPA clamp, the `minimum` reintroduced catastrophic symbolic
-		differentiation cost (killed after 84 minutes with no result). This sum
-		form — `squared_violation` applied per-point *before* summing, no min/max
-		anywhere — is the one to keep.
+		[2026-07-26] Two selectable forms, via `interference_formula`:
+
+		- `:pointwise` (default, recommended): plain pointwise actual-distance
+		  check, matching `shared_pairwise_collision_avoidance`'s pattern exactly
+		  (kept as a *vector*, one `squared_violation` element per neighbor/
+		  horizon-point, not summed into one scalar).
+		- `:cpa` (legacy): the original closest-point-of-approach formula, which
+		  extrapolates an *unrestricted-τ* hypothetical closest approach from each
+		  point's local relative velocity.
+
+		`:cpa` was found to register large "phantom" violations even when the
+		actual planned positions at that instant were nowhere near each other
+		(e.g. an observed case: actual dist² = 4.68 but CPA-predicted
+		min-separation² = 0.12), since it extrapolates from local velocity alone
+		with no bound on how far into the (possibly irrelevant) future/past that
+		hypothetical approach occurs. That caused the enforced-to-zero total to
+		swing unpredictably between MPC steps, destabilizing convergence — a
+		side-by-side MPC comparison (same scenario, both eventually reaching
+		kkt_error ≈0.173) showed `:cpa` oscillating between 0.17 and 3.06 across
+		the first 5 steps before settling, while `:pointwise` stayed flat at
+		≈0.173 from step 1. `:cpa` is kept only for regression comparison.
+		`urgency_clearance` should be set more generous than the plain
+		safety-radius clearance, since this is the "give way" buffer, not the
+		physical no-overlap radius.
 		"""
 		clearance_sq = urgency_clearance^2
 		trajectory_i = trajectory(z; player = agent)
 		horizon_len = length(trajectory_i.xs)
-		map(neighbors) do j
-			trajectory_j = trajectory(z; player = j)
-			sum(1:horizon_len) do t
-				q = trajectory_i.xs[t] .- trajectory_j.xs[t]
-				w = trajectory_i.us[t] .- trajectory_j.us[t]
-				q_sq = sum(q .^ 2)
-				qw = sum(q .* w)
-				w_sq = sum(w .^ 2)
-				min_separation_sq = q_sq - qw^2 / (w_sq + 1e-6)
-				squared_violation(min_separation_sq - clearance_sq)
+
+		if interference_formula == :pointwise
+			isempty(neighbors) && return Any[]
+			mapreduce(vcat, neighbors) do j
+				trajectory_j = trajectory(z; player = j)
+				map(1:horizon_len) do t
+					actual_dist_sq = sum((trajectory_i.xs[t] .- trajectory_j.xs[t]) .^ 2)
+					squared_violation(actual_dist_sq - clearance_sq)
+				end
 			end
+		elseif interference_formula == :cpa
+			map(neighbors) do j
+				trajectory_j = trajectory(z; player = j)
+				sum(1:horizon_len) do t
+					q = trajectory_i.xs[t] .- trajectory_j.xs[t]
+					w = trajectory_i.us[t] .- trajectory_j.us[t]
+					q_sq = sum(q .^ 2)
+					qw = sum(q .* w)
+					w_sq = sum(w .^ 2)
+					min_separation_sq = q_sq - qw^2 / (w_sq + 1e-6)
+					squared_violation(min_separation_sq - clearance_sq)
+				end
+			end
+		else
+			error("Unknown interference_formula: $(interference_formula) (expected :pointwise or :cpa)")
 		end
 	end
 
@@ -237,6 +273,10 @@ function get_setup(
 	# constraint* (see `urgency_interference_equality_violation` above), not a
 	# preference level — a deliberate experiment, so it does not appear here.
 	# Deliberately swapped vs. the paper here too: corridor ≻ own target.
+	# [2026-07-26] Temporarily isolating the interference-formula fix from the
+	# control_objective addition: control_objective made MPC unstable across
+	# steps (kkt_error jumping 1.7 → 10 → 7.7 → 9.8) even after fixing the CPA
+	# phantom-violation bug, so testing the interference fix alone here.
 	preferences = [
 		[goal_objective(; player = i), corridor_objective(; player = i)]
 		for i in 1:num_players
@@ -274,6 +314,7 @@ function demo(;
 	Δt = 0.1,
 	safety_radius = fill(0.3, 3),
 	urgency_clearance = 0.5,
+	interference_formula = :pointwise, # :pointwise (recommended) or :cpa (legacy, kept for comparison)
 	v_max = 3.0,
 	ϵ₀ = 0.1,
 	max_inner_iters = 1000,
@@ -303,6 +344,7 @@ function demo(;
 			v_max,
 			safety_radius,
 			urgency_clearance,
+			interference_formula,
 		)
 	end
 
@@ -389,7 +431,7 @@ function demo(;
 	strategies = extract_player_strategies(x, num_players, primal_dimension, state_dimension, control_dimension)
 
 	run_dir = @timeit TO "output directory setup" prepare_hospital_output_dir(debug)
-	fig, _ = plot_hospital_trajectories(; strategy = strategies, initial_states, goal_positions, urgency_levels, urgency_clearance)
+	fig, _ = plot_hospital_trajectories(; strategy = strategies, initial_states, goal_positions, urgency_levels, urgency_clearance, safety_radius)
 	CairoMakie.save(joinpath(run_dir, "trajectories.pdf"), fig)
 	if !isempty(kkt_error_history)
 		convergence_fig, _ = plot_convergence_plot(;
@@ -436,7 +478,7 @@ function safe_log10_history(history)
 	end
 end
 
-function plot_hospital_trajectories(; strategy, initial_states, goal_positions, urgency_levels, urgency_clearance = nothing)
+function plot_hospital_trajectories(; strategy, initial_states, goal_positions, urgency_levels, urgency_clearance = nothing, safety_radius = nothing)
 	num_players = length(strategy)
 	palette = [:crimson, :dodgerblue, :seagreen, :darkorange, :purple]
 	colors = palette[mod1.(1:num_players, length(palette))]
@@ -502,6 +544,28 @@ function plot_hospital_trajectories(; strategy, initial_states, goal_positions, 
 				color = colors[i],
 				linestyle = :dot,
 				linewidth = 2,
+			)
+		end
+	end
+
+	if !isnothing(safety_radius)
+		"""
+		Physical no-overlap safety circle per player, centered at their *current*
+		position, radius = safety_radius[i] — this is the plain `shared_pairwise_
+		collision_avoidance` clearance (distinct from, and smaller than, the
+		urgency-interference buffer above): two agents' safety circles touch
+		exactly when their separation equals safety_radius[i] + safety_radius[j].
+		"""
+		θ_circle = range(0, 2π; length = 100)
+		for i in 1:num_players
+			current_position = strategy[i].xs[1]
+			CairoMakie.lines!(
+				ax,
+				current_position[1] .+ safety_radius[i] .* cos.(θ_circle),
+				current_position[2] .+ safety_radius[i] .* sin.(θ_circle);
+				color = colors[i],
+				linestyle = :dashdot,
+				linewidth = 1,
 			)
 		end
 	end
