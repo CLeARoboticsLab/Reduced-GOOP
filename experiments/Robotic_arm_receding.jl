@@ -83,7 +83,18 @@ function demo(;
 	# 0.0 recovers the pre-Armijo accept-any-decrease behavior.
 	armijo_constant = 1e-4,
 	tol = 0.008,
+	# Newton iteration budget per MPC step. Raise it when a stiff grid (short
+	# horizon relative to the distance the arm must cover) needs more iterations
+	# than the default before the step is declared failed.
+	max_inner_iters = 500,
+	# Initial Levenberg-Marquardt regularization. Worth raising when solves stall
+	# or diverge on ill-conditioned grids.
+	η₀ = 1e-6,
 	save_outputs = true,
+	# Planning grid. `nothing` keeps the scenario defaults (T = 30, Δt = 0.1);
+	# the Δt/T benchmark overrides both to hold Δt·T fixed.
+	planning_horizon = nothing,
+	Δt = nothing,
 )
 	reset_timer!(TO)
 	@timeit TO "experiment setup" Random.seed!(rng_seed)
@@ -98,25 +109,34 @@ function demo(;
 	# ── Settings ───────────────────────────────────────────────────────────────
 	run_id =
 		"Robotic_arm_receding_" * Dates.format(Dates.now(), "yyyy-mm-dd_HHMMSS") *
-		"_$(goop_version)_$(dual_warmstart)"
+		"_$(goop_version)_$(dual_warmstart)" *
+		(isnothing(planning_horizon) ? "" : "_T$(planning_horizon)") *
+		(isnothing(Δt) ? "" : "_dt$(Δt)")
 	kkt_backend = :symbolics
 	kkt_backend_options = (;)
 	kkt_codegen = :fast_differentiation
 	solver = ReducedGOOP.InteriorPoint()
 	linesearch = :backtracking
 	ϵ₀ = 0.1 # placeholder in the robotic arm scenario (no inequality constraints here)
-	max_inner_iters = 500
 	use_running_goal_cost = false
 
 	# ── Scenario and problem (identical to the open-loop demo) ─────────────────
 	# Player 1: combined two-arm agent, Player 2: child/pet.
-	scenario_config = RA.demo_scenario_config(; use_running_goal_cost)
+	scenario_overrides = (;
+		(isnothing(planning_horizon) ? (;) : (; planning_horizon))...,
+		(isnothing(Δt) ? (;) : (; Δt))...,
+	)
+	scenario_config =
+		RA.demo_scenario_config(; use_running_goal_cost, scenario_overrides...)
+	# The scenario is the single source of truth from here on; re-bind the local
+	# names so a `nothing` kwarg picks up the scenario default.
 	(;
 		dynamics_model,
 		dynamics,
 		control_bounds,
 		num_players,
 		planning_horizon,
+		Δt,
 		base_initial_state1,
 		base_initial_state2,
 		goal_position1,
@@ -694,6 +714,12 @@ function demo(;
 		dual_warmstart,
 		selected_dual_count,
 		timing_stats,
+		planning_horizon,
+		Δt,
+		kkt_dimension = GOOP_kkt_system.kkt_dimension,
+		variable_dimension = GOOP_kkt_system.variable_dimension,
+		problem_setup_time_sec,
+		kkt_build_time_sec,
 		run_dir = isnothing(dirs) ? nothing : dirs.run_dir,
 	)
 end

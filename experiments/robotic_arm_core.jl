@@ -445,6 +445,10 @@ function demo_scenario_config(;
 	use_social_equilibrium_baseline = false,
 	use_running_goal_cost = false,
 	use_up_and_over_warmstart = false,
+	# Discretization is a kwarg so sweeps (e.g. the Δt/T benchmark) can vary the
+	# planning grid without duplicating the rest of the scenario.
+	planning_horizon = 30,
+	Δt = 0.1,
 )
 	dynamics_model = SingleIntegrator3D()
 
@@ -472,8 +476,6 @@ function demo_scenario_config(;
 	lane_width = 2
 
 	# ── Build dynamics ─────────────────────────────────────────────────────────
-	planning_horizon = 30
-	Δt = 0.1
 	state_dimension = 3
 	control_dimension = 3
 	control_bounds = (; lb = [-10.0, -10.0, -10.0], ub = [10.0, 10.0, 10.0])
