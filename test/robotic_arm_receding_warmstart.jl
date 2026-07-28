@@ -29,28 +29,22 @@ const RAR = Robotic_arm_receding
     @test length(kkt.stationarity_dual_dims) == 13
     @test kkt.all_equality_stationarity_dual_dims == collect(6:26)
     @test length(kkt.innermost_stationarity_dual_dims) == 7
-    @test isempty(intersect(
-        kkt.all_equality_stationarity_dual_dims,
-        kkt.inequality_constraint_dual_dims,
-    ))
+    @test isempty(
+        intersect(
+            kkt.all_equality_stationarity_dual_dims,
+            kkt.inequality_constraint_dual_dims,
+        ),
+    )
 
     shifted_primal = [10.0, 20.0, 30.0]
-    previous_z = collect(1001.0:(1000.0+kkt.variable_dimension))
+    previous_z = collect(1001.0:(1000.0 + kkt.variable_dimension))
 
-    primal_only = RAR.build_receding_warmstart(
-        shifted_primal,
-        previous_z,
-        kkt,
-        :primal_only,
-    )
+    primal_only =
+        RAR.build_receding_warmstart(shifted_primal, previous_z, kkt, :primal_only)
     @test primal_only == shifted_primal
 
-    equality_only = RAR.build_receding_warmstart(
-        shifted_primal,
-        previous_z,
-        kkt,
-        :equality_duals,
-    )
+    equality_only =
+        RAR.build_receding_warmstart(shifted_primal, previous_z, kkt, :equality_duals)
     @test equality_only[kkt.primal_dims] == shifted_primal
     @test equality_only[kkt.equality_constraint_dual_dims] ==
           previous_z[kkt.equality_constraint_dual_dims]

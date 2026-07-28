@@ -18,41 +18,41 @@ end
 
 @testset "Interior-Point Reduced KKT" begin
     #=
-	Single-Player Box-Constrained Benchmark Family
-	----------------------------------------------
+    Single-Player Box-Constrained Benchmark Family
+    ----------------------------------------------
 
-	Decision variable:
+    Decision variable:
 
-	  x in R^5
+    x in R^5
 
-	Known solution:
+    Known solution:
 
-	  x* = [0.0, 0.6, 1.0, 0.4, 1.4]
+    x* = [0.0, 0.6, 1.0, 0.4, 1.4]
 
-	Raw objective target:
+    Raw objective target:
 
-	  t = [-0.4, 0.6, 1.4, 0.4, 1.4]
+    t = [-0.4, 0.6, 1.4, 0.4, 1.4]
 
-	Constraints:
+    Constraints:
 
-	  Quadratic/linear variant:
-	    x - lower >= 0
-	    upper - x >= 0
+    Quadratic/linear variant:
+     x - lower >= 0
+     upper - x >= 0
 
-	  Nonlinear/nonlinear variant:
-	    exp.(x - lower) - 1 >= 0
-	    exp.(upper - x) - 1 >= 0
+    Nonlinear/nonlinear variant:
+     exp.(x - lower) - 1 >= 0
+     exp.(upper - x) - 1 >= 0
 
-	  lower = [0, 0, 0, 0, 0]
-	  upper = [2, 2, 1, 2, 2]
+    lower = [0, 0, 0, 0, 0]
+    upper = [2, 2, 1, 2, 2]
 
-	Intentional active set at x*:
+    Intentional active set at x*:
 
-	  active:   x_1 = lower_1 = 0,  x_3 = upper_3 = 1
-	  inactive: all other lower and upper bounds
+    active:   x_1 = lower_1 = 0,  x_3 = upper_3 = 1
+    inactive: all other lower and upper bounds
 
-	The expected solution is the projection of t onto the box constraints.
-	=#
+    The expected solution is the projection of t onto the box constraints.
+    =#
     @testset "Single-Player Problems" begin
         @testset "Single-Level" begin
             @testset "Quadratic Objective, Linear Constraints" begin
@@ -66,55 +66,55 @@ end
     end
 
     #=
-	Three-Player Coupled Generalized Nash Benchmark Family
-	-----------------------------------------------------
+    Three-Player Coupled Generalized Nash Benchmark Family
+    -----------------------------------------------------
 
-	Decision variables:
+    Decision variables:
 
-	  x_i in R^5,  i = 1,2,3
+    x_i in R^5,  i = 1,2,3
 
-	Known solution:
+    Known solution:
 
-	  x_1* = [0.40, 0.90, 0.55, 1.20, 0.80]
-	  x_2* = [0.45, 1.00, 0.60, 1.30, 0.90]
-	  x_3* = [0.50, 1.10, 0.65, 1.40, 1.00]
+    x_1* = [0.40, 0.90, 0.55, 1.20, 0.80]
+    x_2* = [0.45, 1.00, 0.60, 1.30, 0.90]
+    x_3* = [0.50, 1.10, 0.65, 1.40, 1.00]
 
-	Player i's raw objective target is:
+    Player i's raw objective target is:
 
-	  t_i = x_i* + [0.6, 0, -0.4, 0, 0]
+    t_i = x_i* + [0.6, 0, -0.4, 0, 0]
 
-	So each player would prefer coordinate 1 to be larger and coordinate 3 to be
-	smaller than the final solution. The coupled constraints create the active
-	resources that force the equilibrium to x*.
+    So each player would prefer coordinate 1 to be larger and coordinate 3 to be
+    smaller than the final solution. The coupled constraints create the active
+    resources that force the equilibrium to x*.
 
-	Coupled resource expression:
+    Coupled resource expression:
 
-	  c_{i,j}(x) = x_{i,j} + 0.25 * sum(x_{k,j} for k != i)
+    c_{i,j}(x) = x_{i,j} + 0.25 * sum(x_{k,j} for k != i)
 
-	Player i constraints:
+    Player i constraints:
 
-	  C_{i,1} - c_{i,1}(x) >= 0    active upper resource
-	  C_{i,2} - c_{i,2}(x) >= 0    inactive upper resource, residual slack 1
-	  c_{i,3}(x) - F_{i,3} >= 0    active lower resource
-	  c_{i,4}(x) - F_{i,4} >= 0    inactive lower resource, residual slack 1
+    C_{i,1} - c_{i,1}(x) >= 0    active upper resource
+    C_{i,2} - c_{i,2}(x) >= 0    inactive upper resource, residual slack 1
+    c_{i,3}(x) - F_{i,3} >= 0    active lower resource
+    c_{i,4}(x) - F_{i,4} >= 0    inactive lower resource, residual slack 1
 
-	where:
+    where:
 
-	  C_{i,1} = c_{i,1}(x*)
-	  C_{i,2} = c_{i,2}(x*) + 1
-	  F_{i,3} = c_{i,3}(x*)
-	  F_{i,4} = c_{i,4}(x*) - 1
+    C_{i,1} = c_{i,1}(x*)
+    C_{i,2} = c_{i,2}(x*) + 1
+    F_{i,3} = c_{i,3}(x*)
+    F_{i,4} = c_{i,4}(x*) - 1
 
-	For the nonlinear constraint transform, these inactive constraints evaluate
-	to exp(1) - 1, although the underlying affine residual slack is 1.
+    For the nonlinear constraint transform, these inactive constraints evaluate
+    to exp(1) - 1, although the underlying affine residual slack is 1.
 
-	This is a true generalized Nash setup: every player's feasible set depends
-	on all players' decision variables. The active coordinate-1 and coordinate-3
-	resource equations are player-specific and jointly nonsingular, so the known
-	solution fixes the distribution across players, not just aggregate totals.
+    This is a true generalized Nash setup: every player's feasible set depends
+    on all players' decision variables. The active coordinate-1 and coordinate-3
+    resource equations are player-specific and jointly nonsingular, so the known
+    solution fixes the distribution across players, not just aggregate totals.
 
-	Each player's single-level objective covers coordinates {1,2,3,4,5}.
-	=#
+    Each player's single-level objective covers coordinates {1,2,3,4,5}.
+    =#
     @testset "Three-Player Problems" begin
         @testset "Single-Level" begin
             @testset "Quadratic Objective, Linear Constraints" begin
@@ -159,10 +159,12 @@ end
     problem = ReducedGOOP.ParametricGOOP(
         x_template,
         θ_template;
-        preferences = [Function[
-            (x, θ) -> sum(abs2, x[Block(1)]),
-            (x, θ) -> sum(abs2, x[Block(1)] .- 1.0),
-        ]],
+        preferences = [
+            Function[
+                (x, θ) -> sum(abs2, x[Block(1)]),
+                (x, θ) -> sum(abs2, x[Block(1)] .- 1.0),
+            ],
+        ],
         is_prioritized_constraint = [[false, false]],
         equality_constraints = [(x, θ) -> [x[Block(1)][1]]],
         inequality_constraints = [(x, θ) -> [x[Block(1)][2]]],
@@ -173,15 +175,15 @@ end
 
     @test length(kkt.equality_constraint_dual_dims) == 2
     @test length(kkt.stationarity_dual_dims) == 2
-    @test kkt.all_equality_stationarity_dual_dims == vcat(
-        kkt.equality_constraint_dual_dims,
-        kkt.stationarity_dual_dims,
-    )
+    @test kkt.all_equality_stationarity_dual_dims ==
+          vcat(kkt.equality_constraint_dual_dims, kkt.stationarity_dual_dims)
     @test kkt.innermost_stationarity_dual_dims == kkt.stationarity_dual_dims
-    @test isempty(intersect(
-        kkt.all_equality_stationarity_dual_dims,
-        kkt.inequality_constraint_dual_dims,
-    ))
+    @test isempty(
+        intersect(
+            kkt.all_equality_stationarity_dual_dims,
+            kkt.inequality_constraint_dual_dims,
+        ),
+    )
     other_dims = setdiff(
         1:kkt.variable_dimension,
         vcat(
@@ -260,10 +262,8 @@ end
         native.F_symbolic,
         native.z_symbolic,
     )
-    optimized_symbolic_jacobian = ReducedGOOP._build_symbolics_sparse_jacobian(
-        native.F_symbolic,
-        native.z_symbolic,
-    )
+    optimized_symbolic_jacobian =
+        ReducedGOOP._build_symbolics_sparse_jacobian(native.F_symbolic, native.z_symbolic)
     @test isequal(reference_symbolic_jacobian, optimized_symbolic_jacobian)
 
     n = native.variable_dimension

@@ -27,25 +27,58 @@ n = sum(problem.primal_dims)
 d1 = problem.primal_dims[1]
 
 instance_states = (;
-	initial_state1 = scenario_config.base_initial_state1,
-	initial_state2 = scenario_config.base_initial_state2,
-	initial_state3 = scenario_config.initial_state3,
+    initial_state1 = scenario_config.base_initial_state1,
+    initial_state2 = scenario_config.base_initial_state2,
+    initial_state3 = scenario_config.initial_state3,
 )
-(; warmstart_solution) = Robotic_arm.build_default_warmstart(instance_states, scenario_config)
+(; warmstart_solution) =
+    Robotic_arm.build_default_warmstart(instance_states, scenario_config)
 w = collect(warmstart_solution)[1:n]
 
 runs_root = joinpath(REPO_ROOT, "data", "robotic_arm_open_loop", "runs")
-swerve = collect(JLD2.load_object(joinpath(runs_root, "Robotic_arm_single_robot_agent_3_levels", "data", "problem", "solution", "solution_dict_instance_1_eps0.1.jld2"))["x"])[1:n]
-direct3 = collect(JLD2.load_object(joinpath(@__DIR__, "results", "cross_warmstart_solution.jld2"))["x"])[1:n]
-direct4 = collect(JLD2.load_object(joinpath(runs_root, "Robotic_arm_single_robot_agent_4_levels", "data", "problem", "solution", "solution_dict_instance_1_eps0.1.jld2"))["x"])[1:n]
+swerve = collect(
+    JLD2.load_object(
+        joinpath(
+            runs_root,
+            "Robotic_arm_single_robot_agent_3_levels",
+            "data",
+            "problem",
+            "solution",
+            "solution_dict_instance_1_eps0.1.jld2",
+        ),
+    )["x"],
+)[1:n]
+direct3 = collect(
+    JLD2.load_object(joinpath(@__DIR__, "results", "cross_warmstart_solution.jld2"))["x"],
+)[1:n]
+direct4 = collect(
+    JLD2.load_object(
+        joinpath(
+            runs_root,
+            "Robotic_arm_single_robot_agent_4_levels",
+            "data",
+            "problem",
+            "solution",
+            "solution_dict_instance_1_eps0.1.jld2",
+        ),
+    )["x"],
+)[1:n]
 
 fmt(v) = round(v; sigdigits = 4)
 dist(a, b) = fmt(norm(a .- b))
 p1(v) = v[1:d1]
-p2(v) = v[(d1+1):n]
+p2(v) = v[(d1 + 1):n]
 
-for (label, target) in [("swerving 3-level eq", swerve), ("direct 3-level eq  ", direct3), ("direct 4-level eq  ", direct4)]
-	println("‖warmstart − $(label)‖ : total $(dist(w, target)),  robot-block $(dist(p1(w), p1(target))),  child-block $(dist(p2(w), p2(target)))")
+for (label, target) in [
+    ("swerving 3-level eq", swerve),
+    ("direct 3-level eq  ", direct3),
+    ("direct 4-level eq  ", direct4),
+]
+    println(
+        "‖warmstart − $(label)‖ : total $(dist(w, target)),  robot-block $(dist(p1(w), p1(target))),  child-block $(dist(p2(w), p2(target)))",
+    )
 end
 println()
-println("‖swerve − direct3‖ = $(dist(swerve, direct3)) (inter-equilibrium gap, robot $(dist(p1(swerve), p1(direct3))), child $(dist(p2(swerve), p2(direct3))))")
+println(
+    "‖swerve − direct3‖ = $(dist(swerve, direct3)) (inter-equilibrium gap, robot $(dist(p1(swerve), p1(direct3))), child $(dist(p2(swerve), p2(direct3))))",
+)
