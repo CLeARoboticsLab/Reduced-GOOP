@@ -11,7 +11,7 @@ TODO (@Jingqi/@DongHo): Please flesh this comment out with more of the math,
 or with a pointer to a LaTeX derivation somewhere in this repository.
 """
 
-struct GOOPKKTSystem{T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11}
+struct GOOPKKTSystem{T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11}
     "A callable function that computes F!(val, z; θ, ϵ) in-place for 'val'"
     F!::T1
     "A callable function that computes ∇F!(val, z; θ, ϵ) in-place for 'val'"
@@ -103,14 +103,15 @@ function _build_fd_codegen_function(
     ;
     chunk_size = nothing,
 )
-    isnothing(chunk_size) || chunk_size > 0 ||
+    isnothing(chunk_size) ||
+        chunk_size > 0 ||
         throw(ArgumentError("FastDifferentiation codegen chunk_size must be positive."))
     fd_z = SymbolicTracingUtils.FD.make_variables(:z, length(z_symbolic))
     fd_θ = SymbolicTracingUtils.FD.make_variables(:θ, length(θ_symbolic))
     fd_ϵ = SymbolicTracingUtils.FD.make_variables(:ϵ, 1)
     fd_η = SymbolicTracingUtils.FD.make_variables(:η, 1)
 
-    varmap = Dict{Any, Any}()
+    varmap = Dict{Any,Any}()
     for (s, f) in zip(
         Iterators.flatten((z_symbolic, θ_symbolic, (ϵ_symbolic, η_symbolic))),
         Iterators.flatten((fd_z, fd_θ, fd_ϵ, fd_η)),
@@ -118,7 +119,7 @@ function _build_fd_codegen_function(
         varmap[Symbolics.unwrap(s)] = f
     end
 
-    memo = IdDict{Any, Any}()
+    memo = IdDict{Any,Any}()
     fd_exprs = SymbolicTracingUtils.FD.Node[
         SymbolicTracingUtils.FD.Node(_symbolics_to_fd(expr, varmap, memo)) for
         expr in exprs
@@ -129,11 +130,7 @@ function _build_fd_codegen_function(
     # same way.
     fd_inputs = vcat(fd_z, fd_θ, fd_ϵ, fd_η)
     if isnothing(chunk_size) || length(fd_exprs) <= chunk_size
-        _f! = SymbolicTracingUtils.FD.make_function(
-            fd_exprs,
-            fd_inputs;
-            in_place = true,
-        )
+        _f! = SymbolicTracingUtils.FD.make_function(fd_exprs, fd_inputs; in_place = true)
         return (result, z, θ, ϵ, η) -> _f!(result, vcat(z, θ, ϵ, η))
     end
 
@@ -176,7 +173,10 @@ function _build_symbolics_sparse_jacobian(
     ops::AbstractVector{<:Symbolics.Num},
     vars::AbstractVector{<:Symbolics.Num},
 )
-    sp = @timeit TO "Symbolics Jacobian sparsity detection" Symbolics.jacobian_sparsity(ops, vars)
+    sp = @timeit TO "Symbolics Jacobian sparsity detection" Symbolics.jacobian_sparsity(
+        ops,
+        vars,
+    )
     rows, cols, _ = SparseArrays.findnz(sp)
     values = @timeit TO "Symbolics derivative expansion" begin
         unwrapped_ops = Symbolics.unwrap.(ops)
@@ -188,9 +188,7 @@ function _build_symbolics_sparse_jacobian(
         else
             differentials = Symbolics.Differential.(unwrapped_vars)
             map(rows, cols) do row, col
-                Symbolics.Num(
-                    Symbolics.executediff(differentials[col], unwrapped_ops[row]),
-                )
+                Symbolics.Num(Symbolics.executediff(differentials[col], unwrapped_ops[row]))
             end
         end
     end
@@ -221,16 +219,18 @@ function BuildGOOPKKTSystem(
     backend_options = (;),
     codegen = :native,
     fd_codegen_chunk_size = nothing,
-) where {T <: Union{SymbolicTracingUtils.FD.Node, SymbolicTracingUtils.Symbolics.Num}}
+) where {T<:Union{SymbolicTracingUtils.FD.Node,SymbolicTracingUtils.Symbolics.Num}}
     codegen in (:native, :fast_differentiation) ||
         error("Unknown codegen option: $(codegen). Use :native or :fast_differentiation.")
     # The FD tracing backend already generates code through FD.
     use_fd_codegen =
         codegen === :fast_differentiation && T === SymbolicTracingUtils.Symbolics.Num
-    isnothing(fd_codegen_chunk_size) || use_fd_codegen || error(
-        "fd_codegen_chunk_size requires SymbolicsBackend with " *
-        "codegen = :fast_differentiation.",
-    )
+    isnothing(fd_codegen_chunk_size) ||
+        use_fd_codegen ||
+        error(
+            "fd_codegen_chunk_size requires SymbolicsBackend with " *
+            "codegen = :fast_differentiation.",
+        )
     @timeit TO "KKT executable construction" begin
         if T == SymbolicTracingUtils.FD.Node
             # FD.make_function only accepts vector-valued symbolic inputs, so the
@@ -272,10 +272,7 @@ function BuildGOOPKKTSystem(
         ∇F_z! = @timeit TO "Jacobian function construction" let
             ∇F_symbolic = @timeit TO "Jacobian symbolic construction" begin
                 if T === SymbolicTracingUtils.Symbolics.Num
-                    _build_symbolics_sparse_jacobian(
-                        F_symbolic,
-                        z_symbolic,
-                    )
+                    _build_symbolics_sparse_jacobian(F_symbolic, z_symbolic)
                 else
                     SymbolicTracingUtils.sparse_jacobian(F_symbolic, z_symbolic)
                 end

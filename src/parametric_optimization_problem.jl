@@ -45,7 +45,8 @@ function ParametricOptimizationProblem(;
     # μ = z[Block(3)]
 
     backend = SymbolicTracingUtils.SymbolicsBackend()
-    x = SymbolicTracingUtils.make_variables(backend, :x, primal_dimension) |> 
+    x =
+        SymbolicTracingUtils.make_variables(backend, :x, primal_dimension) |>
         to_blockvector(fill(primal_dimension ÷ num_players, num_players))
     λ = SymbolicTracingUtils.make_variables(backend, :λ, equality_dimension)
     μ = SymbolicTracingUtils.make_variables(backend, :μ, inequality_dimension)
@@ -58,7 +59,8 @@ function ParametricOptimizationProblem(;
     # Symbolics.@variables θ̃[1:(parameter_dimension)]
     # θ = Symbolics.scalarize(θ̃)
     # θ = BlockArray(θ, fill(parameter_dimension ÷ num_players, num_players))
-    θ = SymbolicTracingUtils.make_variables(backend, :θ, parameter_dimension) |>
+    θ =
+        SymbolicTracingUtils.make_variables(backend, :θ, parameter_dimension) |>
         to_blockvector(fill(parameter_dimension ÷ num_players, num_players))
 
     # Build symbolic expressions for objective and constraints.
@@ -76,7 +78,8 @@ function ParametricOptimizationProblem(;
     primal_dims = 1:primal_dimension
     preference_slack_dims = 1:0
     interior_point_slack_dims = 1:0
-    inequality_constraint_dual_dims = primal_dimension + equality_dimension + 1 : total_dimension
+    inequality_constraint_dual_dims =
+        (primal_dimension + equality_dimension + 1):total_dimension
 
     z = Vector{symbolic_type}([x; λ; μ])
     θ = Vector{symbolic_type}(θ)

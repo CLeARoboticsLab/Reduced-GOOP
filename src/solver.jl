@@ -118,12 +118,10 @@ function solve(
     linear_solver ∈ (:svd, :klu) || throw(
         ArgumentError("Unsupported linear_solver $(linear_solver). Use :svd or :klu."),
     )
-    klu_singularity_eta_growth >= 1 || throw(
-        ArgumentError("klu_singularity_eta_growth must be at least 1."),
-    )
-    klu_singularity_max_retries >= 0 || throw(
-        ArgumentError("klu_singularity_max_retries must be nonnegative."),
-    )
+    klu_singularity_eta_growth >= 1 ||
+        throw(ArgumentError("klu_singularity_eta_growth must be at least 1."))
+    klu_singularity_max_retries >= 0 ||
+        throw(ArgumentError("klu_singularity_max_retries must be nonnegative."))
     use_klu = linear_solver === :klu
     if use_klu && (record_condition_number || tsvd_threshold > 0 || use_marquardt_scaling)
         throw(
@@ -523,11 +521,12 @@ function solve(
                             )
                             F_z_next = norm(F_trial, 2)
                             while (
-                                      F_z_next^2 >=
-                                      F_z^2 + 2.0 * armijo_constant * α * armijo_slope
-                                  ) ||
-                                  _nonnegativity_violated(σ, δσ, α) ||
-                                  _nonnegativity_violated(γ, δγ, α)
+                                          F_z_next^2 >=
+                                          F_z^2 +
+                                          2.0 * armijo_constant * α * armijo_slope
+                                      ) ||
+                                      _nonnegativity_violated(σ, δσ, α) ||
+                                      _nonnegativity_violated(γ, δγ, α)
                                 if α < min_stepsize
                                     break # exhausted at this η — escalate below
                                 end
