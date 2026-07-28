@@ -12,16 +12,25 @@ using Statistics: mean, median, std
 using ReducedGOOP
 using TimerOutputs: @timeit, reset_timer!
 
-# Reuse an already-loaded (e.g. Revise-tracked via includet) Main.Robotic_arm
-# instead of baking in a private copy: `includet` is non-recursive, so a copy
-# created by a plain `include` here would never pick up edits to Robotic_arm.jl.
-if isdefined(Main, :Robotic_arm)
-	const RA = Main.Robotic_arm
-else
-	include(joinpath(@__DIR__, "Robotic_arm.jl"))
-	const RA = Robotic_arm
+# Reuse a Revise-tracked core when one is already loaded in Main. The fallback
+# keeps this entry point loadable on its own in a fresh Julia process.
+const ROBOTIC_ARM_CORE_PATH = joinpath(@__DIR__, "robotic_arm_core.jl")
+if !isdefined(Main, :RoboticArmCore)
+	Base.include(Main, ROBOTIC_ARM_CORE_PATH)
 end
-const TO = ReducedGOOP.TO
+Main.RoboticArmCore isa Module ||
+	error("Main.RoboticArmCore exists but is not a module.")
+using Main.RoboticArmCore
+
+# Preserve qualified access to the core API from this entry-point module.
+for core_symbol in names(Main.RoboticArmCore)
+	core_symbol === :RoboticArmCore && continue
+	@eval export $core_symbol
+end
+
+# Share the visualization layer with the open-loop entry point; neither entry
+# point depends on the other.
+include(joinpath(@__DIR__, "robotic_arm_visualization.jl"))
 
 const DUAL_WARMSTART_MODES = (
 	:primal_only,
@@ -127,7 +136,7 @@ function demo(;
 		(isnothing(Δt) ? (;) : (; Δt))...,
 	)
 	scenario_config =
-		RA.demo_scenario_config(; use_running_goal_cost, scenario_overrides...)
+		demo_scenario_config(; use_running_goal_cost, scenario_overrides...)
 	# The scenario is the single source of truth from here on; re-bind the local
 	# names so a `nothing` kwarg picks up the scenario default.
 	(;
@@ -155,7 +164,7 @@ function demo(;
 		error("Expected an even stacked two-arm control dimension.")
 
 	problem_setup_time_sec = @elapsed @timeit TO "problem setup" begin
-		(; problem, flatten_parameters) = RA.get_setup(scenario_config)
+		(; problem, flatten_parameters) = get_setup(scenario_config)
 	end
 
 	# Built exactly once; every MPC iteration reuses the compiled KKT system and
@@ -255,7 +264,7 @@ function demo(;
 		nothing
 	end
 	visualization_config =
-		save_outputs ? RA.VisualizationConfig(; dirs, show_interactive_trajectory) : nothing
+		save_outputs ? VisualizationConfig(; dirs, show_interactive_trajectory) : nothing
 
 	# ── MPC state ──────────────────────────────────────────────────────────────
 	current_state1 = copy(base_initial_state1)
@@ -271,12 +280,12 @@ function demo(;
 		initial_state3 = current_state_child,
 	)
 	(; warmstart_solution) =
-		@timeit TO "warmstart construction" RA.build_default_warmstart(
+		@timeit TO "warmstart construction" build_default_warmstart(
 			instance_states,
 			scenario_config,
 		)
 	stage_warmstart = warmstart_solution
-	initial_controls = RA.extract_initial_controls(
+	initial_controls = extract_initial_controls(
 		stage_warmstart,
 		primal_dimensions,
 		dynamics,
@@ -313,7 +322,7 @@ function demo(;
 			initial_control3 = current_control_child,
 		)
 		instance_parameters =
-			@timeit TO "instance parameter construction" RA.build_instance_parameters(
+			@timeit TO "instance parameter construction" build_instance_parameters(
 				flatten_parameters,
 				instance_states,
 				scenario_config,
@@ -332,7 +341,7 @@ function demo(;
 			stage_warmstart_primal =
 				length(stage_warmstart) == GOOP_kkt_system.variable_dimension ?
 				stage_warmstart[GOOP_kkt_system.primal_dims] : stage_warmstart
-			@timeit TO "warmstart visualization" RA.save_warmstart_visualizations(
+			@timeit TO "warmstart visualization" save_warmstart_visualizations(
 				stage_warmstart_primal;
 				filename_tag = "step_$(k)",
 				primal_dimensions,
@@ -366,7 +375,7 @@ function demo(;
 				"retrying from the default warmstart.",
 			)
 			rescue_warmstart =
-				RA.build_default_warmstart(instance_states, scenario_config).warmstart_solution
+				build_default_warmstart(instance_states, scenario_config).warmstart_solution
 			elapsed_time += @elapsed rescue_output =
 				@timeit TO "solver invocation (rescue)" ReducedGOOP.solve(
 					solver,
@@ -422,7 +431,7 @@ function demo(;
 			)
 		end
 
-		strategies = @timeit TO "solution postprocessing" RA.extract_player_strategies(
+		strategies = @timeit TO "solution postprocessing" extract_player_strategies(
 			output.x,
 			primal_dimensions,
 			dynamics,
@@ -494,7 +503,7 @@ function demo(;
 					),
 					solution_dict,
 				)
-				RA.save_convergence_diagnostics(
+				save_convergence_diagnostics(
 					solution_dict,
 					dirs.convergence_plots_dir,
 					k,
@@ -533,7 +542,7 @@ function demo(;
 			dynamics,
 			planning_horizon,
 		)
-		shifted_primal = RA.flatten_warmstart_solution(
+		shifted_primal = flatten_warmstart_solution(
 			planning_horizon,
 			[strategy.xs for strategy in shifted_strategies],
 			[strategy.us for strategy in shifted_strategies],
@@ -652,7 +661,7 @@ function demo(;
 					"selected_dual_count" => selected_dual_count,
 					"total_equality_stationarity_dual_count" =>
 						total_equality_stationarity_dual_count,
-					"dynamics_model" => RA.dynamics_model_name(dynamics_model),
+					"dynamics_model" => dynamics_model_name(dynamics_model),
 					"planning_horizon" => planning_horizon,
 					"num_mpc_steps" => num_mpc_steps,
 					"tol" => tol,
@@ -871,7 +880,7 @@ function save_solve_time_plots(step_solve_times, step_statuses, timing_plots_dir
 		exclude_first ?
 		"Warm-solve times (step 1 excluded: $(round(step_solve_times[1]; digits = 1)) s incl. one-time JIT)" :
 		"Per-step solve times"
-	hist_fig = RA.serif_figure(size = (900, 600))
+	hist_fig = serif_figure(size = (900, 600))
 	hist_ax = CairoMakie.Axis(
 		hist_fig[1, 1];
 		xlabel = "solve time [s]",
@@ -886,9 +895,9 @@ function save_solve_time_plots(step_solve_times, step_statuses, timing_plots_dir
 		strokecolor = :black,
 		strokewidth = 1,
 	)
-	RA.save_figure(joinpath(timing_plots_dir, "solve_time_histogram.pdf"), hist_fig)
+	save_figure(joinpath(timing_plots_dir, "solve_time_histogram.pdf"), hist_fig)
 
-	bar_fig = RA.serif_figure(size = (950, 600))
+	bar_fig = serif_figure(size = (950, 600))
 	bar_ax = CairoMakie.Axis(
 		bar_fig[1, 1];
 		xlabel = "MPC step",
@@ -903,7 +912,7 @@ function save_solve_time_plots(step_solve_times, step_statuses, timing_plots_dir
 		strokecolor = :black,
 		strokewidth = 0.5,
 	)
-	RA.save_figure(joinpath(timing_plots_dir, "solve_time_per_step.pdf"), bar_fig)
+	save_figure(joinpath(timing_plots_dir, "solve_time_per_step.pdf"), bar_fig)
 end
 
 # ── Output / plotting helpers ──────────────────────────────────────────────────
@@ -942,11 +951,11 @@ function save_step_plots(
 	save_interactive,
 )
 	# Plots keep the per-arm view of the combined two-arm agent.
-	plot_strategies = RA.split_arm_strategies(strategies)
+	plot_strategies = split_arm_strategies(strategies)
 	status_suffix = converged ? "" : "_notconverged"
 	title = _step_title(k, num_mpc_steps, converged, kkt_error)
 
-	trajectory_fig, _ = RA.plot_single_integrator_3d_trajectories(;
+	trajectory_fig, _ = plot_single_integrator_3d_trajectories(;
 		map_end,
 		lane_width,
 		strategy = plot_strategies,
@@ -959,7 +968,7 @@ function save_step_plots(
 		collision_avoidance,
 	)
 	_add_title!(trajectory_fig, title)
-	speed_fig, _ = RA.speed_plot(;
+	speed_fig, _ = speed_plot(;
 		strategy = plot_strategies,
 		speed_limit = arm_speed_limit,
 		dynamics_model,
@@ -967,32 +976,32 @@ function save_step_plots(
 		additional_speed_limits = [(; limit = child_speed_limit, players = 3)],
 	)
 	_add_title!(speed_fig, title)
-	control_fig, _ = RA.control_plot(;
+	control_fig, _ = control_plot(;
 		strategy = plot_strategies,
 		control_lb = control_bounds.lb,
 		control_ub = control_bounds.ub,
 	)
 	_add_title!(control_fig, title)
-	distance_fig, _ = RA.inter_player_distance_plot(;
+	distance_fig, _ = inter_player_distance_plot(;
 		strategy = plot_strategies,
 		reference_distance = dₚ,
 		safety_distance = collision_avoidance,
 	)
 	_add_title!(distance_fig, title)
 
-	RA.save_figure(
+	save_figure(
 		joinpath(dirs.trajectory_plots_dir, "trajectory_step_$(k)$(status_suffix).pdf"),
 		trajectory_fig,
 	)
-	RA.save_figure(
+	save_figure(
 		joinpath(dirs.speed_plots_dir, "speed_step_$(k)$(status_suffix).pdf"),
 		speed_fig,
 	)
-	RA.save_figure(
+	save_figure(
 		joinpath(dirs.control_plots_dir, "control_step_$(k)$(status_suffix).pdf"),
 		control_fig,
 	)
-	RA.save_figure(
+	save_figure(
 		joinpath(dirs.distance_plots_dir, "distance_step_$(k)$(status_suffix).pdf"),
 		distance_fig,
 	)
@@ -1002,7 +1011,7 @@ function save_step_plots(
 			dirs.trajectory_plots_dir,
 			"trajectory_interactive_step_$(k)$(status_suffix).html",
 		)
-		RA.plot_trajectory_3d_interactive(;
+		plot_trajectory_3d_interactive(;
 			map_end,
 			lane_width,
 			strategy = plot_strategies,
@@ -1042,12 +1051,12 @@ function save_closed_loop_plots(
 	dynamics_model,
 	save_interactive,
 )
-	plot_strategies = RA.split_arm_strategies(closed_loop_strategies)
+	plot_strategies = split_arm_strategies(closed_loop_strategies)
 	title = "Closed-loop receding-horizon execution ($(num_mpc_steps) steps)"
 	if !isempty(failed_steps)
 		title *= " — non-converged steps: $(join(failed_steps, ", "))"
 	end
-	trajectory_fig, _ = RA.plot_single_integrator_3d_trajectories(;
+	trajectory_fig, _ = plot_single_integrator_3d_trajectories(;
 		map_end,
 		lane_width,
 		strategy = plot_strategies,
@@ -1060,7 +1069,7 @@ function save_closed_loop_plots(
 		collision_avoidance,
 	)
 	_add_title!(trajectory_fig, title)
-	speed_fig, _ = RA.speed_plot(;
+	speed_fig, _ = speed_plot(;
 		strategy = plot_strategies,
 		speed_limit = arm_speed_limit,
 		dynamics_model,
@@ -1068,32 +1077,32 @@ function save_closed_loop_plots(
 		additional_speed_limits = [(; limit = child_speed_limit, players = 3)],
 	)
 	_add_title!(speed_fig, title)
-	control_fig, _ = RA.control_plot(;
+	control_fig, _ = control_plot(;
 		strategy = plot_strategies,
 		control_lb = control_bounds.lb,
 		control_ub = control_bounds.ub,
 	)
 	_add_title!(control_fig, title)
-	distance_fig, _ = RA.inter_player_distance_plot(;
+	distance_fig, _ = inter_player_distance_plot(;
 		strategy = plot_strategies,
 		reference_distance = dₚ,
 		safety_distance = collision_avoidance,
 	)
 	_add_title!(distance_fig, title)
 
-	RA.save_figure(
+	save_figure(
 		joinpath(dirs.closed_loop_plots_dir, "trajectory_closed_loop.pdf"),
 		trajectory_fig,
 	)
-	RA.save_figure(
+	save_figure(
 		joinpath(dirs.closed_loop_plots_dir, "speed_closed_loop.pdf"),
 		speed_fig,
 	)
-	RA.save_figure(
+	save_figure(
 		joinpath(dirs.closed_loop_plots_dir, "control_closed_loop.pdf"),
 		control_fig,
 	)
-	RA.save_figure(
+	save_figure(
 		joinpath(dirs.closed_loop_plots_dir, "distance_closed_loop.pdf"),
 		distance_fig,
 	)
@@ -1103,7 +1112,7 @@ function save_closed_loop_plots(
 			dirs.closed_loop_plots_dir,
 			"trajectory_interactive_closed_loop.html",
 		)
-		RA.plot_trajectory_3d_interactive(;
+		plot_trajectory_3d_interactive(;
 			map_end,
 			lane_width,
 			strategy = plot_strategies,

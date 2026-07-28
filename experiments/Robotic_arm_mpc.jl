@@ -114,12 +114,25 @@ module Robotic_arm_mpc
 end
 
 using Random
+using ReducedGOOP
 using Statistics: mean, median, std
-using TimerOutputs: reset_timer!
+using TimerOutputs: @timeit, reset_timer!
 
-# Supplies ReducedGOOP, BlockArrays, TimerOutputs' @timeit, `TO`, the dynamics
-# model types, and every problem-construction / warm-start helper used below.
-include(joinpath(@__DIR__, "robotic_arm_core.jl"))
+# Reuse a Revise-tracked core when one is already loaded in Main. The fallback
+# keeps this solver-only entry point loadable on its own.
+const ROBOTIC_ARM_CORE_PATH = joinpath(@__DIR__, "robotic_arm_core.jl")
+if !isdefined(Main, :RoboticArmCore)
+	Base.include(Main, ROBOTIC_ARM_CORE_PATH)
+end
+Main.RoboticArmCore isa Module ||
+	error("Main.RoboticArmCore exists but is not a module.")
+using Main.RoboticArmCore
+
+# Preserve the solver-only entry point's existing qualified core API.
+for core_symbol in names(Main.RoboticArmCore)
+	core_symbol === :RoboticArmCore && continue
+	@eval export $core_symbol
+end
 
 const DUAL_WARMSTART_MODES = (
 	:primal_only,

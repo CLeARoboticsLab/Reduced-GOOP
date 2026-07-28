@@ -1,22 +1,49 @@
+module RoboticArmCore
+
 #=
 	Plotting-free core of the robotic-arm experiment.
 
 	Everything here builds and post-processes the game: scenario configuration,
 	problem construction, warm starts, and trajectory packing/unpacking. Nothing
 	here draws, saves, or depends on a plotting stack, so a solver-only entry
-	point (`Robotic_arm_mpc.jl`) can `include` this file without pulling in
+	point (`Robotic_arm_mpc.jl`) can load this module without pulling in
 	CairoMakie/WGLMakie/GLMakie.
 
-	`Robotic_arm.jl` includes this file and adds the plotting, saving, and
-	open-loop demo layers on top of it.
-
-	This file is `include`d into a module rather than being a module itself,
-	matching the existing `plotting.jl` / `3d_plotting.jl` / `dynamics.jl` pattern.
+	The module is loaded once as `Main.RoboticArmCore` and reused by the
+	open-loop, receding-horizon, and solver-only entry points. Loading this file
+	with Revise's `includet` therefore gives every entry point the same revised
+	methods and type identities.
 =#
 
 using BlockArrays
 using ReducedGOOP
 using TimerOutputs: @timeit
+
+export TO,
+	DynamicsModel,
+	SingleIntegrator3D,
+	ScenarioConfig,
+	InstanceParameters,
+	get_setup,
+	demo_scenario_config,
+	build_dynamics,
+	build_two_arm_dynamics,
+	dynamics_model_name,
+	extract_player_strategies,
+	extract_initial_controls,
+	split_arm_strategies,
+	evaluate_preferences_at_solution,
+	summarize_dual_blocks,
+	build_instance_parameters,
+	limit_control_speed,
+	build_default_warmstart,
+	build_up_and_over_warmstart,
+	build_constant_control_warmstart,
+	build_ground_line_warmstart,
+	flatten_warmstart_solution,
+	unflatten_trajectory,
+	single_integrator_3d,
+	single_integrator_3d_step
 
 const TO = ReducedGOOP.TO
 
@@ -989,4 +1016,6 @@ function flatten_warmstart_solution(planning_horizon, warmstart_x, warmstart_u)
 		append!(warmstart_solution, warmstart_primals)
 	end
 	warmstart_solution
+end
+
 end
