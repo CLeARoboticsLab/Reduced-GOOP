@@ -36,8 +36,10 @@ function ParametricGOOP(
 	shared_equality_constraint,
 	shared_inequality_constraint,
 )
-	primal_dims = BlockArrays.blocklengths(axes(x, 1)) # only(BlockArrays.blocksizes(x))
-	parameter_dims = BlockArrays.blocklengths(axes(θ, 1))
+	# `collect` materializes the result: BlockArrays ≥ 1.10 returns a lazy
+	# `BlockedUnitRangeLengths` view, which does not match the `::Vector{Int}` fields.
+	primal_dims = collect(BlockArrays.blocklengths(axes(x, 1)))
+	parameter_dims = collect(BlockArrays.blocklengths(axes(θ, 1)))
 	equality_dims = map(equality_constraints) do f
 		isnothing(f) ? 0 : length(f(x, θ))
 	end

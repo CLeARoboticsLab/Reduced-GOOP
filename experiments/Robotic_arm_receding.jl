@@ -63,9 +63,9 @@ function demo(;
 	rng_seed = 123,
 	debug = false,
     goop_version = :quasi,     # :complete | :reduced | :quasi
-	show_interactive_trajectory = true,
+	show_interactive_trajectory = false,
 	record_condition_number = false,
-	record_convergence = true,
+	record_convergence = false,
 	linear_solver = :klu,
 	# FastDifferentiation otherwise emits all sparse-Jacobian entries as one
 	# enormous RuntimeGeneratedFunction. Bounded chunks avoid pathological
@@ -74,7 +74,7 @@ function demo(;
 	# `:primal_only` resets every non-primal variable; `:equality_duals` carries
 	# λᵢₖ; `:all_except_innermost_stationarity` carries every dual except the ψ
 	# segments targeting preference level Kⁱ. Only primals are horizon-shifted.
-	dual_warmstart = :primal_only,
+	dual_warmstart = :all_except_innermost_stationarity,
 	reuse_factorization_iters = 0,
 	# η_max = 1e6 lets a struggling step escalate the regularization into a
 	# do-nothing limit cycle: LM steps scale like 1/η, so at η ~ 1e6 the solver
