@@ -18,6 +18,14 @@ julia --project=experiments -e 'import Pkg; Pkg.instantiate()'
 julia --project=. -e 'using JuliaFormatter; format(".")'
 ```
 
+**JuliaFormatter version is pinned to 2.5.4 in the global environment** (`Pkg.pin`),
+because that is the version vendored by the VS Code Julia extension, which runs on
+every save via `editor.formatOnSave`. If the CLI and the extension disagree on version
+they reformat each other's output indefinitely — 2.12.3 and 2.5.4 differ on deeply
+nested conditions. Do not add JuliaFormatter to `[deps]`/`[compat]` here: a compat
+entry without a matching `[deps]` entry is inert, and a real dep would force a
+formatter on every downstream user.
+
 Run the intersection demo from a `julia --project=experiments` REPL:
 
 ```javascript
@@ -51,8 +59,8 @@ The package models and solves **Games of Ordered Preference (GOOP)**: multi-play
 
 ### Solver path
 
-| Reformulation                        | Solver                                                                   | Key type        |
-| ------------------------------------ | ------------------------------------------------------------------------ | --------------- |
+| Reformulation                        | Solver                                                                                   | Key type        |
+| ------------------------------------ | ---------------------------------------------------------------------------------------- | --------------- |
 | `generate_slacked_*_kkt_system(...)` | `InteriorPoint` (Newton, fraction-to-boundary or backtracking line search, outer ϵ loop) | `GOOPKKTSystem` |
 
 ### Three formulation variants
@@ -138,3 +146,8 @@ Before finishing any task that touches `src/`:
 - Give `experiments/` and `test/` their own `Project.toml` when they need extra dependencies.
 - In those sub-environments, use `[sources] PackageName = {path = ".."}` to point to the local package.
 - Format code with JuliaFormatter using the project `.JuliaFormatter.toml`.
+- For anything the rules above do not cover — dependency layering and verb-set
+  abstractions, parametric struct definitions, per-field docstrings, NamedTuple returns,
+  comment depth, and test structure — follow the `clear-julia-style` skill. Where the two
+  disagree, this file wins; in particular, the variable nomenclature table above is
+  authoritative over the skill's.
