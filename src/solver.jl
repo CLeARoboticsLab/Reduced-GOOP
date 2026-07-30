@@ -12,7 +12,7 @@ Base.@kwdef struct InteriorPointOptions
     tightening_rate::Float64
     loosening_rate::Float64
     min_stepsize::Float64
-    linesearch::Symbol
+    linesearch::Symbol = :backtracking
     record_convergence::Bool = false
     record_condition_number::Bool = false
     max_eta_retries::Int = 5
@@ -23,7 +23,7 @@ Base.@kwdef struct InteriorPointOptions
     ρ_high::Float64 = 0.75
     tsvd_threshold::Float64 = 0.0
     use_marquardt_scaling::Bool = false
-    linear_solver::Symbol = :svd
+    linear_solver::Symbol = :klu
     armijo_constant::Float64 = 1e-4
     warmstart_slack_floor::Float64 = 1e-4
     warmstart_dual_floor::Float64 = 1e-4

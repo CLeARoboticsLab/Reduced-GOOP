@@ -55,12 +55,8 @@ function default_interior_point_options(; verbose = false)
         tightening_rate = 2.0,
         loosening_rate = 0.5,
         min_stepsize = 1e-20,
-        linesearch = :fraction_to_boundary,
-        record_convergence = false,
-        record_condition_number = false,
-        eta_retry_growth = 0.3,
-        tsvd_threshold = 0.0,
-        use_marquardt_scaling = true,
+        linesearch = :backtracking,
+        linear_solver = :klu,
         verbose,
     )
 end
