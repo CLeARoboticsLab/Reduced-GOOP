@@ -36,8 +36,10 @@ function ParametricGOOP(
 	shared_equality_constraint,
 	shared_inequality_constraint,
 )
-	primal_dims = BlockArrays.blocklengths(axes(x, 1)) # only(BlockArrays.blocksizes(x))
-	parameter_dims = BlockArrays.blocklengths(axes(θ, 1))
+	# `collect` materializes the result: BlockArrays ≥ 1.10 returns a lazy
+	# `BlockedUnitRangeLengths` view, which does not match the `::Vector{Int}` fields.
+	primal_dims = collect(BlockArrays.blocklengths(axes(x, 1)))
+	parameter_dims = collect(BlockArrays.blocklengths(axes(θ, 1)))
 	equality_dims = map(equality_constraints) do f
 		isnothing(f) ? 0 : length(f(x, θ))
 	end
@@ -74,7 +76,7 @@ end
 
 function Symbolics.gradient(f::QuasiLagrangianTerm, x::AbstractVector{<:Symbolics.Num})
 	next_order = f.deriv_order + 1
-	if f.deriv_order > 2
+	if f.deriv_order >= 2 # retain terms up to order 2
 		return QuasiLagrangianTerm(zero.(x), f.duals, next_order)
 	end
 
@@ -165,6 +167,7 @@ function generate_slacked_reduced_kkt_system(
 	drop_higher_order_terms = false,
 	backend_options = (;),
 	codegen = :native,
+	fd_codegen_chunk_size = nothing,
 )
 	if drop_higher_order_terms &&
 	   backend isa SymbolicTracingUtils.FastDifferentiationBackend
@@ -217,6 +220,7 @@ function generate_slacked_reduced_kkt_system(
 
 	# Keep track of all lower level policy constraint duals (ψ) that we create.
 	Ψ = symbolic_type[]
+	innermost_stationarity_dual_offsets = Int[]
 
 	# Recursive function to construct a player's KKT conditions.
 	function construct_player_kkt_conditions(
@@ -402,7 +406,12 @@ function generate_slacked_reduced_kkt_system(
 			Symbol("ψ_$(player)_$(level)"),
 			length(π),
 		)
+		ψ_start = length(Ψ) + 1
 		push!(Ψ, ψ...)
+		append!(
+			innermost_stationarity_dual_offsets,
+			(ψ_start+length(ψ)-goop.primal_dims[player]):(ψ_start+length(ψ)-1),
+		)
 
 		# 10/25: added duals for complementarity slackness for lower levels
 		ϕ = SymbolicTracingUtils.make_variables(
@@ -639,6 +648,13 @@ function generate_slacked_reduced_kkt_system(
 		preference_slack_dims = idx[Block(2)] # s
 		interior_point_slack_dims = vcat(idx[Block(3)], idx[Block(9)]) # Σ, σₛ
 		inequality_constraint_dual_dims = vcat(idx[Block(5)], idx[Block(8)]) # Γ, γₛ
+		equality_constraint_dual_dims = idx[Block(4)] # Λ
+		stationarity_dual_dims = idx[Block(6)] # Ψ
+		all_equality_stationarity_dual_dims =
+			vcat(equality_constraint_dual_dims, stationarity_dual_dims)
+		stationarity_offset = sum(length, (x, s, Σ, Λ, Γ))
+		innermost_stationarity_dual_dims =
+			stationarity_offset .+ innermost_stationarity_dual_offsets
 	end
 
 	@timeit TO "Jacobian / KKT construction" BuildGOOPKKTSystem(
@@ -651,8 +667,13 @@ function generate_slacked_reduced_kkt_system(
 		preference_slack_dims,
 		interior_point_slack_dims,
 		inequality_constraint_dual_dims;
+		equality_constraint_dual_dims,
+		stationarity_dual_dims,
+		all_equality_stationarity_dual_dims,
+		innermost_stationarity_dual_dims,
 		backend_options,
 		codegen,
+		fd_codegen_chunk_size,
 	)
 
 end
@@ -663,6 +684,7 @@ function generate_slacked_quasi_kkt_system(
 	backend = SymbolicTracingUtils.SymbolicsBackend(),
 	backend_options = (;),
 	codegen = :native,
+	fd_codegen_chunk_size = nothing,
 )
 	generate_slacked_reduced_kkt_system(
 		goop;
@@ -670,6 +692,7 @@ function generate_slacked_quasi_kkt_system(
 		drop_higher_order_terms = true,
 		backend_options,
 		codegen,
+		fd_codegen_chunk_size,
 	)
 end
 
@@ -679,6 +702,7 @@ function generate_slacked_complete_kkt_system(
 	backend = SymbolicTracingUtils.SymbolicsBackend(),
 	backend_options = (;),
 	codegen = :native,
+	fd_codegen_chunk_size = nothing,
 )
 	# Symbolic variables for all primals, parameters, and duals for shared constraints.
 	x =
@@ -1137,17 +1161,9 @@ function generate_slacked_complete_kkt_system(
 		inequality_constraint_dual_dims;
 		backend_options,
 		codegen,
+		fd_codegen_chunk_size,
 	)
 end
-
-"""[PATH Solver] Build the reduced KKT system as a `ParametricMCP`.
-	- Shared constraints are not modeled separately; they are embedded in each player's constraints.
-	- No interior-point slack variables ('σ') are introduced for inequality constraints.
-	- The relaxation parameter `ϵ` is stored in `θ[end]`.
-	- Relaxed complementarity is represented by the inequality `γ .* g - ϵ ≤ 0`.
-	- Stores inequality duals in `y` instead of `z`
-	- Preference constraints are stored explicitly by player and level, then flattened locally when needed.
-"""
 
 # Helper functions
 make_blocks(vec, b) = (@assert length(vec) % b == 0; BlockArray(vec, fill(b, length(vec) ÷ b)))

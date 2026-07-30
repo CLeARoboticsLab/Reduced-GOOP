@@ -2,14 +2,11 @@ module ReducedGOOP
 
 using SymbolicTracingUtils: SymbolicTracingUtils
 using Symbolics: Symbolics
-using BlockArrays: BlockArrays, BlockArray, Block, blocks, blocksizes, blockedrange
+using BlockArrays: BlockArrays, BlockArray, Block, blockedrange
 using SparseArrays: SparseArrays
 using InvertedIndices: Not
-using LinearAlgebra: LinearAlgebra, I, norm, eigvals, cond, svdvals
-using LinearSolve: LinearSolve, LinearProblem, init, solve!
-using SciMLBase: SciMLBase
-using SymbolicTracingUtils: SymbolicTracingUtils
-using JLD2: JLD2
+using LinearAlgebra: LinearAlgebra, norm, ldiv!
+using KLU: KLU
 using TimerOutputs: TimerOutput, @timeit
 
 const TO = TimerOutput()

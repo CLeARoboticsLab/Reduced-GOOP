@@ -1,4 +1,4 @@
-# QuasiGOOP.jl
+# ReducedGOOP.jl
 
 [![CI](https://github.com/CLeARoboticsLab/QuasiGOOP.jl/actions/workflows/test.yml/badge.svg)](https://github.com/CLeARoboticsLab/QuasiGOOP.jl/actions/workflows/test.yml)
 [![License](https://img.shields.io/badge/license-BSD-new)](https://opensource.org/license/bsd-3-clause)
@@ -13,10 +13,9 @@ scalar cost. This is useful for settings such as robotics and multi-agent
 planning, where a player first satisfies safety or task constraints and only
 then optimize lower-priority behavior.
 
-`ReducedGOOP.jl` implements tractable reformulations of GOOP problems and provides
-both nonlinear KKT systems for a primal-dual interior-point method and mixed
-complementarity problem (MiCP/MCP) formulations for PATH. The experiment scripts
-reproduce the main computational examples from the paper, including the
+`ReducedGOOP.jl` implements tractable nonlinear KKT reformulations of GOOP
+problems together with a primal-dual interior-point solver. The experiment
+scripts reproduce the main computational examples from the paper, including the
 two-player intersection scenario and quadratic hierarchy benchmarks.
 
 ## Installation and Usage
@@ -57,8 +56,8 @@ Intersection.demo(random_initial_state = false)
 ```
 
 The active script constructs a two-player open-loop trajectory game, generates a
-GOOP reformulation, solves it with PATH by default, and saves trajectory,
-velocity, control, warm-start, and solution data under `data/Intersection_open_loop/`.
+GOOP KKT reformulation, solves it with the interior-point solver, and saves
+trajectory and solution data under `data/Intersection_open_loop/`.
 
 ### Single-Player Trilevel Quadratic Program
 
@@ -68,22 +67,17 @@ The following runs the quadratic-program example driver:
 include("experiments/ExamplesQP.jl")
 ```
 
-`ExamplesQP.jl` loads `experiments/trilevel_QP_PATH.jl`, which compares complete
-and reduced MCP formulations on a bounded single-player quadratic hierarchy with
-linear equality and inequality constraints. The script reports solve status,
-residuals, formulation sizes, and primal-solution agreement between the complete
-and reduced systems.
-
-Note: the active `trilevel_QP_PATH.jl` file creates three quadratic objectives
-but currently passes two objective levels to `ParametricGOOP` for debugging purpose.
+`ExamplesQP.jl` loads `experiments/trilevel_QP.jl`, which solves a bounded
+single-player quadratic hierarchy with the interior-point method and checks its
+dual solution independently with `NonlinearSolve`.
 
 ## Repository Structure
 
 | Path | Purpose |
 | --- | --- |
-| `src/` | Core GOOP problem representation, KKT/MCP reformulation generators, and solver wrappers. |
+| `src/` | Core GOOP problem representation, KKT reformulation generators, and interior-point solver. |
 | `experiments/` | Reproduction scripts, plotting utilities, and the experiment-specific Julia environment. |
-| `test/` | PATH-based regression tests for complete and reduced MCP formulations. |
+| `test/` | Regression tests for KKT formulations, code generation, KLU solves, and warm starts. |
 | `legacy/` | Older implementations, archived formulations, and historical experiments retained for reference. |
 | `data/` | Generated experiment outputs and archived result artifacts. |
 
@@ -116,21 +110,6 @@ policy conditions and multipliers. The complete formulation keeps a more explici
 representation of inner KKT variables and constraints. The quasi formulation is
 a reduced formulation with selected higher-order derivative terms omitted.
 
-#### MCP-Based Formulations
-
-These functions construct `ParametricMCP` objects intended for PATH via
-`ParametricMCPs.jl`:
-
-| Function | Description |
-| --- | --- |
-| `generate_mcp_reduced_kkt_system(...)` | Builds the reduced MCP analogue of the reduced KKT formulation. Inequality constraints are represented through MCP bounds rather than interior-point slack variables. The relaxation parameter is appended to the parameter vector. |
-| `generate_mcp_quasi_kkt_system(...)` | Calls the reduced MCP generator with higher-order terms dropped. |
-| `generate_mcp_complete_kkt_system(...)` | Builds the complete MCP analogue, stacking player-wise KKT equations and lower-bounded complementarity variables for PATH. |
-
-The MCP formulations correspond to the KKT-based formulations structurally, but
-encode complementarity using lower and upper variable bounds instead of the
-slacked primal-dual equations used by the interior-point solver.
-
 ### `src/goop_kkt_system.jl`
 
 `goop_kkt_system.jl` defines `GOOPKKTSystem`, the container used by the
@@ -138,8 +117,9 @@ interior-point solver. It stores:
 
 - in-place residual and Jacobian evaluators for the KKT residual and its
   derivative with respect to the decision vector;
-- index sets for primal variables, preference slacks, interior-point slacks, and
-  inequality duals;
+- index sets for primal variables, preference slacks, interior-point slacks,
+  inequality duals, and the equality/stationarity dual subsets used by selective
+  warm starts;
 - KKT and variable dimensions;
 - the symbolic residual and symbolic variable vector used to build the system.
 
@@ -150,50 +130,38 @@ efficient repeated evaluation.
 
 ### `src/solver.jl`
 
-`solver.jl` provides two solver front ends:
+`solver.jl` provides the `InteriorPoint` solver front end:
 
 | Solver | Description |
 | --- | --- |
 | `InteriorPoint` | Solves a `GOOPKKTSystem` by Newton steps on the relaxed primal-dual residual. It initializes preference slacks, interior-point slacks, and inequality duals to positive values, supports backtracking and fraction-to-boundary line search, and can record KKT-error histories. |
-| `PATHSolver` | Solves a `ParametricMCP` by calling `ParametricMCPs.solve`, passing the GOOP parameters together with the complementarity relaxation parameter. |
 
-The solver options are configured through `InteriorPointOptions` and `PATHOptions`.
+Solver options are configured through `InteriorPointOptions`.
 
 ## Experiments
 
 | File | Description |
 | --- | --- |
-| `experiments/Intersection.jl` | Two-player open-loop intersection example with trajectory dynamics, prioritized preferences, PATH/interior-point solver selection, continuation over relaxation values, and result plotting. |
+| `experiments/Intersection.jl` | Two-player open-loop intersection example with trajectory dynamics, prioritized preferences, an interior-point solve, and result plotting. |
 | `experiments/ExamplesQP.jl` | Lightweight entry point for the quadratic-program example. |
-| `experiments/trilevel_QP_PATH.jl` | PATH-based comparison between complete and reduced MCP formulations for a bounded quadratic hierarchy. |
+| `experiments/Robotic_arm_receding.jl` | Receding-horizon robotic-arm demo with primal-only and selective dual warm-start strategies. |
 | `experiments/Plotting.jl` | Plotting utilities used by the intersection experiments. |
 
 ## Tests
 
-The current tests in `test/runtests.jl` focus on PATH MCP formulations. The
-test file defines:
-
-```julia
-complete_mcp_system(problem) =
-    QuasiGOOP.generate_mcp_complete_kkt_system(problem)
-
-reduced_mcp_system(problem) =
-    QuasiGOOP.generate_mcp_reduced_kkt_system(problem)
-```
-
-The test suite checks the complete MCP generator directly and compares the
-reduced MCP generator against complete-MCP primal solutions.
+The current tests in `test/runtests.jl` exercise the complete and reduced
+slacked KKT formulations with the interior-point solver.
 
 | Benchmark family | What is tested |
 | --- | --- |
-| Baseline nonnegative problem | A degenerate single-level problem `min 0` subject to `x >= 0`, used as a basic PATH sanity check. |
-| Baseline bilevel PSD problem | A two-level problem with a rank-deficient upper quadratic and a degenerate lower objective under nonnegativity constraints. |
-| Single-player benchmarks | Single-level, bilevel, and trilevel problems in dimension 5 with known box-constrained solutions. Both quadratic/linear and nonlinear/nonlinear variants are tested. |
-| Three-player benchmarks | Coupled generalized Nash problems with three players, known primal solutions, active resource constraints, and the same hierarchy depths and objective/constraint variants as the single-player tests. |
+| Known-solution benchmarks | Single-player and coupled three-player cases with quadratic/linear and nonlinear/nonlinear variants. |
+| Complete KKT smoke test | Agreement between complete and reduced formulations on an unconstrained quadratic problem. |
+| Code-generation parity | Agreement between Symbolics and FastDifferentiation residual/Jacobian evaluators. |
+| KLU solver tests | Augmented-system direction accuracy, factorization reuse, singular-retry behavior, and agreement with dense SVD. |
+| Warm-start tests | Full-vector solver warm starts and the robotic-arm selective-dual warm-start policies. |
 
-The tests verify PATH success status, residual tolerances, agreement with known
-primal solutions, active/inactive constraint behavior, and agreement between
-reduced and complete MCP primal solutions.
+The tests verify convergence status, residual tolerances, known primal
+solutions, active/inactive constraint behavior, and linear-solver robustness.
 
 Run the tests from the repository root with:
 
@@ -213,9 +181,8 @@ choices or for future development.
 The high-level workflow is:
 
 1. Define a `ParametricGOOP` problem from player preferences and constraints.
-2. Generate either a KKT or MCP reformulation.
-3. Solve the reformulated system with the interior-point solver in `solver.jl` or
-   the PATH interface through `ParametricMCPs.jl`.
+2. Generate a complete, reduced, or quasi KKT reformulation.
+3. Solve the reformulated system with the interior-point solver in `solver.jl`.
 4. Extract the primal strategies and analyze the resulting equilibrium.
 
 For new experiments, prefer the `experiments/` environment and the existing
