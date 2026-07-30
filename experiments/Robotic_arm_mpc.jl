@@ -656,4 +656,235 @@ function print_runtime_report(
 	(; all_stats, warm_stats)
 end
 
+# ── Python-facing MPC planner API ─────────────────────────────────────────────
+#
+# Usage (from Python / test.py):
+#   ctx     = jl.Robotic_arm_mpc.build_mpc_context(obs, r2_dim)
+#   planner = jl.Robotic_arm_mpc.create_planner_from_context(ctx, obs, 20)
+#   # run_receding_horizon uses jl.plan_next(planner, obs) per step
+#
+# At every plan_next call the planner reads the actual robot EEF positions from
+# the live obs dict, re-solves from that state, and returns the first planned
+# control as a RoboSuite action vector — closing the loop on real measurements.
+
+struct MpcContext
+	GOOP_kkt_system::Any
+	scenario_config::Any
+	flatten_parameters::Any
+	primal_dimensions::Vector{Int}
+	options::Any
+	r2_action_dim::Int
+	planning_horizon::Int
+	arm_state_dimension::Int
+	dual_warmstart::Symbol
+end
+
+"""
+Build the KKT system once from the post-grip EEF positions (world frame).
+
+`obs` is the Python observation dict immediately after gripping.
+`r2_action_dim` is `env.robots[2].action_dim` (GR1 full action length).
+"""
+function build_mpc_context(
+	obs,
+	r2_action_dim::Integer;
+	planning_horizon::Integer = 10,
+	goop_version::Symbol = :quasi,
+	dual_warmstart::Symbol = :all_except_innermost_stationarity,
+	fd_codegen_chunk_size::Integer = 128,
+	tol::Float64 = 0.008,
+	max_inner_iters::Integer = 500,
+	# Target lift height (metres above grip position). Must be reachable within
+	# the planning horizon: sim_lift_height < planning_horizon * Δt * arm_speed_limit
+	# (default: 10 × 0.1 × 0.5 = 0.50 m, so 0.25 m leaves a 2× margin).
+	sim_lift_height::Float64 = 0.25,
+	verbose::Bool = false,
+)
+	dual_warmstart in DUAL_WARMSTART_MODES || throw(
+		ArgumentError(
+			"Unknown dual_warmstart mode $(dual_warmstart); expected one of " *
+			"$(join(DUAL_WARMSTART_MODES, ", ")).",
+		),
+	)
+
+	sim_eef0 = collect(Float64, obs["robot0_eef_pos"])
+	sim_eef1 = collect(Float64, obs["robot1_eef_pos"])
+	sim_eef2 = collect(Float64, obs["robot2_eef_pos"])
+
+	@info "Building MPC context (goop=$(goop_version), T=$(planning_horizon))..."
+	scenario_config = demo_scenario_config(; planning_horizon, sim_eef0, sim_eef1, sim_eef2, sim_lift_height)
+	(; dynamics) = scenario_config
+	arm_state_dimension, _ = divrem(dynamics[1].state_dimension, 2)
+
+	problem_setup_time = @elapsed (; problem, flatten_parameters) = get_setup(scenario_config)
+
+	kkt_generators = Dict(
+		:complete => ReducedGOOP.generate_slacked_complete_kkt_system,
+		:reduced => ReducedGOOP.generate_slacked_reduced_kkt_system,
+		:quasi => ReducedGOOP.generate_slacked_quasi_kkt_system,
+	)
+	GOOP_kkt_generator = get(kkt_generators, goop_version, nothing)
+	isnothing(GOOP_kkt_generator) && error("Unknown GOOP version: $(goop_version)")
+
+	kkt_build_time = @elapsed GOOP_kkt_system = GOOP_kkt_generator(
+		problem;
+		backend = ReducedGOOP.SymbolicTracingUtils.SymbolicsBackend(),
+		backend_options = (;),
+		codegen = :fast_differentiation,
+		fd_codegen_chunk_size,
+	)
+	println(
+		"[build_mpc_context] problem $(round(problem_setup_time; digits = 2)) s, ",
+		"KKT build $(round(kkt_build_time; digits = 2)) s",
+	)
+
+	primal_dimensions = [
+		(dyn.state_dimension + dyn.control_dimension) * planning_horizon
+		for dyn in dynamics
+	]
+
+	options = ReducedGOOP.InteriorPointOptions(;
+		tol,
+		η₀ = 1e-6,
+		η_max = 1e2,
+		ϵ₀ = 0.1,
+		max_inner_iters,
+		max_outer_iters = 1,
+		tightening_rate = 1.2,
+		loosening_rate = 3.0,
+		min_stepsize = 1e-20,
+		linesearch = :backtracking,
+		linear_solver = :svd,
+		armijo_constant = 1e-4,
+		eta_retry_growth = 2.0,
+		ρ_low = 0.75,
+		ρ_high = 0.75,
+		tsvd_threshold = 0.0,
+		use_marquardt_scaling = false,
+		verbose,
+	)
+
+	MpcContext(
+		GOOP_kkt_system,
+		scenario_config,
+		flatten_parameters,
+		primal_dimensions,
+		options,
+		Int(r2_action_dim),
+		Int(planning_horizon),
+		Int(arm_state_dimension),
+		dual_warmstart,
+	)
+end
+
+"""
+Create a `Main.ClosedLoopPlanner` from a pre-built `MpcContext`.
+
+Each `plan_next` call reads the actual robot EEF positions from the live obs,
+re-solves from that state (closing the loop on real measurements), shifts the
+warm start, and returns the first planned position as a RoboSuite action.
+GR1 (robot 2) is frozen at its grip position to avoid controller instability.
+`num_mpc_steps` caps the number of `plan_next` calls before signalling done.
+"""
+function create_planner_from_context(
+	ctx::MpcContext,
+	obs,
+	num_mpc_steps::Integer = 20,
+)
+	(;
+		GOOP_kkt_system,
+		scenario_config,
+		flatten_parameters,
+		primal_dimensions,
+		options,
+		r2_action_dim,
+		planning_horizon,
+		arm_state_dimension,
+		dual_warmstart,
+	) = ctx
+
+	sim_eef0 = collect(Float64, obs["robot0_eef_pos"])
+	sim_eef1 = collect(Float64, obs["robot1_eef_pos"])
+	sim_eef2 = collect(Float64, obs["robot2_eef_pos"])
+	r2_hold = copy(sim_eef2)
+
+	initial_instance_states = (;
+		initial_state1 = sim_eef0,
+		initial_state2 = sim_eef1,
+		initial_state3 = sim_eef2,
+	)
+	(; warmstart_solution) = build_default_warmstart(initial_instance_states, scenario_config)
+	stage_warmstart = Ref(warmstart_solution)
+
+	solver = ReducedGOOP.InteriorPoint()
+	dynamics = scenario_config.dynamics
+	# Track boundary controls so θ stays consistent with the shifted warm start.
+	# us[2] from each solve becomes the fixed initial control for the next θ.
+	ctrl1 = Ref(zeros(arm_state_dimension))
+	ctrl2 = Ref(zeros(arm_state_dimension))
+	ctrl3 = Ref(zeros(dynamics[2].control_dimension))
+	# GR1's controller is unreliable: feed the solver its own predicted child
+	# state rather than the real EEF measurement to keep θ self-consistent.
+	child_state = Ref(copy(sim_eef2))
+
+	function solve_fn(obs)
+		current_eef0 = collect(Float64, obs["robot0_eef_pos"])
+		current_eef1 = collect(Float64, obs["robot1_eef_pos"])
+
+		current_states = (;
+			initial_state1 = current_eef0,
+			initial_state2 = current_eef1,
+			initial_state3 = child_state[],
+			initial_control1 = ctrl1[],
+			initial_control2 = ctrl2[],
+			initial_control3 = ctrl3[],
+		)
+		(; θ) = build_instance_parameters(flatten_parameters, current_states, scenario_config)
+
+		output = ReducedGOOP.solve(solver, GOOP_kkt_system, θ; z₀ = stage_warmstart[], options)
+		if output.status == :failed
+			rescue_ws = build_default_warmstart(initial_instance_states, scenario_config).warmstart_solution
+			rescue = ReducedGOOP.solve(solver, GOOP_kkt_system, θ; z₀ = rescue_ws, options)
+			if rescue.status == :solved || rescue.kkt_error < output.kkt_error
+				output = rescue
+			end
+		end
+		println(
+			"[mpc] status=$(output.status), ",
+			"iters=$(output.total_iters), ",
+			"kkt_err=$(round(output.kkt_error; sigdigits = 4))",
+		)
+
+		strategies = extract_player_strategies(output.x, primal_dimensions, dynamics)
+
+		# Update boundary controls and ideal child state for the next θ.
+		combined_ctrl = collect(Float64, strategies[1].us[2])
+		ctrl1[] = combined_ctrl[1:arm_state_dimension]
+		ctrl2[] = combined_ctrl[(arm_state_dimension + 1):(2 * arm_state_dimension)]
+		ctrl3[] = collect(Float64, strategies[2].us[2])
+		child_state[] = collect(Float64, strategies[2].xs[2])
+
+		shifted = shift_strategies(strategies, dynamics, planning_horizon)
+		shifted_primal = flatten_warmstart_solution(
+			planning_horizon,
+			[s.xs for s in shifted],
+			[s.us for s in shifted],
+		)
+		stage_warmstart[] = build_receding_warmstart(
+			shifted_primal,
+			output.z,
+			GOOP_kkt_system,
+			dual_warmstart,
+		)
+
+		combined_next = collect(Float64, strategies[1].xs[2])
+		r0_pos = combined_next[1:arm_state_dimension]
+		r1_pos = combined_next[(arm_state_dimension + 1):(2 * arm_state_dimension)]
+		r2_full = vcat(r2_hold, zeros(r2_action_dim - 3))
+		vcat(r0_pos, [1.0], r1_pos, [1.0], r2_full)  # 1.0 = GRIP_CLOSED
+	end
+
+	Main.ClosedLoopPlanner(solve_fn, 0, Int(num_mpc_steps))
+end
+
 end

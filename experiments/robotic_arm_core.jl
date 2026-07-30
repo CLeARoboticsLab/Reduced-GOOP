@@ -107,6 +107,7 @@ function get_setup(scenario_config::ScenarioConfig)
         use_scalarized_baseline,
         use_social_equilibrium_baseline,
         use_running_goal_cost,
+        use_world_frame,
     ) = scenario_config
     num_players == 2 || error(
         "robotic_arm Zero-Sum GOOP setup expects exactly two players (two-arm robot and child).",
@@ -271,10 +272,12 @@ function get_setup(scenario_config::ScenarioConfig)
                     [sum(abs2, gripper_separation) - dₚ^2]
                 end : empty_constraint
 
-            # The child is modeled with the same 3D single-integrator dynamics, but its
-            # vertical velocity is fixed to zero.
+            # The child is modeled with the same 3D single-integrator dynamics. In the
+            # abstract scenario the child is on the ground so vertical velocity is zero;
+            # in world-frame mode the GR1 EEF is not on a ground plane, so skip this.
             child_ground_constraint =
-                i == 2 ? mapreduce(u -> [u[child_vertical_control_index]], vcat, us) :
+                (i == 2 && !use_world_frame) ?
+                mapreduce(u -> [u[child_vertical_control_index]], vcat, us) :
                 empty_constraint
 
             vcat(
@@ -503,7 +506,12 @@ function demo_scenario_config(;
     child_initial_buffer = use_world_frame ? 0.4  : 4.0
     arm_speed_limit      = use_world_frame ? 0.5  : 5.0   # m/s (world) or abstract
     child_speed_limit    = use_world_frame ? 0.3  : 3.0   # m/s (world) or abstract
-    dₚ = 2.0
+    # In world-frame mode, dₚ is the actual Euclidean distance between the two
+    # grippers at the moment of grip (measured from the sim). Using 2.0 (abstract
+    # units) in world-frame makes the initial-state + handle-grasp equality
+    # constraints contradictory, so the problem is infeasible before the solver
+    # takes a single step.
+    dₚ = use_world_frame ? sqrt(sum(abs2, sim_eef0 .- sim_eef1)) : 2.0
 
     # ── Scenario ───────────────────────────────────────────────────────────────
     # Single Integrator 3D: state = [px, py, pz]
