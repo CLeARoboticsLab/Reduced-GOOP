@@ -484,3 +484,8 @@ end
         options,
     )
 end
+
+include(joinpath(@__DIR__, "selective_warmstart.jl"))
+include(joinpath(@__DIR__, "solver_trace.jl"))
+include(joinpath(@__DIR__, "kkt_metadata.jl"))
+include(joinpath(@__DIR__, "projection_diagnostic.jl"))

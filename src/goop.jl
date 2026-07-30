@@ -1,4 +1,4 @@
-Base.@kwdef struct ParametricGOOP{T1, T2, T3, T4, T5}
+Base.@kwdef struct ParametricGOOP{T1, T2, T3, T4, T5, T6}
 	"Preference functions, either Vector{Vector{Function}} or Vector{Function}."
 	preferences::T1
 
@@ -12,6 +12,9 @@ Base.@kwdef struct ParametricGOOP{T1, T2, T3, T4, T5}
 	"Shared equality and inequality constraints."
 	shared_equality_constraint::T4 = nothing
 	shared_inequality_constraint::T5 = nothing
+
+	"Optional explicit primal/equality coordinate semantics."
+	semantic_layout::T6 = nothing
 
 	"Dimensions for all relevant quantities."
 	primal_dims::Vector{Int}
@@ -35,6 +38,7 @@ function ParametricGOOP(
 	inequality_constraints,
 	shared_equality_constraint,
 	shared_inequality_constraint,
+	semantic_layout = nothing,
 )
 	primal_dims = BlockArrays.blocklengths(axes(x, 1)) # only(BlockArrays.blocksizes(x))
 	parameter_dims = BlockArrays.blocklengths(axes(θ, 1))
@@ -48,6 +52,15 @@ function ParametricGOOP(
 		isnothing(shared_equality_constraint) ? 0 : length(shared_equality_constraint(x, θ))
 	shared_inequality_dims =
 		isnothing(shared_inequality_constraint) ? 0 : length(shared_inequality_constraint(x, θ))
+	if !isnothing(semantic_layout)
+		_validate_semantic_layout(
+			semantic_layout,
+			primal_dims,
+			equality_dims,
+			shared_equality_dims,
+			length(preferences),
+		)
+	end
 
 	ParametricGOOP(;
 		preferences,
@@ -56,6 +69,7 @@ function ParametricGOOP(
 		inequality_constraints,
 		shared_equality_constraint,
 		shared_inequality_constraint,
+		semantic_layout,
 		primal_dims,
 		parameter_dims,
 		equality_dims,
@@ -199,6 +213,208 @@ function generate_slacked_reduced_kkt_system(
 		gₛ =
 			isnothing(goop.shared_inequality_constraint) ? nothing :
 			goop.shared_inequality_constraint(x, θ)
+	end
+
+	semantic_layout = _resolved_semantic_layout(
+		goop.semantic_layout,
+		goop.primal_dims,
+		goop.equality_dims,
+		goop.shared_equality_dims,
+		goop.num_players,
+	)
+
+	function primal_successor_exists(player, spec)
+		spec.shift_rule === :successor || return false
+		any(semantic_layout.primal_by_player[player]) do candidate
+			candidate.variable === spec.variable &&
+				candidate.component == spec.component &&
+				candidate.stage == spec.stage + 1
+		end
+	end
+
+	function equality_successor_exists(spec, candidates)
+		spec.shift_rule === :successor || return false
+		any(candidates) do candidate
+			candidate.equation_type === spec.equation_type &&
+				candidate.component == spec.component &&
+				candidate.stage == spec.stage + 1
+		end
+	end
+
+	function stationarity_shift_rule(spec)
+		# A terminal control is retained as the stage-T source for destination
+		# stage T-1, but its own multiplier has no destination continuation:
+		# the completed terminal control is explicitly zero.
+		spec.variable === :control && spec.tail_role === :zero_completion ?
+		:reset : spec.shift_rule
+	end
+
+	first_primal_stage = Dict(
+		player => begin
+			stages = Int[
+				spec.stage for spec in semantic_layout.primal_by_player[player] if
+				!isnothing(spec.stage)
+			]
+			isempty(stages) ? nothing : minimum(stages)
+		end for player in 1:goop.num_players
+	)
+
+	function stationarity_horizon_role(player, spec)
+		inferred = if isnothing(spec.stage)
+			spec.shift_rule === :identity ? :global : :unclassified
+		elseif !isnothing(first_primal_stage[player]) &&
+			   spec.stage == first_primal_stage[player]
+			:initial_boundary
+		elseif stationarity_shift_rule(spec) === :successor &&
+			   primal_successor_exists(player, spec)
+			:inherited_interior
+		else
+			:terminal_boundary
+		end
+		spec.horizon_role === :infer ? inferred : spec.horizon_role
+	end
+
+	function equality_horizon_role(spec, candidates)
+		inferred = if spec.equation_class === :initial_condition
+			:initial_boundary
+		elseif spec.equation_class === :global_non_time_indexed ||
+			   (isnothing(spec.stage) && spec.shift_rule === :identity)
+			:global
+		elseif isnothing(spec.stage)
+			:unclassified
+		elseif spec.shift_rule === :successor &&
+			   equality_successor_exists(spec, candidates)
+			:inherited_interior
+		else
+			:terminal_boundary
+		end
+		spec.horizon_role === :infer ? inferred : spec.horizon_role
+	end
+
+	function exact_shift_invariant(spec, resolved_role)
+		isnothing(spec.exact_shift_invariant) ?
+		resolved_role === :inherited_interior :
+		spec.exact_shift_invariant
+	end
+
+	function stationarity_equation_metadata(player, level)
+		[
+			begin
+				role = stationarity_horizon_role(player, spec)
+				KKTEquationCoordinate(;
+					row = 0,
+					family = :stationarity,
+					scope = :player,
+					player,
+					level,
+					equation_class = :not_applicable,
+					equation_type = :stationarity,
+					primal_variable = spec.variable,
+					stage = spec.stage,
+					successor_stage = nothing,
+					component = spec.component,
+					horizon_role = role,
+					exact_shift_invariant = exact_shift_invariant(spec, role),
+				)
+			end for spec in semantic_layout.primal_by_player[player]
+		]
+	end
+
+	function equality_equation_metadata(player, level)
+		[
+			begin
+				role = equality_horizon_role(
+						spec,
+						semantic_layout.equality_by_player[player],
+					)
+				KKTEquationCoordinate(;
+					row = 0,
+					family = :equality_feasibility,
+					scope = spec.scope,
+					player = spec.player,
+					level,
+					equation_class = spec.equation_class,
+					equation_type = spec.equation_type,
+					primal_variable = nothing,
+					stage = spec.stage,
+					successor_stage = spec.successor_stage,
+					component = spec.component,
+					horizon_role = role,
+					exact_shift_invariant = exact_shift_invariant(spec, role),
+				)
+			end for spec in semantic_layout.equality_by_player[player]
+		]
+	end
+
+	function generic_equation_metadata(
+		count,
+		family;
+		scope,
+		player,
+		level,
+		equation_type,
+	)
+		[
+			KKTEquationCoordinate(;
+				row = 0,
+				family,
+				scope,
+				player,
+				level,
+				equation_class = :not_applicable,
+				equation_type,
+				component,
+				horizon_role = :unclassified,
+				exact_shift_invariant = false,
+			) for component in 1:count
+		]
+	end
+
+	function generated_player_equation_metadata(player)
+		records = KKTEquationCoordinate[]
+		num_levels = length(goop.preferences[player])
+		for level in 1:num_levels
+			append!(records, stationarity_equation_metadata(player, level))
+			if level == num_levels
+				append!(records, equality_equation_metadata(player, level))
+			end
+			append!(
+				records,
+				generic_equation_metadata(
+					goop.inequality_dims[player],
+					:inequality_slack_feasibility;
+					scope = :player,
+					player,
+					level,
+					equation_type = :generic_inequality,
+				),
+			)
+			append!(
+				records,
+				generic_equation_metadata(
+					goop.inequality_dims[player],
+					:complementarity;
+					scope = :player,
+					player,
+					level,
+					equation_type = :generic_inequality,
+				),
+			)
+			if level < num_levels
+				append!(
+					records,
+					generic_equation_metadata(
+						goop.shared_inequality_dims,
+						:complementarity;
+						scope = :shared_outer,
+						player,
+						level,
+						equation_type = :generic_shared_inequality,
+					),
+				)
+			end
+		end
+		records
 	end
 
 
@@ -617,19 +833,114 @@ function generate_slacked_reduced_kkt_system(
 				F_π_pair.F
 			end
 		end
+		flattened_equation_metadata = reduce(
+			vcat,
+			[
+				generated_player_equation_metadata(player) for
+				player in 1:goop.num_players
+			];
+			init = KKTEquationCoordinate[],
+		)
 
+		# Recursive branches may carry `nothing` placeholders for absent
+		# inequality blocks. Remove them before applying the quasi zero-row
+		# filter, and apply the same mask to semantic row metadata.
+		flattened_F = Vector{symbolic_type}(filter(!isnothing, flattened_F))
+		length(flattened_F) == length(flattened_equation_metadata) || error(
+			"Generated KKT residual metadata length " *
+			"$(length(flattened_equation_metadata)) does not match player residual " *
+			"length $(length(flattened_F)).",
+		)
+		if drop_higher_order_terms
+			keep = map(!iszero, flattened_F)
+			flattened_F = flattened_F[keep]
+			flattened_equation_metadata = flattened_equation_metadata[keep]
+		end
 
-		# Filter out zeros and add shared constraints.
+		shared_equation_metadata = KKTEquationCoordinate[]
+		for spec in semantic_layout.shared_equality
+			role = equality_horizon_role(
+				spec,
+				semantic_layout.shared_equality,
+			)
+			push!(
+				shared_equation_metadata,
+				KKTEquationCoordinate(;
+					row = 0,
+					family = :equality_feasibility,
+					scope = :shared,
+					player = nothing,
+					level = nothing,
+					equation_class = spec.equation_class,
+					equation_type = spec.equation_type,
+					primal_variable = nothing,
+					stage = spec.stage,
+					successor_stage = spec.successor_stage,
+					component = spec.component,
+					horizon_role = role,
+					exact_shift_invariant = exact_shift_invariant(spec, role),
+				),
+			)
+		end
+		append!(
+			shared_equation_metadata,
+			generic_equation_metadata(
+				goop.shared_inequality_dims,
+				:inequality_slack_feasibility;
+				scope = :shared,
+				player = nothing,
+				level = nothing,
+				equation_type = :generic_shared_inequality,
+			),
+		)
+		append!(
+			shared_equation_metadata,
+			generic_equation_metadata(
+				goop.shared_inequality_dims,
+				:complementarity;
+				scope = :shared,
+				player = nothing,
+				level = nothing,
+				equation_type = :generic_shared_inequality,
+			),
+		)
+
+		# Add shared constraints after the per-player recursive systems.
 		F = Vector{symbolic_type}(
-			filter!(!isnothing,
+			filter(
+				!isnothing,
 				vcat(
-					drop_higher_order_terms ? filter!(!iszero, flattened_F) : flattened_F,
+					flattened_F,
 					fₛ,
 					(isnothing(gₛ) ? nothing : gₛ .- σₛ),
 					(isnothing(gₛ) ? nothing : σₛ .* γₛ .- ϵ),
 				),
 			),
 		)
+		equation_metadata_unindexed =
+			vcat(flattened_equation_metadata, shared_equation_metadata)
+		length(F) == length(equation_metadata_unindexed) || error(
+			"Generated KKT residual metadata length " *
+			"$(length(equation_metadata_unindexed)) does not match final residual " *
+			"length $(length(F)).",
+		)
+		equation_metadata = [
+			KKTEquationCoordinate(;
+				row,
+				family = record.family,
+				scope = record.scope,
+				player = record.player,
+				level = record.level,
+				equation_class = record.equation_class,
+				equation_type = record.equation_type,
+				primal_variable = record.primal_variable,
+				stage = record.stage,
+				successor_stage = record.successor_stage,
+				component = record.component,
+				horizon_role = record.horizon_role,
+				exact_shift_invariant = record.exact_shift_invariant,
+			) for (row, record) in enumerate(equation_metadata_unindexed)
+		]
 
 		# 
 
@@ -646,13 +957,205 @@ function generate_slacked_reduced_kkt_system(
 		preference_slack_dims = idx[Block(2)] # s
 		interior_point_slack_dims = vcat(idx[Block(3)], idx[Block(9)]) # Σ, σₛ
 		inequality_constraint_dual_dims = vcat(idx[Block(5)], idx[Block(8)]) # Γ, γₛ
-		equality_constraint_dual_dims = idx[Block(4)] # Λ
+		equality_constraint_dual_dims = vcat(idx[Block(4)], idx[Block(7)]) # Λ, λₛ
 		stationarity_dual_dims = idx[Block(6)] # Ψ
 		all_equality_stationarity_dual_dims =
 			vcat(equality_constraint_dual_dims, stationarity_dual_dims)
 		stationarity_offset = sum(length, (x, s, Σ, Λ, Γ))
 		innermost_stationarity_dual_dims =
 			stationarity_offset .+ innermost_stationarity_dual_offsets
+
+		variable_metadata = KKTVariableCoordinate[]
+		primal_index = 1
+		for player in 1:goop.num_players
+			for spec in semantic_layout.primal_by_player[player]
+				push!(
+					variable_metadata,
+					KKTVariableCoordinate(;
+						index = primal_index,
+						family = :primal,
+						scope = :player,
+						player,
+						owner_level = nothing,
+						target_level = nothing,
+						equation_class = :not_applicable,
+						equation_type = :none,
+						primal_variable = spec.variable,
+						stage = spec.stage,
+						successor_stage = nothing,
+						component = spec.component,
+						shift_rule = spec.shift_rule,
+						successor_exists = primal_successor_exists(player, spec),
+						tail_role = spec.tail_role,
+					),
+				)
+				primal_index += 1
+			end
+		end
+		primal_index == length(x) + 1 || error(
+			"Generated primal semantic metadata does not cover the primal block.",
+		)
+
+		lambda_index = sum(length, (x, s, Σ)) + 1
+		for player in 1:goop.num_players
+			num_levels = length(goop.preferences[player])
+			for level in 1:num_levels
+				for spec in semantic_layout.equality_by_player[player]
+					push!(
+						variable_metadata,
+						KKTVariableCoordinate(;
+							index = lambda_index,
+							family = :equality_multiplier,
+							scope = :player,
+							player,
+							owner_level = level,
+							target_level = nothing,
+							equation_class = spec.equation_class,
+							equation_type = spec.equation_type,
+							primal_variable = nothing,
+							stage = spec.stage,
+							successor_stage = spec.successor_stage,
+							component = spec.component,
+							shift_rule = spec.shift_rule,
+							successor_exists = equality_successor_exists(
+								spec,
+								semantic_layout.equality_by_player[player],
+							),
+							tail_role = spec.tail_role,
+						),
+					)
+					lambda_index += 1
+				end
+			end
+			for level in (num_levels-1):-1:1
+				for spec in semantic_layout.shared_equality
+					push!(
+						variable_metadata,
+						KKTVariableCoordinate(;
+							index = lambda_index,
+							family = :equality_multiplier,
+							scope = :shared_outer,
+							player,
+							owner_level = level,
+							target_level = nothing,
+							equation_class = spec.equation_class,
+							equation_type = spec.equation_type,
+							primal_variable = nothing,
+							stage = spec.stage,
+							successor_stage = spec.successor_stage,
+							component = spec.component,
+							shift_rule = spec.shift_rule,
+							successor_exists = equality_successor_exists(
+								spec,
+								semantic_layout.shared_equality,
+							),
+							tail_role = spec.tail_role,
+						),
+					)
+					lambda_index += 1
+				end
+			end
+		end
+		expected_lambda_end = sum(length, (x, s, Σ, Λ)) + 1
+		lambda_index == expected_lambda_end || error(
+			"Generated equality-multiplier metadata length does not match Λ packing.",
+		)
+
+		psi_index = sum(length, (x, s, Σ, Λ, Γ)) + 1
+		for player in 1:goop.num_players
+			num_levels = length(goop.preferences[player])
+			for owner_level in (num_levels-1):-1:1
+				for target_level in (owner_level+1):num_levels
+					for spec in semantic_layout.primal_by_player[player]
+						push!(
+							variable_metadata,
+							KKTVariableCoordinate(;
+								index = psi_index,
+								family = :stationarity_multiplier,
+								scope = :player,
+								player,
+								owner_level,
+								target_level,
+								equation_class = :not_applicable,
+								equation_type = :stationarity,
+								primal_variable = spec.variable,
+								stage = spec.stage,
+								successor_stage = nothing,
+								component = spec.component,
+								shift_rule = stationarity_shift_rule(spec),
+								successor_exists =
+									stationarity_shift_rule(spec) === :successor &&
+									primal_successor_exists(player, spec),
+								tail_role = spec.tail_role,
+							),
+						)
+						psi_index += 1
+					end
+				end
+			end
+		end
+		expected_psi_end = sum(length, (x, s, Σ, Λ, Γ, Ψ)) + 1
+		psi_index == expected_psi_end || error(
+			"Generated stationarity-multiplier metadata length does not match Ψ packing.",
+		)
+
+		shared_lambda_index = sum(length, (x, s, Σ, Λ, Γ, Ψ)) + 1
+		for spec in semantic_layout.shared_equality
+			push!(
+				variable_metadata,
+				KKTVariableCoordinate(;
+					index = shared_lambda_index,
+					family = :equality_multiplier,
+					scope = :shared_innermost,
+					player = nothing,
+					owner_level = nothing,
+					target_level = nothing,
+					equation_class = spec.equation_class,
+					equation_type = spec.equation_type,
+					primal_variable = nothing,
+					stage = spec.stage,
+					successor_stage = spec.successor_stage,
+					component = spec.component,
+					shift_rule = spec.shift_rule,
+					successor_exists = equality_successor_exists(
+						spec,
+						semantic_layout.shared_equality,
+					),
+					tail_role = spec.tail_role,
+				),
+			)
+			shared_lambda_index += 1
+		end
+		expected_shared_lambda_end =
+			sum(length, (x, s, Σ, Λ, Γ, Ψ, λₛ)) + 1
+		shared_lambda_index == expected_shared_lambda_end || error(
+			"Generated shared equality-multiplier metadata does not match λₛ packing.",
+		)
+
+		sort!(variable_metadata; by = record -> record.index)
+		metadata_equality_dims = [
+			record.index for record in variable_metadata if
+			record.family === :equality_multiplier
+		]
+		metadata_stationarity_dims = [
+			record.index for record in variable_metadata if
+			record.family === :stationarity_multiplier
+		]
+		metadata_innermost_dims = [
+			record.index for record in variable_metadata if
+			record.family === :stationarity_multiplier &&
+			record.target_level == length(goop.preferences[something(record.player)])
+		]
+		metadata_equality_dims == sort(collect(equality_constraint_dual_dims)) ||
+			error("Semantic equality-multiplier coordinates disagree with KKT packing.")
+		metadata_stationarity_dims == sort(collect(stationarity_dual_dims)) ||
+			error("Semantic stationarity-multiplier coordinates disagree with KKT packing.")
+		metadata_innermost_dims == sort(collect(innermost_stationarity_dual_dims)) ||
+			error("Semantic innermost-stationarity coordinates disagree with KKT packing.")
+		metadata = GOOPKKTMetadata(;
+			variables = variable_metadata,
+			equations = equation_metadata,
+		)
 	end
 
 	@timeit TO "Jacobian / KKT construction" BuildGOOPKKTSystem(
@@ -669,6 +1172,7 @@ function generate_slacked_reduced_kkt_system(
 		stationarity_dual_dims,
 		all_equality_stationarity_dual_dims,
 		innermost_stationarity_dual_dims,
+		metadata,
 		backend_options,
 		codegen,
 		fd_codegen_chunk_size,

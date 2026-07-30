@@ -86,7 +86,8 @@
 
 	  goop_version     :quasi (default) | :reduced | :complete — the KKT
 	                   reformulation. :quasi is the smallest/fastest.
-	  dual_warmstart   :all_except_innermost_stationarity (default) | :equality_duals | primal_only
+	  dual_warmstart   :all_duals | :all_except_innermost_stationarity
+	                   (default) | :equality_duals | :primal_only
 	  tol              solver convergence tolerance on ‖F‖₂
 	  max_inner_iters  Newton iteration budget per solve
 
@@ -134,11 +135,7 @@ for core_symbol in names(Main.RoboticArmCore)
 	@eval export $core_symbol
 end
 
-const DUAL_WARMSTART_MODES = (
-	:primal_only,
-	:equality_duals,
-	:all_except_innermost_stationarity,
-)
+const DUAL_WARMSTART_MODES = ReducedGOOP.SELECTIVE_WARMSTART_MODES
 
 # ── Experiment entry point ─────────────────────────────────────────────────────
 
@@ -179,8 +176,8 @@ function demo(;
 	# first-call inference/lowering while preserving the same expressions.
 	fd_codegen_chunk_size = 128,
 	# `:primal_only` resets every non-primal variable; `:equality_duals` carries
-	# λᵢₖ; `:all_except_innermost_stationarity` carries every dual except the ψ
-	# segments targeting preference level Kⁱ. Only primals are horizon-shifted.
+	# λᵢₖ; `:all_except_innermost_stationarity` additionally carries ψ_out;
+	# `:all_duals` also carries ψ_in. Only primals are horizon-shifted.
 	dual_warmstart = :all_except_innermost_stationarity,
 	reuse_factorization_iters = 0,
 	# η_max = 1e6 lets a struggling step escalate the regularization into a
@@ -200,6 +197,7 @@ function demo(;
 	armijo_constant = 1e-4,
 	tol = 0.008,
 	max_inner_iters = 500,
+	η₀ = 1e-6,
 )
 	reset_timer!(TO)
 	@timeit TO "experiment setup" Random.seed!(rng_seed)
@@ -208,6 +206,13 @@ function demo(;
 		ArgumentError(
 			"Unknown dual_warmstart mode $(dual_warmstart); expected one of " *
 			"$(join(DUAL_WARMSTART_MODES, ", ")).",
+		),
+	)
+	goop_version === :complete && dual_warmstart !== :primal_only && throw(
+		ArgumentError(
+			"Selective equality/stationarity-dual warm starts are defined for " *
+			":reduced and :quasi; the complete KKT generator does not expose " *
+			"the required dual-coordinate metadata. Use :primal_only.",
 		),
 	)
 
@@ -284,6 +289,8 @@ function demo(;
 		0
 	elseif dual_warmstart === :equality_duals
 		length(GOOP_kkt_system.equality_constraint_dual_dims)
+	elseif dual_warmstart === :all_duals
+		total_equality_stationarity_dual_count
 	else
 		total_equality_stationarity_dual_count -
 		length(GOOP_kkt_system.innermost_stationarity_dual_dims)
@@ -299,7 +306,7 @@ function demo(;
 	# Newton iteration. Neither affects the iterate path.
 	options = ReducedGOOP.InteriorPointOptions(;
 		tol,
-		η₀ = 1e-6,
+		η₀,
 		η_max,
 		ϵ₀,
 		max_inner_iters,
@@ -530,10 +537,11 @@ end
 # ── MPC utilities ──────────────────────────────────────────────────────────────
 
 """
-Assemble the next MPC warm start. Primals are shifted separately; selected
-equality and stationarity duals retain their existing flat coordinates. All
-other variables use the same defaults as `ReducedGOOP.solve` (zero, with
-positive slacks/inequality duals).
+Compatibility wrapper around `ReducedGOOP.build_selective_warmstart`.
+Primals are shifted separately; selected equality and stationarity duals retain
+their existing flat coordinates. Every mode returns a fresh full-length point,
+with all other variables initialized identically (zero, with positive
+slacks/inequality duals).
 """
 function build_receding_warmstart(
 	shifted_primal,
@@ -541,56 +549,22 @@ function build_receding_warmstart(
 	kkt_system,
 	mode::Symbol,
 )
-	mode in DUAL_WARMSTART_MODES ||
-		throw(ArgumentError("Unknown dual_warmstart mode $(mode)."))
-	length(shifted_primal) == length(kkt_system.primal_dims) || throw(
-		DimensionMismatch(
-			"Shifted primal has length $(length(shifted_primal)); " *
-			"expected $(length(kkt_system.primal_dims)).",
-		),
+	ReducedGOOP.build_selective_warmstart(
+		shifted_primal,
+		previous_z,
+		kkt_system,
+		mode,
 	)
-	length(previous_z) == kkt_system.variable_dimension || throw(
-		DimensionMismatch(
-			"Previous KKT point has length $(length(previous_z)); " *
-			"expected $(kkt_system.variable_dimension).",
-		),
-	)
-
-	mode === :primal_only && return copy(shifted_primal)
-
-	T = promote_type(eltype(shifted_primal), eltype(previous_z))
-	warmstart = zeros(T, kkt_system.variable_dimension)
-	warmstart[kkt_system.preference_slack_dims] .= one(T)
-	warmstart[kkt_system.interior_point_slack_dims] .= one(T)
-	warmstart[kkt_system.inequality_constraint_dual_dims] .= one(T)
-	warmstart[kkt_system.primal_dims] .= shifted_primal
-	if mode === :equality_duals
-		dims = kkt_system.equality_constraint_dual_dims
-		warmstart[dims] .= previous_z[dims]
-	else
-		# Carry all equality/stationarity duals except those tied to the innermost level.
-		dims = kkt_system.all_equality_stationarity_dual_dims
-		warmstart[dims] .= previous_z[dims]
-		warmstart[kkt_system.innermost_stationarity_dual_dims] .= zero(T)
-	end
-	warmstart
 end
 
 """
-Shift a per-player trajectory one stage forward to warm-start the next MPC
-solve. The terminal stage is padded with a zero control passed through the
-dynamics (trivially feasible); for the single-integrator
-dynamics the appended terminal state repeats the previous final state.
+Compatibility wrapper around `ReducedGOOP.shift_receding_trajectories`.
+The retained terminal control advances the previous terminal state, preserving
+the final shifted dynamics equation; a zero unused terminal control is then
+appended.
 """
 function shift_strategies(strategies, dynamics, planning_horizon)
-	map(collect(enumerate(strategies))) do (player, strategy)
-		xs = [collect(Float64, x) for x in strategy.xs[2:end]]
-		us = [collect(Float64, u) for u in strategy.us[2:end]]
-		terminal_control = zeros(dynamics[player].control_dimension)
-		push!(xs, dynamics[player].step(xs[end], terminal_control, planning_horizon))
-		push!(us, terminal_control)
-		(; xs, us)
-	end
+	ReducedGOOP.shift_receding_trajectories(strategies, dynamics, planning_horizon)
 end
 
 # ── Runtime reporting ──────────────────────────────────────────────────────────

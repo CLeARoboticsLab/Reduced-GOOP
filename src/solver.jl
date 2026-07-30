@@ -56,6 +56,12 @@ Positional arguments:
 Keyword arguments:
 	- `z₀`: optional primal-only or full-length warm start.
 	- `options::InteriorPointOptions`: solver and diagnostic settings.
+	- `trace_hook`: optional callable receiving scalar-only solver event named tuples.
+	  `nothing` disables tracing and preserves the existing return value and numerical path.
+	- `diagnostic_hook`: optional callable receiving copy-isolated direction and accepted
+	  iterate snapshots. The callback may mutate every array it receives without affecting
+	  the solver. This hook is intended for expensive offline diagnostics (for example,
+	  sparse rank estimates and equation-family residuals), not solver decisions.
 
 Selected `InteriorPointOptions` fields:
 	- `record_convergence`: record KKT-error, η, step-size, and gain-ratio histories.
@@ -87,6 +93,8 @@ function solve(
     θ::AbstractVector{<:Real};
     z₀ = nothing,
     options::InteriorPointOptions,
+    trace_hook = nothing,
+    diagnostic_hook = nothing,
 )
     tol = options.tol
     η₀ = options.η₀
@@ -118,12 +126,10 @@ function solve(
     linear_solver ∈ (:svd, :klu) || throw(
         ArgumentError("Unsupported linear_solver $(linear_solver). Use :svd or :klu."),
     )
-    klu_singularity_eta_growth >= 1 || throw(
-        ArgumentError("klu_singularity_eta_growth must be at least 1."),
-    )
-    klu_singularity_max_retries >= 0 || throw(
-        ArgumentError("klu_singularity_max_retries must be nonnegative."),
-    )
+    klu_singularity_eta_growth >= 1 ||
+        throw(ArgumentError("klu_singularity_eta_growth must be at least 1."))
+    klu_singularity_max_retries >= 0 ||
+        throw(ArgumentError("klu_singularity_max_retries must be nonnegative."))
     use_klu = linear_solver === :klu
     if use_klu && (record_condition_number || tsvd_threshold > 0 || use_marquardt_scaling)
         throw(
@@ -247,8 +253,33 @@ function solve(
         rho_history = Float64[]
         klu_singular_retries = Ref(0)
         svd_fallback_count = Ref(0)
+        trace_actual_outer_iters = 0
+        trace_accepted_steps = 0
+        trace_total_backtracks = 0
+        trace_total_eta_retries = 0
+        trace_full_step_count = 0
+        trace_failure_emitted = false
+    end
+    if trace_hook !== nothing
+        # This extra evaluation is deliberately trace-only. It observes the exact
+        # initialized point after full-warmstart safeguards and cannot affect a
+        # subsequent solver decision.
+        mcp.F!(F_trial, z; θ, ϵ, η = 0.0)
+        trace_hook((;
+            event = :initial_residual,
+            outer_iter = 0,
+            inner_iter = 0,
+            total_iter = 0,
+            epsilon = Float64(ϵ),
+            eta = Float64(η),
+            residual_norm2 = Float64(norm(F_trial, 2)),
+            residual_norm_inf = Float64(norm(F_trial, Inf)),
+        ))
     end
     while outer_iters < max_outer_iters || iszero(total_iters)
+        if trace_hook !== nothing
+            trace_actual_outer_iters += 1
+        end
         inner_iters = 1
         status = :solved
 
@@ -265,6 +296,12 @@ function solve(
                 # Gain ratio of the accepted step; stays NaN on paths that do not
                 # compute it (fraction-to-boundary linesearch).
                 ρ = NaN
+                trace_iter_backtracks = 0
+                trace_slack_backtracks = 0
+                trace_dual_backtracks = 0
+                trace_iter_eta_retries = 0
+                trace_eta_used = η
+                trace_residual_before_norm2 = trace_hook === nothing ? NaN : norm(F, 2)
 
                 if linesearch == :fraction_to_boundary
                     @timeit TO "Jacobian evaluation" mcp.∇F_z!(∇F, z; θ, ϵ, η = 0.0)
@@ -274,6 +311,8 @@ function solve(
                             ∇F,
                             η,
                         )
+                        eta_before_klu = η
+                        klu_retries_before = klu_singular_retries[]
                         η =
                             @timeit TO "Newton step / linear solve" _klu_step_with_fallback!(
                                 δz,
@@ -288,6 +327,23 @@ function solve(
                                 singular_retry_counter = klu_singular_retries,
                                 svd_fallback_counter = svd_fallback_count,
                             )
+                        if trace_hook !== nothing
+                            klu_retry_delta = klu_singular_retries[] - klu_retries_before
+                            if η != eta_before_klu || klu_retry_delta > 0
+                                trace_hook((;
+                                    event = :eta_change,
+                                    outer_iter = outer_iters,
+                                    inner_iter = inner_iters,
+                                    total_iter = total_iters,
+                                    reason = :klu_singularity_escalation,
+                                    eta_before = Float64(eta_before_klu),
+                                    eta_after = Float64(η),
+                                    changed = η != eta_before_klu,
+                                    eta_retry_count = 0,
+                                    klu_singular_retry_count = klu_retry_delta,
+                                ))
+                            end
+                        end
                     else
                         @timeit TO "KKT system assembly" _densify!(
                             Jdense,
@@ -321,14 +377,57 @@ function solve(
                     end
 
                     @timeit TO "line search" begin
-                        α_σ =
-                            fraction_to_the_boundary_linesearch(σ, δσ; tol = min_stepsize)
-                        α_γ =
-                            fraction_to_the_boundary_linesearch(γ, δγ; tol = min_stepsize)
+                        if trace_hook === nothing
+                            α_σ = fraction_to_the_boundary_linesearch(
+                                σ,
+                                δσ;
+                                tol = min_stepsize,
+                            )
+                            α_γ = fraction_to_the_boundary_linesearch(
+                                γ,
+                                δγ;
+                                tol = min_stepsize,
+                            )
+                        else
+                            slack_backtracking_counter = Ref(0)
+                            dual_backtracking_counter = Ref(0)
+                            α_σ = fraction_to_the_boundary_linesearch(
+                                σ,
+                                δσ;
+                                tol = min_stepsize,
+                                backtracking_counter = slack_backtracking_counter,
+                            )
+                            α_γ = fraction_to_the_boundary_linesearch(
+                                γ,
+                                δγ;
+                                tol = min_stepsize,
+                                backtracking_counter = dual_backtracking_counter,
+                            )
+                            trace_slack_backtracks = slack_backtracking_counter[]
+                            trace_dual_backtracks = dual_backtracking_counter[]
+                            trace_iter_backtracks =
+                                trace_slack_backtracks + trace_dual_backtracks
+                            trace_total_backtracks += trace_iter_backtracks
+                        end
                     end
                     verbose &&
                         println("fraction_to_boundary linesearch α_σ = $α_σ, α_γ = $α_γ")
                     if isnan(α_σ) || isnan(α_γ)
+                        if trace_hook !== nothing
+                            trace_failure_emitted = true
+                            trace_hook((;
+                                event = :failure,
+                                outer_iter = outer_iters,
+                                inner_iter = inner_iters,
+                                total_iter = total_iters,
+                                reason = :fraction_to_boundary_exhausted,
+                                residual_norm2 = Float64(trace_residual_before_norm2),
+                                alpha = Float64(min(α_σ, α_γ)),
+                                backtracking_count = trace_iter_backtracks,
+                                eta_retry_count = 0,
+                                eta = Float64(η),
+                            ))
+                        end
                         verbose &&
                             @warn "Fraction-to-boundary linesearch failed. Exiting prematurely."
                         status = :failed
@@ -336,7 +435,9 @@ function solve(
                     end
 
                     # Update regularization parameter.
+                    trace_eta_used = η
                     @timeit TO "regularization" begin
+                        eta_before_update = η
                         if min(α_σ, α_γ) == 1.0
                             verbose && printstyled(
                                 "Full step taken... Decreasing η. ($η -> $(η * (1 - exp(-tightening_rate * inner_iters))))\n";
@@ -349,6 +450,21 @@ function solve(
                                 color = :red,
                             )
                             η *= 1 + exp(-loosening_rate)
+                        end
+                        if trace_hook !== nothing
+                            trace_hook((;
+                                event = :eta_change,
+                                outer_iter = outer_iters,
+                                inner_iter = inner_iters,
+                                total_iter = total_iters,
+                                reason = min(α_σ, α_γ) == 1.0 ? :fraction_full_step :
+                                         :fraction_partial_step,
+                                eta_before = Float64(eta_before_update),
+                                eta_after = Float64(η),
+                                changed = η != eta_before_update,
+                                eta_retry_count = 0,
+                                klu_singular_retry_count = 0,
+                            ))
                         end
                     end
                 else
@@ -462,10 +578,28 @@ function solve(
                         end
                     end
 
-                    local α, pred_reduction, actual_reduction, F_z_next
+                    local α,
+                        pred_reduction,
+                        actual_reduction,
+                        F_z_next,
+                        armijo_slope_raw,
+                        armijo_slope,
+                        trace_step_norm2,
+                        trace_step_norm_inf,
+                        trace_linearized_residual_norm2,
+                        trace_full_step_predicted_reduction,
+                        trace_slack_stepsize_cap,
+                        trace_dual_stepsize_cap,
+                        trace_combined_stepsize_cap
+                    direction_attempt = 0
                     while true
+                        direction_attempt += 1
+                        klu_retry_delta = 0
+                        svd_fallbacks_before = svd_fallback_count[]
                         @timeit TO "Newton step / linear solve" begin
                             if use_klu
+                                eta_before_klu = η
+                                klu_retries_before = klu_singular_retries[]
                                 η_used = _klu_step_with_fallback!(
                                     δz,
                                     aug_cache,
@@ -501,6 +635,27 @@ function solve(
                                 end
                             end
                         end
+                        if trace_hook !== nothing && use_klu
+                            klu_retry_delta =
+                                klu_singular_retries[] - klu_retries_before
+                            if η != eta_before_klu || klu_retry_delta > 0
+                                trace_hook((;
+                                    event = :eta_change,
+                                    outer_iter = outer_iters,
+                                    inner_iter = inner_iters,
+                                    total_iter = total_iters,
+                                    reason = :klu_singularity_escalation,
+                                    eta_before = Float64(eta_before_klu),
+                                    eta_after = Float64(η),
+                                    changed = η != eta_before_klu,
+                                    eta_retry_count = eta_retries,
+                                    klu_singular_retry_count = klu_retry_delta,
+                                ))
+                            end
+                        elseif use_klu
+                            klu_retry_delta =
+                                klu_singular_retries[] - klu_retries_before
+                        end
 
                         @timeit TO "line search" begin
                             # Armijo condition on the merit function φ(z) = ‖F‖²/2:
@@ -511,7 +666,99 @@ function solve(
                             # with a stale reused Jacobian or a heavily regularized step) is
                             # clamped to 0, which degenerates to the plain decrease test.
                             mul!(Jδz, ∇F, δz)
-                            armijo_slope = min(dot(F, Jδz), 0.0)
+                            armijo_slope_raw = dot(F, Jδz)
+                            armijo_slope = min(armijo_slope_raw, 0.0)
+                        end
+                        if trace_hook !== nothing || diagnostic_hook !== nothing
+                            trace_step_norm2 = norm(δz, 2)
+                            trace_step_norm_inf = norm(δz, Inf)
+                            trace_linearized_residual_norm2 =
+                                sqrt(max(_shifted_norm2(F, 1.0, Jδz), 0.0))
+                            trace_full_step_predicted_reduction =
+                                F_z^2 - trace_linearized_residual_norm2^2
+                            trace_slack_stepsize_cap =
+                                _nonnegative_stepsize_cap(σ, δσ)
+                            trace_dual_stepsize_cap =
+                                _nonnegative_stepsize_cap(γ, δγ)
+                            trace_combined_stepsize_cap =
+                                min(trace_slack_stepsize_cap, trace_dual_stepsize_cap)
+                        end
+                        if trace_hook !== nothing
+                            trace_hook((;
+                                event = :direction,
+                                outer_iter = outer_iters,
+                                inner_iter = inner_iters,
+                                total_iter = total_iters,
+                                direction_attempt,
+                                eta_retry_count = eta_retries,
+                                epsilon = Float64(ϵ),
+                                eta = Float64(η),
+                                linear_solver,
+                                jacobian_reused = reused_jacobian,
+                                range_step = use_range_step,
+                                residual_norm2 = Float64(F_z),
+                                residual_norm_inf = Float64(norm(F, Inf)),
+                                step_norm2 = Float64(trace_step_norm2),
+                                step_norm_inf = Float64(trace_step_norm_inf),
+                                linearized_residual_norm2 =
+                                    Float64(trace_linearized_residual_norm2),
+                                full_step_predicted_reduction =
+                                    Float64(trace_full_step_predicted_reduction),
+                                armijo_slope_raw = Float64(armijo_slope_raw),
+                                armijo_slope = Float64(armijo_slope),
+                                slack_stepsize_cap =
+                                    Float64(trace_slack_stepsize_cap),
+                                dual_stepsize_cap =
+                                    Float64(trace_dual_stepsize_cap),
+                                combined_stepsize_cap =
+                                    Float64(trace_combined_stepsize_cap),
+                                klu_singular_retry_count = klu_retry_delta,
+                                svd_fallback_count =
+                                    svd_fallback_count[] - svd_fallbacks_before,
+                            ))
+                        end
+                        if diagnostic_hook !== nothing
+                            # Every array is an independent copy. A diagnostic callback may
+                            # factorize or even mutate these snapshots without touching the
+                            # live solver workspaces.
+                            diagnostic_hook((;
+                                event = :direction_snapshot,
+                                outer_iter = outer_iters,
+                                inner_iter = inner_iters,
+                                total_iter = total_iters,
+                                direction_attempt,
+                                eta_retry_count = eta_retries,
+                                epsilon = Float64(ϵ),
+                                eta = Float64(η),
+                                linear_solver,
+                                jacobian_reused = reused_jacobian,
+                                range_step = use_range_step,
+                                step_norm2 = Float64(trace_step_norm2),
+                                step_norm_inf = Float64(trace_step_norm_inf),
+                                linearized_residual_norm2 =
+                                    Float64(trace_linearized_residual_norm2),
+                                full_step_predicted_reduction =
+                                    Float64(trace_full_step_predicted_reduction),
+                                armijo_slope_raw = Float64(armijo_slope_raw),
+                                armijo_slope = Float64(armijo_slope),
+                                slack_stepsize_cap =
+                                    Float64(trace_slack_stepsize_cap),
+                                dual_stepsize_cap =
+                                    Float64(trace_dual_stepsize_cap),
+                                combined_stepsize_cap =
+                                    Float64(trace_combined_stepsize_cap),
+                                klu_singular_retry_count = klu_retry_delta,
+                                svd_fallback_count =
+                                    svd_fallback_count[] - svd_fallbacks_before,
+                                z = copy(z),
+                                residual = copy(F),
+                                jacobian = copy(∇F),
+                                step = copy(δz),
+                                jacobian_step = copy(Jδz),
+                            ))
+                        end
+
+                        @timeit TO "line search" begin
                             α = 1.0
                             @. z_trial = z + α * δz
                             @timeit TO "residual evaluation" mcp.F!(
@@ -522,6 +769,66 @@ function solve(
                                 η = 0.0,
                             )
                             F_z_next = norm(F_trial, 2)
+                            if trace_hook !== nothing
+                                predicted_reduction =
+                                    F_z^2 - _shifted_norm2(F, α, Jδz)
+                                actual_reduction_trial =
+                                    F_z^2 - F_z_next^2
+                                reduction_ratio =
+                                    predicted_reduction > 0 ?
+                                    actual_reduction_trial / predicted_reduction : -Inf
+                                armijo_rhs_norm2_squared =
+                                    F_z^2 +
+                                    2.0 * armijo_constant * α * armijo_slope
+                                armijo_rejected =
+                                    F_z_next^2 >=
+                                    armijo_rhs_norm2_squared
+                                slack_boundary_violated =
+                                    _nonnegativity_violated(σ, δσ, α)
+                                dual_boundary_violated = _nonnegativity_violated(γ, δγ, α)
+                                trace_hook((;
+                                    event = :line_search_trial,
+                                    outer_iter = outer_iters,
+                                    inner_iter = inner_iters,
+                                    total_iter = total_iters,
+                                    direction_attempt,
+                                    eta_retry_count = eta_retries,
+                                    backtracking_count = trace_iter_backtracks,
+                                    alpha = Float64(α),
+                                    step_norm2 = Float64(trace_step_norm2),
+                                    step_norm_inf = Float64(trace_step_norm_inf),
+                                    residual_norm2 = Float64(F_z_next),
+                                    residual_norm_inf = Float64(norm(F_trial, Inf)),
+                                    predicted_reduction =
+                                        Float64(predicted_reduction),
+                                    actual_reduction =
+                                        Float64(actual_reduction_trial),
+                                    reduction_ratio = Float64(reduction_ratio),
+                                    armijo_slope_raw =
+                                        Float64(armijo_slope_raw),
+                                    armijo_slope = Float64(armijo_slope),
+                                    armijo_rhs_norm2_squared =
+                                        Float64(armijo_rhs_norm2_squared),
+                                    armijo_margin =
+                                        Float64(
+                                            armijo_rhs_norm2_squared -
+                                            F_z_next^2,
+                                        ),
+                                    slack_stepsize_cap =
+                                        Float64(trace_slack_stepsize_cap),
+                                    dual_stepsize_cap =
+                                        Float64(trace_dual_stepsize_cap),
+                                    combined_stepsize_cap =
+                                        Float64(trace_combined_stepsize_cap),
+                                    armijo_rejected,
+                                    slack_boundary_violated,
+                                    dual_boundary_violated,
+                                    accepted = !armijo_rejected &&
+                                               !slack_boundary_violated &&
+                                               !dual_boundary_violated &&
+                                               α >= min_stepsize,
+                                ))
+                            end
                             while (
                                       F_z_next^2 >=
                                       F_z^2 + 2.0 * armijo_constant * α * armijo_slope
@@ -533,6 +840,10 @@ function solve(
                                 end
 
                                 α *= 0.5 # decay
+                                if trace_hook !== nothing
+                                    trace_iter_backtracks += 1
+                                    trace_total_backtracks += 1
+                                end
                                 @. z_trial = z + α * δz
                                 @timeit TO "residual evaluation" mcp.F!(
                                     F_trial,
@@ -542,6 +853,70 @@ function solve(
                                     η = 0.0,
                                 )
                                 F_z_next = norm(F_trial, 2)
+                                if trace_hook !== nothing
+                                    predicted_reduction =
+                                        F_z^2 - _shifted_norm2(F, α, Jδz)
+                                    actual_reduction_trial =
+                                        F_z^2 - F_z_next^2
+                                    reduction_ratio =
+                                        predicted_reduction > 0 ?
+                                        actual_reduction_trial / predicted_reduction :
+                                        -Inf
+                                    armijo_rhs_norm2_squared =
+                                        F_z^2 +
+                                        2.0 * armijo_constant * α * armijo_slope
+                                    armijo_rejected =
+                                        F_z_next^2 >=
+                                        armijo_rhs_norm2_squared
+                                    slack_boundary_violated =
+                                        _nonnegativity_violated(σ, δσ, α)
+                                    dual_boundary_violated =
+                                        _nonnegativity_violated(γ, δγ, α)
+                                    trace_hook((;
+                                        event = :line_search_trial,
+                                        outer_iter = outer_iters,
+                                        inner_iter = inner_iters,
+                                        total_iter = total_iters,
+                                        direction_attempt,
+                                        eta_retry_count = eta_retries,
+                                        backtracking_count = trace_iter_backtracks,
+                                        alpha = Float64(α),
+                                        step_norm2 = Float64(trace_step_norm2),
+                                        step_norm_inf =
+                                            Float64(trace_step_norm_inf),
+                                        residual_norm2 = Float64(F_z_next),
+                                        residual_norm_inf = Float64(norm(F_trial, Inf)),
+                                        predicted_reduction =
+                                            Float64(predicted_reduction),
+                                        actual_reduction =
+                                            Float64(actual_reduction_trial),
+                                        reduction_ratio =
+                                            Float64(reduction_ratio),
+                                        armijo_slope_raw =
+                                            Float64(armijo_slope_raw),
+                                        armijo_slope = Float64(armijo_slope),
+                                        armijo_rhs_norm2_squared =
+                                            Float64(armijo_rhs_norm2_squared),
+                                        armijo_margin =
+                                            Float64(
+                                                armijo_rhs_norm2_squared -
+                                                F_z_next^2,
+                                            ),
+                                        slack_stepsize_cap =
+                                            Float64(trace_slack_stepsize_cap),
+                                        dual_stepsize_cap =
+                                            Float64(trace_dual_stepsize_cap),
+                                        combined_stepsize_cap =
+                                            Float64(trace_combined_stepsize_cap),
+                                        armijo_rejected,
+                                        slack_boundary_violated,
+                                        dual_boundary_violated,
+                                        accepted = !armijo_rejected &&
+                                                   !slack_boundary_violated &&
+                                                   !dual_boundary_violated &&
+                                                   α >= min_stepsize,
+                                    ))
+                                end
                             end
                         end
 
@@ -581,6 +956,21 @@ function solve(
                             else
                                 eta_retries += 1
                                 if eta_retries > max_eta_retries
+                                    if trace_hook !== nothing
+                                        trace_failure_emitted = true
+                                        trace_hook((;
+                                            event = :failure,
+                                            outer_iter = outer_iters,
+                                            inner_iter = inner_iters,
+                                            total_iter = total_iters,
+                                            reason = :eta_retries_exhausted,
+                                            residual_norm2 = Float64(F_z),
+                                            alpha = Float64(α),
+                                            backtracking_count = trace_iter_backtracks,
+                                            eta_retry_count = trace_iter_eta_retries,
+                                            eta = Float64(η),
+                                        ))
+                                    end
                                     verbose &&
                                         @warn "Backtracking linesearch failed after $max_eta_retries η-retries. Exiting prematurely."
                                     status = :failed
@@ -590,7 +980,24 @@ function solve(
                                     "Backtracking exhausted at η=$η. Retrying with $(eta_retry_growth >= 1 ? "larger" : "smaller") η ($η -> $(η * eta_retry_growth)), attempt $eta_retries/$max_eta_retries\n";
                                     color = :yellow,
                                 )
+                                eta_before_retry = η
                                 η = min(η * eta_retry_growth, η_max)
+                                if trace_hook !== nothing
+                                    trace_iter_eta_retries += 1
+                                    trace_total_eta_retries += 1
+                                    trace_hook((;
+                                        event = :eta_change,
+                                        outer_iter = outer_iters,
+                                        inner_iter = inner_iters,
+                                        total_iter = total_iters,
+                                        reason = :line_search_retry,
+                                        eta_before = Float64(eta_before_retry),
+                                        eta_after = Float64(η),
+                                        changed = η != eta_before_retry,
+                                        eta_retry_count = trace_iter_eta_retries,
+                                        klu_singular_retry_count = 0,
+                                    ))
+                                end
                                 if use_klu
                                     @timeit TO "KKT system assembly" _update_augmented_eta!(
                                         aug_cache,
@@ -607,6 +1014,7 @@ function solve(
                     end
 
                     F .= F_trial
+                    trace_eta_used = η
 
                     # Levenberg-Marquardt gain-ratio update for the next Newton iteration's η.
                     # https://www.cs.cornell.edu/courses/cs4220/2023sp/lec/2023-04-19.pdf
@@ -616,8 +1024,23 @@ function solve(
                         verbose && println(
                             "Reused Jacobian: skipping gain-ratio update, keeping η = $η.",
                         )
+                        if trace_hook !== nothing
+                            trace_hook((;
+                                event = :eta_change,
+                                outer_iter = outer_iters,
+                                inner_iter = inner_iters,
+                                total_iter = total_iters,
+                                reason = :reused_jacobian_keep,
+                                eta_before = Float64(η),
+                                eta_after = Float64(η),
+                                changed = false,
+                                eta_retry_count = trace_iter_eta_retries,
+                                klu_singular_retry_count = 0,
+                            ))
+                        end
                     else
                         @timeit TO "regularization" begin
+                            eta_before_update = η
                             ρ =
                                 pred_reduction > 0 ? actual_reduction / pred_reduction :
                                 -Inf
@@ -639,6 +1062,23 @@ function solve(
                                     "Full step with moderate gain ratio (ρ = $ρ)... Keeping η = $η.\n",
                                     color = :green,
                                 )
+                            end
+                            if trace_hook !== nothing
+                                eta_reason =
+                                    ρ ≤ ρ_low || !full_step_taken ? :gain_ratio_increase :
+                                    ρ > ρ_high ? :gain_ratio_decrease : :gain_ratio_keep
+                                trace_hook((;
+                                    event = :eta_change,
+                                    outer_iter = outer_iters,
+                                    inner_iter = inner_iters,
+                                    total_iter = total_iters,
+                                    reason = eta_reason,
+                                    eta_before = Float64(eta_before_update),
+                                    eta_after = Float64(η),
+                                    changed = η != eta_before_update,
+                                    eta_retry_count = trace_iter_eta_retries,
+                                    klu_singular_retry_count = 0,
+                                ))
                             end
                         end
                     end
@@ -676,6 +1116,122 @@ function solve(
                         push!(condition_number_history, condition_number)
                     end
                 end
+                if trace_hook !== nothing
+                    if linesearch == :fraction_to_boundary
+                        # The baseline fraction-to-boundary path intentionally keeps
+                        # its lagged `F` bookkeeping. Observe the accepted point in a
+                        # separate buffer so tracing cannot change that behavior.
+                        mcp.F!(F_trial, z; θ, ϵ, η = 0.0)
+                        trace_residual_after_norm2 = norm(F_trial, 2)
+                        trace_residual_after_norm_inf = norm(F_trial, Inf)
+                    else
+                        trace_residual_after_norm2 = norm(F, 2)
+                        trace_residual_after_norm_inf = norm(F, Inf)
+                    end
+                    trace_accepted_steps += 1
+                    accepted_alpha = min(α_σ, α_γ)
+                    full_step = accepted_alpha == 1.0
+                    if full_step
+                        trace_full_step_count += 1
+                    end
+                    accepted_direction_attempt =
+                        linesearch == :backtracking ? direction_attempt : 1
+                    accepted_step_norm2 =
+                        linesearch == :backtracking ? trace_step_norm2 : norm(δz, 2)
+                    accepted_step_norm_inf =
+                        linesearch == :backtracking ? trace_step_norm_inf : norm(δz, Inf)
+                    accepted_predicted_reduction =
+                        linesearch == :backtracking ? pred_reduction : NaN
+                    accepted_actual_reduction =
+                        linesearch == :backtracking ? actual_reduction : NaN
+                    accepted_reduction_ratio =
+                        linesearch == :backtracking && pred_reduction > 0 ?
+                        actual_reduction / pred_reduction : NaN
+                    accepted_armijo_slope_raw =
+                        linesearch == :backtracking ? armijo_slope_raw : NaN
+                    accepted_armijo_slope =
+                        linesearch == :backtracking ? armijo_slope : NaN
+                    accepted_slack_stepsize_cap =
+                        linesearch == :backtracking ?
+                        trace_slack_stepsize_cap : NaN
+                    accepted_dual_stepsize_cap =
+                        linesearch == :backtracking ?
+                        trace_dual_stepsize_cap : NaN
+                    trace_hook((;
+                        event = :accepted_step,
+                        outer_iter = outer_iters,
+                        inner_iter = inner_iters,
+                        total_iter = total_iters,
+                        accepted_step = trace_accepted_steps,
+                        direction_attempt = accepted_direction_attempt,
+                        linesearch,
+                        residual_before_norm2 = Float64(trace_residual_before_norm2),
+                        residual_after_norm2 = Float64(trace_residual_after_norm2),
+                        residual_after_norm_inf = Float64(trace_residual_after_norm_inf),
+                        step_norm2 = Float64(accepted_step_norm2),
+                        step_norm_inf = Float64(accepted_step_norm_inf),
+                        predicted_reduction =
+                            Float64(accepted_predicted_reduction),
+                        actual_reduction =
+                            Float64(accepted_actual_reduction),
+                        reduction_ratio =
+                            Float64(accepted_reduction_ratio),
+                        armijo_slope_raw =
+                            Float64(accepted_armijo_slope_raw),
+                        armijo_slope = Float64(accepted_armijo_slope),
+                        slack_stepsize_cap =
+                            Float64(accepted_slack_stepsize_cap),
+                        dual_stepsize_cap =
+                            Float64(accepted_dual_stepsize_cap),
+                        combined_stepsize_cap =
+                            Float64(
+                                min(
+                                    accepted_slack_stepsize_cap,
+                                    accepted_dual_stepsize_cap,
+                                ),
+                            ),
+                        first_attempt_alpha = 1.0,
+                        accepted_alpha = Float64(accepted_alpha),
+                        accepted_alpha_slack = Float64(α_σ),
+                        accepted_alpha_dual = Float64(α_γ),
+                        backtracking_count = trace_iter_backtracks,
+                        slack_backtracking_count = trace_slack_backtracks,
+                        dual_backtracking_count = trace_dual_backtracks,
+                        eta_retry_count = trace_iter_eta_retries,
+                        eta_used = Float64(trace_eta_used),
+                        eta_next = Float64(η),
+                        rho = Float64(ρ),
+                        full_step,
+                        jacobian_reused = linesearch == :backtracking ? reused_jacobian :
+                                          false,
+                    ))
+                end
+                if diagnostic_hook !== nothing
+                    diagnostic_residual = if linesearch == :fraction_to_boundary
+                        # Preserve the baseline's intentionally lagged `F`; evaluate
+                        # the accepted point only into the trace-only workspace.
+                        mcp.F!(F_trial, z; θ, ϵ, η = 0.0)
+                        copy(F_trial)
+                    else
+                        copy(F)
+                    end
+                    diagnostic_hook((;
+                        event = :accepted_snapshot,
+                        outer_iter = outer_iters,
+                        inner_iter = inner_iters,
+                        total_iter = total_iters,
+                        linesearch,
+                        direction_attempt =
+                            linesearch == :backtracking ? direction_attempt : 1,
+                        accepted_alpha = Float64(min(α_σ, α_γ)),
+                        accepted_alpha_slack = Float64(α_σ),
+                        accepted_alpha_dual = Float64(α_γ),
+                        eta_used = Float64(trace_eta_used),
+                        eta_next = Float64(η),
+                        z = copy(z),
+                        residual = diagnostic_residual,
+                    ))
+                end
 
                 verbose && println("KKT error = $kkt_error")
 
@@ -702,6 +1258,47 @@ function solve(
     # check was unreachable when max_outer_iters=1 because the loop increments
     # outer_iters to 2 before the check.
     status = (kkt_error <= tol) ? :solved : :failed
+    if trace_hook !== nothing
+        # Unlike `kkt_error` on the fraction-to-boundary path, this is always a
+        # direct residual evaluation at the point that will be returned.
+        mcp.F!(F_trial, z; θ, ϵ, η = 0.0)
+        final_residual_norm2 = norm(F_trial, 2)
+        final_residual_norm_inf = norm(F_trial, Inf)
+        if status === :failed && !trace_failure_emitted
+            trace_failure_emitted = true
+            trace_hook((;
+                event = :failure,
+                outer_iter = trace_actual_outer_iters,
+                inner_iter = inner_iters,
+                total_iter = total_iters,
+                reason = :not_converged,
+                residual_norm2 = Float64(final_residual_norm2),
+                alpha = NaN,
+                backtracking_count = trace_total_backtracks,
+                eta_retry_count = trace_total_eta_retries,
+                eta = Float64(η),
+            ))
+        end
+        trace_hook((;
+            event = :finish,
+            status,
+            reported_residual_norm2 = Float64(kkt_error),
+            final_residual_norm2 = Float64(final_residual_norm2),
+            final_residual_norm_inf = Float64(final_residual_norm_inf),
+            epsilon = Float64(ϵ),
+            eta = Float64(η),
+            total_iters,
+            accepted_steps = trace_accepted_steps,
+            actual_outer_iters = trace_actual_outer_iters,
+            total_backtracking_count = trace_total_backtracks,
+            total_eta_retry_count = trace_total_eta_retries,
+            full_step_count = trace_full_step_count,
+            full_step_fraction = trace_accepted_steps == 0 ? 0.0 :
+                                 trace_full_step_count / trace_accepted_steps,
+            klu_singular_retries = klu_singular_retries[],
+            svd_fallback_count = svd_fallback_count[],
+        ))
+    end
 
     result = (;
         status,
@@ -789,6 +1386,17 @@ function _nonnegativity_violated(values, direction, α)
         end
     end
     false
+end
+
+"Largest step in `[0, max_stepsize]` that preserves coordinatewise nonnegativity."
+function _nonnegative_stepsize_cap(values, direction; max_stepsize = 1.0)
+    cap = Float64(max_stepsize)
+    @inbounds for i in eachindex(values, direction)
+        if direction[i] < 0
+            cap = min(cap, Float64(-values[i] / direction[i]))
+        end
+    end
+    clamp(cap, 0.0, Float64(max_stepsize))
 end
 
 "Allocation-free `norm(a .+ scale .* b, 2)^2`."
@@ -1029,6 +1637,7 @@ function fraction_to_the_boundary_linesearch(
     τ = 0.995,
     decay = 0.5,
     tol = 1e-4,
+    backtracking_counter = nothing,
 )
     α = max_stepsize
     while any(@. v + α * δ < (1 - τ) * v)
@@ -1037,6 +1646,9 @@ function fraction_to_the_boundary_linesearch(
         end
 
         α *= decay
+        if backtracking_counter !== nothing
+            backtracking_counter[] += 1
+        end
     end
 
     α

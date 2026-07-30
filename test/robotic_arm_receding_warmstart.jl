@@ -43,7 +43,12 @@ const RAR = Robotic_arm_receding
         kkt,
         :primal_only,
     )
-    @test primal_only == shifted_primal
+    @test length(primal_only) == kkt.variable_dimension
+    @test primal_only[kkt.primal_dims] == shifted_primal
+    @test all(iszero, primal_only[kkt.all_equality_stationarity_dual_dims])
+    @test all(==(1.0), primal_only[kkt.preference_slack_dims])
+    @test all(==(1.0), primal_only[kkt.interior_point_slack_dims])
+    @test all(==(1.0), primal_only[kkt.inequality_constraint_dual_dims])
 
     equality_only = RAR.build_receding_warmstart(
         shifted_primal,
@@ -72,4 +77,17 @@ const RAR = Robotic_arm_receding
     @test without_innermost[carried_dims] == previous_z[carried_dims]
     @test all(iszero, without_innermost[kkt.innermost_stationarity_dual_dims])
     @test all(==(1.0), without_innermost[kkt.inequality_constraint_dual_dims])
+
+    all_duals = RAR.build_receding_warmstart(
+        shifted_primal,
+        previous_z,
+        kkt,
+        :all_duals,
+    )
+    @test all_duals[kkt.primal_dims] == shifted_primal
+    @test all_duals[kkt.all_equality_stationarity_dual_dims] ==
+          previous_z[kkt.all_equality_stationarity_dual_dims]
+    @test all_duals[kkt.innermost_stationarity_dual_dims] ==
+          previous_z[kkt.innermost_stationarity_dual_dims]
+    @test all(==(1.0), all_duals[kkt.inequality_constraint_dual_dims])
 end

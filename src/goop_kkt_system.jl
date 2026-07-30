@@ -11,7 +11,7 @@ TODO (@Jingqi/@DongHo): Please flesh this comment out with more of the math,
 or with a pointer to a LaTeX derivation somewhere in this repository.
 """
 
-struct GOOPKKTSystem{T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11}
+struct GOOPKKTSystem{T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12}
 	"A callable function that computes F!(val, z; θ, ϵ) in-place for 'val'"
 	F!::T1
 	"A callable function that computes ∇F!(val, z; θ, ϵ) in-place for 'val'"
@@ -40,6 +40,45 @@ struct GOOPKKTSystem{T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11}
 	F_symbolic::T11
 	"z in symbolics"
 	z_symbolic::T11
+	"Generated semantic metadata, when available"
+	metadata::T12
+end
+
+# Preserve the historical 14-positional-argument constructor used by tests and
+# downstream callers that build small hand-written KKT systems.
+function GOOPKKTSystem(
+	F!,
+	∇F_z!,
+	primal_dims,
+	preference_slack_dims,
+	interior_point_slack_dims,
+	inequality_constraint_dual_dims,
+	equality_constraint_dual_dims,
+	stationarity_dual_dims,
+	all_equality_stationarity_dual_dims,
+	innermost_stationarity_dual_dims,
+	kkt_dimension,
+	variable_dimension,
+	F_symbolic,
+	z_symbolic,
+)
+	GOOPKKTSystem(
+		F!,
+		∇F_z!,
+		primal_dims,
+		preference_slack_dims,
+		interior_point_slack_dims,
+		inequality_constraint_dual_dims,
+		equality_constraint_dual_dims,
+		stationarity_dual_dims,
+		all_equality_stationarity_dual_dims,
+		innermost_stationarity_dual_dims,
+		kkt_dimension,
+		variable_dimension,
+		F_symbolic,
+		z_symbolic,
+		nothing,
+	)
 end
 
 """
@@ -218,6 +257,7 @@ function BuildGOOPKKTSystem(
 	stationarity_dual_dims = Int[],
 	all_equality_stationarity_dual_dims = Int[],
 	innermost_stationarity_dual_dims = Int[],
+	metadata = nothing,
 	backend_options = (;),
 	codegen = :native,
 	fd_codegen_chunk_size = nothing,
@@ -335,6 +375,7 @@ function BuildGOOPKKTSystem(
 			length(z_symbolic),
 			F_symbolic,
 			z_symbolic,
+			metadata,
 		)
 	end
 end

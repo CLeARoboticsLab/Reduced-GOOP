@@ -280,6 +280,162 @@ function get_setup(scenario_config::ScenarioConfig)
 	]
 
 	equality_constraints = player_equality_constraints
+	primal_semantics = map(1:num_players) do player
+		specs = ReducedGOOP.PrimalCoordinateSpec[]
+		state_dimension = dynamics[player].state_dimension
+		control_dimension = dynamics[player].control_dimension
+		for stage in 1:planning_horizon
+			for component in 1:state_dimension
+				push!(
+					specs,
+					ReducedGOOP.PrimalCoordinateSpec(;
+						player,
+						variable = :state,
+						stage,
+						component,
+						shift_rule = :successor,
+						tail_role =
+							stage == planning_horizon ? :dynamic_completion : :shifted,
+						horizon_role =
+							stage == 1 ? :initial_boundary :
+							stage >= planning_horizon - 1 ? :terminal_boundary :
+							:inherited_interior,
+						exact_shift_invariant =
+							1 < stage < planning_horizon - 1,
+					),
+				)
+			end
+			for component in 1:control_dimension
+				push!(
+					specs,
+					ReducedGOOP.PrimalCoordinateSpec(;
+						player,
+						variable = :control,
+						stage,
+						component,
+						shift_rule = :successor,
+						tail_role =
+							stage == planning_horizon ? :zero_completion : :shifted,
+						horizon_role =
+							stage == 1 ? :initial_boundary :
+							stage >= planning_horizon - 1 ? :terminal_boundary :
+							:inherited_interior,
+						exact_shift_invariant =
+							1 < stage < planning_horizon - 1,
+					),
+				)
+			end
+		end
+		specs
+	end
+	equality_semantics = map(1:num_players) do player
+		specs = ReducedGOOP.EqualityCoordinateSpec[]
+		state_dimension = dynamics[player].state_dimension
+		control_dimension = dynamics[player].control_dimension
+		for component in 1:state_dimension
+			push!(
+				specs,
+				ReducedGOOP.EqualityCoordinateSpec(;
+					scope = :player,
+					player,
+					equation_class = :initial_condition,
+					equation_type = :initial_state,
+					stage = 1,
+					component,
+					shift_rule = :reset,
+					tail_role = :initial_condition,
+					horizon_role = :initial_boundary,
+					exact_shift_invariant = false,
+				),
+			)
+		end
+		for component in 1:control_dimension
+			push!(
+				specs,
+				ReducedGOOP.EqualityCoordinateSpec(;
+					scope = :player,
+					player,
+					equation_class = :initial_condition,
+					equation_type = :initial_control,
+					stage = 1,
+					component,
+					shift_rule = :reset,
+					tail_role = :initial_condition,
+					horizon_role = :initial_boundary,
+					exact_shift_invariant = false,
+				),
+			)
+		end
+		for stage in 1:(planning_horizon-1), component in 1:state_dimension
+			push!(
+				specs,
+				ReducedGOOP.EqualityCoordinateSpec(;
+					scope = :player,
+					player,
+					equation_class = :dynamics,
+					equation_type = :dynamics,
+					stage,
+					successor_stage = stage + 1,
+					component,
+					shift_rule = :successor,
+					tail_role =
+						stage == planning_horizon - 1 ? :terminal_dynamics : :shifted,
+					horizon_role =
+						stage == planning_horizon - 1 ? :terminal_boundary :
+						:inherited_interior,
+					exact_shift_invariant = stage < planning_horizon - 1,
+				),
+			)
+		end
+		if player == 1
+			for stage in 1:planning_horizon
+				push!(
+					specs,
+					ReducedGOOP.EqualityCoordinateSpec(;
+						scope = :player,
+						player,
+						equation_class = :time_indexed_path_equality,
+						equation_type = :handle_grasp,
+						stage,
+						component = 1,
+						shift_rule = :successor,
+						tail_role =
+							stage == planning_horizon ? :terminal_path : :shifted,
+						horizon_role =
+							stage == planning_horizon ? :terminal_boundary :
+							:inherited_interior,
+						exact_shift_invariant = stage < planning_horizon,
+					),
+				)
+			end
+		else
+			for stage in 1:planning_horizon
+				push!(
+					specs,
+					ReducedGOOP.EqualityCoordinateSpec(;
+						scope = :player,
+						player,
+						equation_class = :time_indexed_path_equality,
+						equation_type = :ground_control,
+						stage,
+						component = child_vertical_control_index,
+						shift_rule = :successor,
+						tail_role =
+							stage == planning_horizon ? :terminal_path : :shifted,
+						horizon_role =
+							stage == planning_horizon ? :terminal_boundary :
+							:inherited_interior,
+						exact_shift_invariant = stage < planning_horizon,
+					),
+				)
+			end
+		end
+		specs
+	end
+	semantic_layout = ReducedGOOP.GOOPSemanticLayout(;
+		primal_by_player = primal_semantics,
+		equality_by_player = equality_semantics,
+	)
 
 	function robot_child_safety_inequality(z, θ)
 		arm_trajectory = trajectory(z; player = 1)
@@ -350,6 +506,7 @@ function get_setup(scenario_config::ScenarioConfig)
 			inequality_constraints = [nothing, nothing],
 			shared_equality_constraint = nothing,
 			shared_inequality_constraint = nothing,
+			semantic_layout,
 		)
 	end
 
@@ -409,6 +566,7 @@ function get_setup(scenario_config::ScenarioConfig)
 			inequality_constraints = [nothing, nothing],
 			shared_equality_constraint = nothing,
 			shared_inequality_constraint = nothing,
+			semantic_layout,
 		)
 	end
 
