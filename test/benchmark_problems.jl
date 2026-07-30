@@ -47,9 +47,9 @@ set as g(x) >= 0 because exp(r) - 1 = 0 iff r = 0, and exp(r) - 1 > 0 iff r > 0.
 
 function default_interior_point_options(; verbose = false)
     return ReducedGOOP.InteriorPointOptions(;
-        tol = 1e-8,
+        tol = 1e-6,
         η₀ = 0.0,
-        ϵ₀ = :auto,
+        ϵ₀ = 1e-9,
         max_inner_iters = 5000,
         max_outer_iters = 20,
         tightening_rate = 2.0,
