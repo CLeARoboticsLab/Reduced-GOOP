@@ -696,12 +696,15 @@ struct MpcContext
 	dual_warmstart::Symbol
 end
 
-"""Return [[r0_goal], [r1_goal], [r2_goal]] (world-frame) from the scenario config."""
-function get_goal_positions(ctx::MpcContext)
-	(; goal_position1, goal_position2, goal_position3) = ctx.scenario_config
-	[collect(Float64, goal_position1), collect(Float64, goal_position2), collect(Float64, goal_position3)]
+"""Return goals for the current observation: arm goals are fixed lift targets;
+child goal tracks the live pot centre (midpoint of the two arm EEFs)."""
+function get_current_goal_positions(ctx::MpcContext, obs)::Vector{Vector{Float64}}
+	(; goal_position1, goal_position2) = ctx.scenario_config
+	eef0 = collect(Float64, obs["robot0_eef_pos"])
+	eef1 = collect(Float64, obs["robot1_eef_pos"])
+	[collect(Float64, goal_position1), collect(Float64, goal_position2), 0.5 .* (eef0 .+ eef1)]
 end
-export get_goal_positions
+export get_current_goal_positions
 
 """
 Build the KKT system once from the post-grip EEF positions (world frame).
@@ -860,10 +863,10 @@ function create_planner_from_context(
 		)
 		(; θ) = build_instance_parameters(flatten_parameters, current_states, scenario_config)
 
-		output = ReducedGOOP.solve(solver, GOOP_kkt_system, θ; z₀ = stage_warmstart[], options)
+		elapsed_time = @elapsed output = ReducedGOOP.solve(solver, GOOP_kkt_system, θ; z₀ = stage_warmstart[], options)
 		if output.status == :failed
 			rescue_ws = build_default_warmstart(initial_instance_states, scenario_config).warmstart_solution
-			rescue = ReducedGOOP.solve(solver, GOOP_kkt_system, θ; z₀ = rescue_ws, options)
+			elapsed_time += @elapsed rescue = ReducedGOOP.solve(solver, GOOP_kkt_system, θ; z₀ = rescue_ws, options)
 			if rescue.status == :solved || rescue.kkt_error < output.kkt_error
 				output = rescue
 			end
@@ -871,7 +874,8 @@ function create_planner_from_context(
 		println(
 			"[mpc] status=$(output.status), ",
 			"iters=$(output.total_iters), ",
-			"kkt_err=$(round(output.kkt_error; sigdigits = 4))",
+			"kkt_err=$(round(output.kkt_error; sigdigits = 4)), ",
+			"time=$(round(elapsed_time; digits = 3)) sec",
 		)
 
 		strategies = extract_player_strategies(output.x, primal_dimensions, dynamics)
