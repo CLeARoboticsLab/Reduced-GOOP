@@ -696,6 +696,13 @@ struct MpcContext
 	dual_warmstart::Symbol
 end
 
+"""Return [[r0_goal], [r1_goal], [r2_goal]] (world-frame) from the scenario config."""
+function get_goal_positions(ctx::MpcContext)
+	(; goal_position1, goal_position2, goal_position3) = ctx.scenario_config
+	[collect(Float64, goal_position1), collect(Float64, goal_position2), collect(Float64, goal_position3)]
+end
+export get_goal_positions
+
 """
 Build the KKT system once from the post-grip EEF positions (world frame).
 
