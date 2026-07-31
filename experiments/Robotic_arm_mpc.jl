@@ -661,11 +661,29 @@ end
 # Usage (from Python / test.py):
 #   ctx     = jl.Robotic_arm_mpc.build_mpc_context(obs, r2_dim)
 #   planner = jl.Robotic_arm_mpc.create_planner_from_context(ctx, obs, 20)
-#   # run_receding_horizon uses jl.plan_next(planner, obs) per step
+#   # use jl.Robotic_arm_mpc.plan_next(planner, obs) to get the next action vector
 #
 # At every plan_next call the planner reads the actual robot EEF positions from
 # the live obs dict, re-solves from that state, and returns the first planned
 # control as a RoboSuite action vector — closing the loop on real measurements.
+
+# ── Closed-loop planner ────────────────────────────────────────────────────────
+# solve_fn(obs) → Vector{Float64}; return Float64[] to signal completion.
+
+mutable struct ClosedLoopPlanner
+	solve_fn::Any
+	step::Int
+	max_steps::Int
+end
+export ClosedLoopPlanner
+
+function plan_next(planner::ClosedLoopPlanner, obs)::Vector{Float64}
+	planner.step >= planner.max_steps && return Float64[]
+	action = planner.solve_fn(obs)
+	planner.step += 1
+	return action
+end
+export plan_next
 
 struct MpcContext
 	GOOP_kkt_system::Any
@@ -778,7 +796,7 @@ function build_mpc_context(
 end
 
 """
-Create a `Main.ClosedLoopPlanner` from a pre-built `MpcContext`.
+Create a `ClosedLoopPlanner` from a pre-built `MpcContext`.
 
 Each `plan_next` call reads the actual robot EEF positions from the live obs,
 re-solves from that state (closing the loop on real measurements), shifts the
@@ -884,7 +902,7 @@ function create_planner_from_context(
 		vcat(r0_pos, [1.0], r1_pos, [1.0], r2_full)  # 1.0 = GRIP_CLOSED
 	end
 
-	Main.ClosedLoopPlanner(solve_fn, 0, Int(num_mpc_steps))
+	ClosedLoopPlanner(solve_fn, 0, Int(num_mpc_steps))
 end
 
 end
