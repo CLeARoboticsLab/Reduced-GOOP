@@ -691,7 +691,6 @@ struct MpcContext
 	flatten_parameters::Any
 	primal_dimensions::Vector{Int}
 	options::Any
-	r2_action_dim::Int
 	planning_horizon::Int
 	arm_state_dimension::Int
 	dual_warmstart::Symbol
@@ -701,11 +700,9 @@ end
 Build the KKT system once from the post-grip EEF positions (world frame).
 
 `obs` is the Python observation dict immediately after gripping.
-`r2_action_dim` is `env.robots[2].action_dim` (GR1 full action length).
 """
 function build_mpc_context(
-	obs,
-	r2_action_dim::Integer;
+	obs;
 	planning_horizon::Integer = 10,
 	goop_version::Symbol = :quasi,
 	dual_warmstart::Symbol = :all_except_innermost_stationarity,
@@ -788,7 +785,6 @@ function build_mpc_context(
 		flatten_parameters,
 		primal_dimensions,
 		options,
-		Int(r2_action_dim),
 		Int(planning_horizon),
 		Int(arm_state_dimension),
 		dual_warmstart,
@@ -815,7 +811,6 @@ function create_planner_from_context(
 		flatten_parameters,
 		primal_dimensions,
 		options,
-		r2_action_dim,
 		planning_horizon,
 		arm_state_dimension,
 		dual_warmstart,
@@ -898,8 +893,7 @@ function create_planner_from_context(
 		combined_next = collect(Float64, strategies[1].xs[2])
 		r0_pos = combined_next[1:arm_state_dimension]
 		r1_pos = combined_next[(arm_state_dimension + 1):(2 * arm_state_dimension)]
-		r2_full = vcat(r2_hold, zeros(r2_action_dim - 3))
-		vcat(r0_pos, [1.0], r1_pos, [1.0], r2_full)  # 1.0 = GRIP_CLOSED
+		vcat(r0_pos, [1.0], r1_pos, [1.0], r2_hold)  # 1.0 = GRIP_CLOSED
 	end
 
 	ClosedLoopPlanner(solve_fn, 0, Int(num_mpc_steps))
