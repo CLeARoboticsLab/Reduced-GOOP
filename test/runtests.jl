@@ -11,9 +11,10 @@ function test_known_solution_case(;
 	levels::Int,
 	kind::Symbol,
 	atol = IP_ATOL,
+    kkt_system = reduced_kkt_system,
 )
 	case = build_benchmark_problem(; num_players, levels, kind)
-	(; output, primals) = solve_with_interior_point(case.problem, case.expected)
+	(; output, primals) = solve_with_interior_point(case.problem, case.expected; kkt_system)
 
 	@test output.status === :solved
 	@test isapprox(primals, case.expected; atol, rtol = 0.0)
@@ -27,7 +28,7 @@ function test_known_solution_case(;
 	)
 end
 
-@testset "Interior-Point Reduced KKT" begin
+@testset "Interior-Point Reduced & Quasi KKT Systems" begin
 	#=
 	Single-Player Box-Constrained Benchmark Family
 	----------------------------------------------
@@ -127,32 +128,40 @@ end
 	Each player's single-level objective covers coordinates {1,2,3,4,5}.
 	=#
 	@testset "Three-Player Problems" begin
-		#=
-		Three-Level Hierarchy
-		---------------------
 
-		Each player ranks coordinates {5} < {3,4} < {1,2}, innermost highest, and
-		the coupled inequalities stay *hard* constraints: the reduced KKT gives
-		them interior-point slacks and a relaxed complementarity pair
+        # Testing Reduced KKT system 
 
-			g(x, θ) - σ = 0,    σ .* γ - ϵ = 0,    σ, γ >= 0,
+		@testset "Single-Level" begin
+			@testset "Reduced GOOP, Quadratic Objective, Linear Constraints" begin
+				test_known_solution_case(; num_players = 3, levels = 1, kind = :quadratic)
+			end
 
-		so an active row pushes back through its multiplier γ. That is what pins
-		x* here. Encoding the same inequalities as an innermost prioritized
-		preference instead replaces γ with a `(-h)^(level+2)` penalty whose
-		gradient vanishes identically at the boundary, and the recovered solution
-		degrades by several orders of magnitude — see
-		`quasi_vs_reduced_preference_inequality.jl`.
+			@testset "Reduced GOOP, Nonlinear Objective, Nonlinear Constraints" begin
+				test_known_solution_case(; num_players = 3, levels = 1, kind = :nonlinear)
+			end
+		end
 
-		Primal accuracy is O(ϵ₀); the cosh family carries a larger constant than
-		the quadratic one, hence its looser `atol`.
-		=#
+		@testset "Bi-Level" begin
+			@testset "Reduced GOOP, Quadratic Objective, Linear Constraints" begin
+				test_known_solution_case(; num_players = 3, levels = 2, kind = :quadratic)
+			end
+
+			@testset "Reduced GOOP, Nonlinear Objective, Nonlinear Constraints" begin
+				test_known_solution_case(;
+					num_players = 3,
+					levels = 2,
+					kind = :nonlinear,
+					atol = 5e-7,
+				)
+			end
+		end
+
 		@testset "Three-Level" begin
-			@testset "Quadratic Objective, Linear Constraints" begin
+			@testset "Reduced GOOP, Quadratic Objective, Linear Constraints" begin
 				test_known_solution_case(; num_players = 3, levels = 3, kind = :quadratic)
 			end
 
-			@testset "Nonlinear Objective, Nonlinear Constraints" begin
+			@testset "Reduced GOOP, Nonlinear Objective, Nonlinear Constraints" begin
 				test_known_solution_case(;
 					num_players = 3,
 					levels = 3,
@@ -162,13 +171,47 @@ end
 			end
 		end
 
-		@testset "Single-Level" begin
-			@testset "Quadratic Objective, Linear Constraints" begin
-				test_known_solution_case(; num_players = 3, levels = 1, kind = :quadratic)
+        # Testing Quasi-KKT system 
+
+        @testset "Single-Level" begin
+			@testset "Quasi GOOP, Quadratic Objective, Linear Constraints" begin
+				test_known_solution_case(; num_players = 3, levels = 1, kind = :quadratic, kkt_system = quasi_kkt_system)
 			end
 
-			@testset "Nonlinear Objective, Nonlinear Constraints" begin
-				test_known_solution_case(; num_players = 3, levels = 1, kind = :nonlinear)
+			@testset "Quasi GOOP, Nonlinear Objective, Nonlinear Constraints" begin
+				test_known_solution_case(; num_players = 3, levels = 1, kind = :nonlinear, kkt_system = quasi_kkt_system)
+			end
+		end
+
+		@testset "Bi-Level" begin
+			@testset "Quasi GOOP, Quadratic Objective, Linear Constraints" begin
+				test_known_solution_case(; num_players = 3, levels = 2, kind = :quadratic, kkt_system = quasi_kkt_system)
+			end
+
+			@testset "Quasi GOOP, Nonlinear Objective, Nonlinear Constraints" begin
+				test_known_solution_case(;
+					num_players = 3,
+					levels = 2,
+					kind = :nonlinear,
+					atol = 5e-7,
+                    kkt_system = quasi_kkt_system
+				)
+			end
+		end
+
+		@testset "Three-Level" begin
+			@testset "Quasi GOOP, Quadratic Objective, Linear Constraints" begin
+				test_known_solution_case(; num_players = 3, levels = 3, kind = :quadratic, kkt_system = quasi_kkt_system)
+			end
+
+			@testset "Quasi GOOP, Nonlinear Objective, Nonlinear Constraints" begin
+				test_known_solution_case(;
+					num_players = 3,
+					levels = 3,
+					kind = :nonlinear,
+					atol = 5e-7,
+                    kkt_system = quasi_kkt_system
+				)
 			end
 		end
 	end

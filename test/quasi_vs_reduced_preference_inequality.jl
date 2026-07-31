@@ -73,23 +73,12 @@ using ReducedGOOP
 # skips the per-solve `check_solve` assertions (8 tests instead of 56).
 const COMPARISON_TOLERANCE = 1e-4
 
-# `max_outer_iters = 1`: no ϵ-tightening loop. ϵ is pinned at ϵ₀ for the whole
-# solve, so every run reports `1 / n` outer/inner iterations and the residual is
-# measured against a single fixed relaxation.
-#
-# ϵ₀ sits strictly below `tol` because the ϵ-relaxed residual floors at ≈1.22ϵ;
-# leaving it at `:auto` lets the run stop at a residual dominated by the
-# relaxation rather than by the formulation.
-#
-# `linear_solver = :klu` rules out `use_marquardt_scaling`, `tsvd_threshold > 0`,
-# and `record_condition_number` — the sparse path has no dense factorization to
-# scale or inspect — so those are pinned off rather than exposed as options.
-function comparison_interior_point_options(; tol = COMPARISON_TOLERANCE, verbose = false)
+function comparison_solver_options(; tol = COMPARISON_TOLERANCE, verbose = false)
     @assert 1e-9 < tol "ϵ₀ = 1e-9 must stay strictly below tol"
     return ReducedGOOP.InteriorPointOptions(;
         tol,
         η₀ = 0.0,
-        ϵ₀ = 1e-9,
+        ϵ₀ = 0.0,
         max_inner_iters = 5000,
         max_outer_iters = 1,
         tightening_rate = 2.0,
@@ -107,7 +96,7 @@ function comparison_interior_point_options(; tol = COMPARISON_TOLERANCE, verbose
 end
 
 "The single solver configuration: sparse KLU with a backtracking line search."
-const COMPARISON_OPTIONS = comparison_interior_point_options()
+const COMPARISON_OPTIONS = comparison_solver_options()
 
 """
     innermost_preference_inequality_goop(problem)
@@ -274,9 +263,6 @@ function solve_variant(goop, base_problem, variant::Symbol; z₀, options)
         diverged,
         status = output.status,
         kkt_error = output.kkt_error,
-        # `solve` seeds `outer_iters = 1` and post-increments it, so the field it
-        # returns is always one more than the number of ϵ-loop passes actually
-        # run. Report the passes, which is 1 under `max_outer_iters = 1`.
         outer_passes = max(output.outer_iters - 1, 0),
         total_iters = output.total_iters,
         ϵ = output.ϵ,
@@ -314,6 +300,8 @@ function compare_reduced_vs_quasi(;
 
     primal_abs = norm(reduced.primals .- quasi.primals, Inf)
     primal_rel = relative_difference(reduced.primals, quasi.primals)
+
+    # Main.@infiltrate
 
     # Distance to the ground truth. `case.expected` is the closed-form solution
     # the benchmark family was constructed around: the two active coupled
