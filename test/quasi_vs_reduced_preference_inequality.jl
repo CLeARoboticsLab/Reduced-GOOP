@@ -71,26 +71,29 @@ using ReducedGOOP
 # fifth order at the boundary, so a tighter tolerance only rejects the iterate it
 # was always going to return. At 1e-6 every solve reports `:failed`, which also
 # skips the per-solve `check_solve` assertions (8 tests instead of 56).
-const COMPARISON_TOLERANCE = 1e-4
+const COMPARISON_TOLERANCE = 1e-6
 
 function comparison_solver_options(; tol = COMPARISON_TOLERANCE, verbose = false)
     @assert 1e-9 < tol "ϵ₀ = 1e-9 must stay strictly below tol"
     return ReducedGOOP.InteriorPointOptions(;
         tol,
+        # η₀ = 0 is the best of the regularization settings here, and it also makes
+        # `tightening_rate`/`loosening_rate` inert: both update η multiplicatively,
+        # so η stays pinned at zero. That is not a loss. Past the first ~50
+        # iterations every step is a full Newton step (α ≡ 1) with gain ratio
+        # ρ ≈ 0.99, so neither rate is ever exercised — the branches they control
+        # fire only on rejected steps or poor gain ratios. Any η > 0 strictly
+        # perturbs an already-accurate Newton step: η₀ = 1e-8 with the rates at
+        # 2.0/0.5 stalls at ‖F‖ = 1.17e-4 against 4.47e-5 here.
         η₀ = 0.0,
         ϵ₀ = 0.0,
-        max_inner_iters = 5000,
+        max_inner_iters = 1000,
         max_outer_iters = 1,
         tightening_rate = 2.0,
         loosening_rate = 0.5,
         min_stepsize = 1e-20,
         linesearch = :backtracking,
         linear_solver = :klu,
-        record_convergence = false,
-        record_condition_number = false,
-        eta_retry_growth = 0.3,
-        tsvd_threshold = 0.0,
-        use_marquardt_scaling = false,
         verbose,
     )
 end
@@ -451,6 +454,8 @@ function report_comparison(comparison; label)
     println("    x*      = ", comparison.truth)
     println("    reduced = ", comparison.reduced.primals)
     println("    quasi   = ", comparison.quasi.primals)
+    println("    reduced - x* = ", comparison.reduced.primals .- comparison.truth)
+    println("    quasi   - x* = ", comparison.quasi.primals .- comparison.truth)
     println(
         "    ‖x_reduced - x*‖∞ = ",
         comparison.reduced_vs_truth.absolute,
