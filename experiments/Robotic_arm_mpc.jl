@@ -826,7 +826,6 @@ function create_planner_from_context(
 	sim_eef0 = collect(Float64, obs["robot0_eef_pos"])
 	sim_eef1 = collect(Float64, obs["robot1_eef_pos"])
 	sim_eef2 = collect(Float64, obs["robot2_eef_pos"])
-	r2_hold = copy(sim_eef2)
 
 	initial_instance_states = (;
 		initial_state1 = sim_eef0,
@@ -900,7 +899,8 @@ function create_planner_from_context(
 		combined_next = collect(Float64, strategies[1].xs[2])
 		r0_pos = combined_next[1:arm_state_dimension]
 		r1_pos = combined_next[(arm_state_dimension + 1):(2 * arm_state_dimension)]
-		vcat(r0_pos, [1.0], r1_pos, [1.0], r2_hold)  # 1.0 = GRIP_CLOSED
+		r2_pos = collect(Float64, strategies[2].xs[2])
+		vcat(r0_pos, [1.0], r1_pos, [1.0], r2_pos)  # 1.0 = GRIP_CLOSED
 	end
 
 	ClosedLoopPlanner(solve_fn, 0, Int(num_mpc_steps))
