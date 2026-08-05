@@ -21,7 +21,6 @@ end
 Main.RoboticArmCore isa Module ||
 	error("Main.RoboticArmCore exists but is not a module.")
 using Main.RoboticArmCore
-const RA = Main.RoboticArmCore
 
 # Preserve qualified access to the core API from this entry-point module.
 for core_symbol in names(Main.RoboticArmCore)
@@ -190,18 +189,12 @@ function demo(;
 	@info "Building $(goop_version) KKT system once for the receding-horizon loop (T = $(planning_horizon))..."
 	kkt_build_time_sec = @elapsed GOOP_kkt_system = @timeit TO "KKT construction" begin
 		GOOP_kkt_generator(
-            problem;
-            backend, 
-            backend_options = kkt_backend_options,
-            codegen = kkt_codegen,
-            fd_codegen_chunk_size,
-            )
-            # ReducedGOOP.generate_slacked_reduced_kkt_system(
-			# problem;
-			# backend = ReducedGOOP.SymbolicTracingUtils.SymbolicsBackend(),
-			# backend_options = (;),
-			# codegen = :fast_differentiation,
-			# fd_codegen_chunk_size,
+			problem;
+			backend,
+			backend_options = kkt_backend_options,
+			codegen = kkt_codegen,
+			fd_codegen_chunk_size,
+		)
 	end
 	println(
 		"one-time setup: problem construction $(round(problem_setup_time_sec; digits = 2)) s, ",
@@ -1185,6 +1178,300 @@ function prepare_receding_output_dirs(run_id; debug)
 		closed_loop_plots_dir,
 		timing_plots_dir,
 	)
+end
+
+# ── Python-facing MPC planner API ─────────────────────────────────────────────
+#
+# Usage (from Python):
+#   ctx     = jl.Robotic_arm_receding.build_mpc_context(obs)
+#   plan_fn = jl.Robotic_arm_receding.create_planner_from_context(ctx, obs, 20;
+#                 planner_freq=10, low_level_freq=100)
+#   action  = np.array(plan_fn(obs))   # call once per simulator step
+#   # returns Float64[] after num_mpc_steps solves to signal done
+#
+# Open-loop gripper approach uses the same interface:
+#   plan_fn = jl.create_open_loop_planner(jl.grip_trajectory(obs))
+#   action  = np.array(plan_fn(obs))
+
+struct MpcContext
+	GOOP_kkt_system::Any
+	scenario_config::Any
+	flatten_parameters::Any
+	primal_dimensions::Vector{Int}
+	options::Any
+	planning_horizon::Int
+	arm_state_dimension::Int
+	dual_warmstart::Symbol
+end
+
+"""Return goal positions for overlay visualization."""
+function get_current_goal_positions(ctx::MpcContext, obs)::Vector{Vector{Float64}}
+	(; goal_position1, goal_position2) = ctx.scenario_config
+	eef0 = collect(Float64, obs["robot0_eef_pos"])
+	eef1 = collect(Float64, obs["robot1_eef_pos"])
+	[collect(Float64, goal_position1), collect(Float64, goal_position2), 0.5 .* (eef0 .+ eef1)]
+end
+export get_current_goal_positions
+
+"""
+Build the KKT system once from the post-grip EEF positions (world frame).
+
+`obs` is the Python observation dict immediately after gripping.
+"""
+function build_mpc_context(
+	obs;
+	planning_horizon::Integer = 10,
+	goop_version::Symbol = :quasi,
+	dual_warmstart::Symbol = :all_except_innermost_stationarity,
+	fd_codegen_chunk_size::Integer = 128,
+	tol::Float64 = 0.008,
+	max_inner_iters::Integer = 500,
+	# Target lift height (metres above grip position). Must be reachable within
+	# the planning horizon: sim_lift_height < planning_horizon * Δt * arm_speed_limit
+	# (default: 10 × 0.1 × 0.5 = 0.50 m, so 0.25 m leaves a 2× margin).
+	sim_lift_height::Float64 = 0.25,
+	verbose::Bool = false,
+)
+	dual_warmstart in DUAL_WARMSTART_MODES || throw(
+		ArgumentError(
+			"Unknown dual_warmstart mode $(dual_warmstart); expected one of " *
+			"$(join(DUAL_WARMSTART_MODES, ", ")).",
+		),
+	)
+
+	sim_eef0 = collect(Float64, obs["robot0_eef_pos"])
+	sim_eef1 = collect(Float64, obs["robot1_eef_pos"])
+	sim_eef2 = collect(Float64, obs["robot2_eef_pos"])
+
+	@info "Building MPC context (goop=$(goop_version), T=$(planning_horizon))..."
+	scenario_config = demo_scenario_config(; planning_horizon, sim_eef0, sim_eef1, sim_eef2, sim_lift_height)
+	(; dynamics) = scenario_config
+	arm_state_dimension, _ = divrem(dynamics[1].state_dimension, 2)
+
+	problem_setup_time = @elapsed (; problem, flatten_parameters) = get_setup(scenario_config)
+
+	kkt_generators = Dict(
+		:complete => ReducedGOOP.generate_slacked_complete_kkt_system,
+		:reduced => ReducedGOOP.generate_slacked_reduced_kkt_system,
+		:quasi => ReducedGOOP.generate_slacked_quasi_kkt_system,
+	)
+	GOOP_kkt_generator = get(kkt_generators, goop_version, nothing)
+	isnothing(GOOP_kkt_generator) && error("Unknown GOOP version: $(goop_version)")
+
+	kkt_build_time = @elapsed GOOP_kkt_system = GOOP_kkt_generator(
+		problem;
+		backend = ReducedGOOP.SymbolicTracingUtils.SymbolicsBackend(),
+		backend_options = (;),
+		codegen = :fast_differentiation,
+		fd_codegen_chunk_size,
+	)
+	println(
+		"[build_mpc_context] problem $(round(problem_setup_time; digits = 2)) s, ",
+		"KKT build $(round(kkt_build_time; digits = 2)) s",
+	)
+
+	primal_dimensions = [
+		(dyn.state_dimension + dyn.control_dimension) * planning_horizon
+		for dyn in dynamics
+	]
+
+	options = ReducedGOOP.InteriorPointOptions(;
+		tol,
+		η₀ = 1e-6,
+		η_max = 1e2,
+		ϵ₀ = 0.1,
+		max_inner_iters,
+		max_outer_iters = 1,
+		tightening_rate = 1.2,
+		loosening_rate = 3.0,
+		min_stepsize = 1e-20,
+		linesearch = :backtracking,
+		linear_solver = :svd,
+		armijo_constant = 1e-4,
+		eta_retry_growth = 2.0,
+		ρ_low = 0.75,
+		ρ_high = 0.75,
+		tsvd_threshold = 0.0,
+		use_marquardt_scaling = false,
+		verbose,
+	)
+
+	# ── Scenario diagnostics ───────────────────────────────────────────────────
+	(; base_initial_state1, base_initial_state2, goal_position1, goal_position2,
+	   initial_state3, goal_position3, arm_speed_limit, child_speed_limit,
+	   Δt, collision_avoidance, dₚ, use_world_frame) = scenario_config
+	total_plan_time = planning_horizon * Δt
+	max_reach = arm_speed_limit * total_plan_time
+	dist1 = sqrt(sum(abs2, goal_position1 .- base_initial_state1))
+	dist2 = sqrt(sum(abs2, goal_position2 .- base_initial_state2))
+	println("\n── MPC scenario configuration ──────────────────────────────────────")
+	println("  frame:        ", use_world_frame ? "world (metres)" : "abstract")
+	println("  horizon:      T=$(planning_horizon) × Δt=$(Δt) s = $(total_plan_time) s total")
+	println("  arm speed:    ≤ $(arm_speed_limit) m/s  →  max reach $(round(max_reach; digits = 3)) m per horizon")
+	println("  child speed:  ≤ $(child_speed_limit) m/s")
+	println("  safety dist:  $(collision_avoidance) m  (grip separation dₚ=$(round(dₚ; digits = 4)) m)")
+	println("  arm 1  pos:   $(round.(base_initial_state1; digits = 4))")
+	println("         goal:  $(round.(goal_position1; digits = 4))  dist=$(round(dist1; digits = 4)) m")
+	println("  arm 2  pos:   $(round.(base_initial_state2; digits = 4))")
+	println("         goal:  $(round.(goal_position2; digits = 4))  dist=$(round(dist2; digits = 4)) m")
+	println("  child  pos:   $(round.(initial_state3; digits = 4))")
+	println("         goal:  $(round.(goal_position3; digits = 4))")
+	dist1 > max_reach && @warn "arm 1 goal $(round(dist1; digits=3)) m exceeds horizon reach $(round(max_reach; digits=3)) m"
+	dist2 > max_reach && @warn "arm 2 goal $(round(dist2; digits=3)) m exceeds horizon reach $(round(max_reach; digits=3)) m"
+	println("─────────────────────────────────────────────────────────────────────")
+
+	MpcContext(
+		GOOP_kkt_system,
+		scenario_config,
+		flatten_parameters,
+		primal_dimensions,
+		options,
+		Int(planning_horizon),
+		Int(arm_state_dimension),
+		dual_warmstart,
+	)
+end
+
+"""
+Return a stateful `plan_fn(obs) -> Vector{Float64}` closure.
+
+Each call drains one pre-computed low-level waypoint from an internal buffer.
+The buffer is refilled by one MPC solve every `ratio = low_level_freq ÷
+planner_freq` calls, producing `ratio` linearly interpolated waypoints between
+consecutive planned positions for smooth OSC tracking.
+Returns `Float64[]` after `num_mpc_steps` solves to signal completion.
+"""
+function create_planner_from_context(
+	ctx::MpcContext,
+	obs,
+	num_mpc_steps::Integer = 20;
+	planner_freq::Integer = 10,
+	low_level_freq::Integer = 10,
+)
+	low_level_freq >= planner_freq ||
+		error("low_level_freq ($(low_level_freq)) must be ≥ planner_freq ($(planner_freq))")
+	ratio = div(low_level_freq, planner_freq)
+	low_level_freq == planner_freq * ratio ||
+		@warn "low_level_freq $(low_level_freq) is not an exact multiple of planner_freq $(planner_freq); using ratio=$(ratio)"
+
+	(;
+		GOOP_kkt_system,
+		scenario_config,
+		flatten_parameters,
+		primal_dimensions,
+		options,
+		planning_horizon,
+		arm_state_dimension,
+		dual_warmstart,
+	) = ctx
+
+	sim_eef0 = collect(Float64, obs["robot0_eef_pos"])
+	sim_eef1 = collect(Float64, obs["robot1_eef_pos"])
+	sim_eef2 = collect(Float64, obs["robot2_eef_pos"])
+
+	initial_instance_states = (;
+		initial_state1 = sim_eef0,
+		initial_state2 = sim_eef1,
+		initial_state3 = sim_eef2,
+	)
+	(; warmstart_solution) = build_default_warmstart(initial_instance_states, scenario_config)
+	stage_warmstart = Ref(warmstart_solution)
+
+	solver = ReducedGOOP.InteriorPoint()
+	dynamics = scenario_config.dynamics
+
+	arm_state1 = Ref(copy(sim_eef0))
+	arm_state2 = Ref(copy(sim_eef1))
+	# Init boundary controls from the warm start so θ and z₀ agree at the first solve.
+	initial_controls = extract_initial_controls(warmstart_solution, primal_dimensions, dynamics)
+	ctrl1 = Ref(copy(initial_controls.initial_control1))
+	ctrl2 = Ref(copy(initial_controls.initial_control2))
+	ctrl3 = Ref(copy(initial_controls.initial_control3))
+	# TODO: switch child to obs["robot2_eef_pos"] once GR1 tracking is reliable.
+	child_state = Ref(copy(sim_eef2))
+
+	buffer = Vector{Float64}[]
+	mpc_step = Ref(0)
+
+	function plan_next_fn(obs)
+		if isempty(buffer)
+			mpc_step[] >= num_mpc_steps && return Float64[]
+
+			current_states = (;
+				initial_state1 = arm_state1[],
+				initial_state2 = arm_state2[],
+				initial_state3 = child_state[],
+				initial_control1 = ctrl1[],
+				initial_control2 = ctrl2[],
+				initial_control3 = ctrl3[],
+			)
+			(; θ) = build_instance_parameters(flatten_parameters, current_states, scenario_config)
+
+			elapsed_time = @elapsed output = ReducedGOOP.solve(solver, GOOP_kkt_system, θ; z₀ = stage_warmstart[], options)
+			if output.status == :failed
+				rescue_ws = build_default_warmstart(initial_instance_states, scenario_config).warmstart_solution
+				elapsed_time += @elapsed rescue = ReducedGOOP.solve(solver, GOOP_kkt_system, θ; z₀ = rescue_ws, options)
+				if rescue.status == :solved || rescue.kkt_error < output.kkt_error
+					output = rescue
+				end
+			end
+
+			strategies = extract_player_strategies(output.x, primal_dimensions, dynamics)
+
+			prev_arm1 = copy(arm_state1[])
+			prev_arm2 = copy(arm_state2[])
+			prev_child = copy(child_state[])
+
+			combined_next = collect(Float64, strategies[1].xs[2])
+			arm_state1[] = combined_next[1:arm_state_dimension]
+			arm_state2[] = combined_next[(arm_state_dimension + 1):(2 * arm_state_dimension)]
+
+			combined_ctrl = collect(Float64, strategies[1].us[2])
+			ctrl1[] = combined_ctrl[1:arm_state_dimension]
+			ctrl2[] = combined_ctrl[(arm_state_dimension + 1):(2 * arm_state_dimension)]
+			ctrl3[] = collect(Float64, strategies[2].us[2])
+			child_state[] = collect(Float64, strategies[2].xs[2])
+
+			mpc_step[] += 1
+
+			(; goal_position1, goal_position2) = scenario_config
+			dist1 = sqrt(sum(abs2, arm_state1[] .- goal_position1))
+			dist2 = sqrt(sum(abs2, arm_state2[] .- goal_position2))
+			println(
+				"[mpc] step=$(mpc_step[])/$(num_mpc_steps), status=$(output.status), ",
+				"iters=$(output.total_iters), ",
+				"kkt_err=$(round(output.kkt_error; sigdigits = 4)), ",
+				"time=$(round(elapsed_time; digits = 3)) s | ",
+				"arm1→goal=$(round(dist1; digits = 4)) m  ",
+				"arm2→goal=$(round(dist2; digits = 4)) m",
+			)
+
+			shifted = shift_strategies(strategies, dynamics, planning_horizon)
+			shifted_primal = flatten_warmstart_solution(
+				planning_horizon,
+				[s.xs for s in shifted],
+				[s.us for s in shifted],
+			)
+			stage_warmstart[] = build_receding_warmstart(
+				shifted_primal,
+				output.z,
+				GOOP_kkt_system,
+				dual_warmstart,
+			)
+
+			for i in 1:ratio
+				α = i / ratio
+				push!(buffer, vcat(
+					prev_arm1 .+ α .* (arm_state1[] .- prev_arm1), [1.0],
+					prev_arm2 .+ α .* (arm_state2[] .- prev_arm2), [1.0],
+					prev_child .+ α .* (child_state[] .- prev_child),
+				))
+			end
+		end
+		popfirst!(buffer)
+	end
+
+	plan_next_fn
 end
 
 end
