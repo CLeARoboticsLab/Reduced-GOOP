@@ -1239,12 +1239,11 @@ function build_mpc_context(
 		),
 	)
 
-	sim_eef0 = collect(Float64, obs["robot0_eef_pos"])
-	sim_eef1 = collect(Float64, obs["robot1_eef_pos"])
-	sim_eef2 = collect(Float64, obs["robot2_eef_pos"])
-
 	@info "Building MPC context (goop=$(goop_version), T=$(planning_horizon))..."
-	scenario_config = demo_scenario_config(; planning_horizon, sim_eef0, sim_eef1, sim_eef2, sim_lift_height)
+	base_initial_state1 = collect(Float64, obs["robot0_eef_pos"])
+	base_initial_state2 = collect(Float64, obs["robot1_eef_pos"])
+	initial_state3 = collect(Float64, obs["robot2_eef_pos"])
+	scenario_config = demo_scenario_config(; planning_horizon, base_initial_state1, base_initial_state2, initial_state3)
 	(; dynamics) = scenario_config
 	arm_state_dimension, _ = divrem(dynamics[1].state_dimension, 2)
 
@@ -1299,13 +1298,12 @@ function build_mpc_context(
 	# ── Scenario diagnostics ───────────────────────────────────────────────────
 	(; base_initial_state1, base_initial_state2, goal_position1, goal_position2,
 	   initial_state3, goal_position3, arm_speed_limit, child_speed_limit,
-	   Δt, collision_avoidance, dₚ, use_world_frame) = scenario_config
+	   Δt, collision_avoidance, dₚ) = scenario_config
 	total_plan_time = planning_horizon * Δt
 	max_reach = arm_speed_limit * total_plan_time
 	dist1 = sqrt(sum(abs2, goal_position1 .- base_initial_state1))
 	dist2 = sqrt(sum(abs2, goal_position2 .- base_initial_state2))
 	println("\n── MPC scenario configuration ──────────────────────────────────────")
-	println("  frame:        ", use_world_frame ? "world (metres)" : "abstract")
 	println("  horizon:      T=$(planning_horizon) × Δt=$(Δt) s = $(total_plan_time) s total")
 	println("  arm speed:    ≤ $(arm_speed_limit) m/s  →  max reach $(round(max_reach; digits = 3)) m per horizon")
 	println("  child speed:  ≤ $(child_speed_limit) m/s")
@@ -1343,7 +1341,6 @@ Returns `Float64[]` after `num_mpc_steps` solves to signal completion.
 """
 function create_planner_from_context(
 	ctx::MpcContext,
-	obs,
 	num_mpc_steps::Integer = 20;
 	planner_freq::Integer = 10,
 	low_level_freq::Integer = 10,
@@ -1365,14 +1362,12 @@ function create_planner_from_context(
 		dual_warmstart,
 	) = ctx
 
-	sim_eef0 = collect(Float64, obs["robot0_eef_pos"])
-	sim_eef1 = collect(Float64, obs["robot1_eef_pos"])
-	sim_eef2 = collect(Float64, obs["robot2_eef_pos"])
+	(; base_initial_state1, base_initial_state2, initial_state3) = scenario_config
 
 	initial_instance_states = (;
-		initial_state1 = sim_eef0,
-		initial_state2 = sim_eef1,
-		initial_state3 = sim_eef2,
+		initial_state1 = base_initial_state1,
+		initial_state2 = base_initial_state2,
+		initial_state3,
 	)
 	(; warmstart_solution) = build_default_warmstart(initial_instance_states, scenario_config)
 	stage_warmstart = Ref(warmstart_solution)
@@ -1380,15 +1375,14 @@ function create_planner_from_context(
 	solver = ReducedGOOP.InteriorPoint()
 	dynamics = scenario_config.dynamics
 
-	arm_state1 = Ref(copy(sim_eef0))
-	arm_state2 = Ref(copy(sim_eef1))
+	arm_state1 = Ref(copy(base_initial_state1))
+	arm_state2 = Ref(copy(base_initial_state2))
 	# Init boundary controls from the warm start so θ and z₀ agree at the first solve.
 	initial_controls = extract_initial_controls(warmstart_solution, primal_dimensions, dynamics)
 	ctrl1 = Ref(copy(initial_controls.initial_control1))
 	ctrl2 = Ref(copy(initial_controls.initial_control2))
 	ctrl3 = Ref(copy(initial_controls.initial_control3))
-	# TODO: switch child to obs["robot2_eef_pos"] once GR1 tracking is reliable.
-	child_state = Ref(copy(sim_eef2))
+	child_state = Ref(copy(initial_state3))
 
 	buffer = Vector{Float64}[]
 	mpc_step = Ref(0)

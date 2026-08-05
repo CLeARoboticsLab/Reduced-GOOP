@@ -68,7 +68,6 @@ Base.@kwdef struct ScenarioConfig{DM,D,CB}
     dₚ::Float64 = 2.0
     collision_avoidance::Float64 = 2.0
     safety_buffer_margin::Float64 = 1.0
-    child_initial_buffer::Float64 = 4.0
     arm_speed_limit::Float64 = 5.0
     child_speed_limit::Float64 = 3.0
     base_initial_state1::Vector{Float64} = [-1.0, 6.0, 0.0]
@@ -82,7 +81,6 @@ Base.@kwdef struct ScenarioConfig{DM,D,CB}
     use_social_equilibrium_baseline::Bool = false
     use_running_goal_cost::Bool = false
     use_up_and_over_warmstart::Bool = false
-    use_world_frame::Bool = false
 end
 
 """Per-attempt parameter blocks passed to solver and plotting routines."""
@@ -107,7 +105,6 @@ function get_setup(scenario_config::ScenarioConfig)
         use_scalarized_baseline,
         use_social_equilibrium_baseline,
         use_running_goal_cost,
-        use_world_frame,
     ) = scenario_config
     num_players == 2 || error(
         "robotic_arm Zero-Sum GOOP setup expects exactly two players (two-arm robot and child).",
@@ -272,13 +269,12 @@ function get_setup(scenario_config::ScenarioConfig)
                     [sum(abs2, gripper_separation) - dₚ^2]
                 end : empty_constraint
 
-            # The child is modeled with the same 3D single-integrator dynamics. In the
-            # abstract scenario the child is on the ground so vertical velocity is zero;
-            # in world-frame mode the GR1 EEF is not on a ground plane, so skip this.
-            child_ground_constraint =
-                (i == 2 && !use_world_frame) ?
-                mapreduce(u -> [u[child_vertical_control_index]], vcat, us) :
-                empty_constraint
+            # Uncomment to restrict the child to stay within the ground plane
+            # child_ground_constraint =
+            #     (i == 2) ?
+            #     mapreduce(u -> [u[child_vertical_control_index]], vcat, us) :
+            #     empty_constraint
+            child_ground_constraint = empty_constraint
 
             vcat(
                 initial_state_constraint,
@@ -485,56 +481,25 @@ function demo_scenario_config(;
     # planning grid without duplicating the rest of the scenario.
     planning_horizon = 30,
     Δt = 0.1,
-    # ── Real-world simulation kwargs (pass from Python after grip) ──────────
-    # When provided the solver operates in MuJoCo world-frame (metres).
-    sim_eef0 = nothing,          # robot0 EEF position [x, y, z] (world frame)
-    sim_eef1 = nothing,          # robot1 EEF position [x, y, z] (world frame)
-    sim_eef2 = nothing,          # robot2/GR1 EEF position [x, y, z] (world frame)
-    sim_lift_height = 0.35,      # target lift height above grip position (metres)
+    base_initial_state1,
+    base_initial_state2,
+    initial_state3,
 )
     dynamics_model = SingleIntegrator3D()
 
-    # ── World-frame mode detection ────────────────────────────────────────────
-    # When sim_eef0/1 are provided (from Python after grip), the solver uses
-    # MuJoCo world-frame metres. Otherwise abstract coordinates are used.
-    use_world_frame = !isnothing(sim_eef0) && !isnothing(sim_eef1)
-
-    # ── Problem parameters ─────────────────────────────────────────────────────
-    # Player 1: combined two-arm agent, Player 2: child/pet.
     num_players = 2
-    collision_avoidance = use_world_frame ? 0.25 : 2.5   # safety sphere radius
-    child_initial_buffer = use_world_frame ? 0.4  : 4.0
-    arm_speed_limit      = use_world_frame ? 0.5  : 5.0   # m/s (world) or abstract
-    child_speed_limit    = use_world_frame ? 0.3  : 3.0   # m/s (world) or abstract
-    # In world-frame mode, dₚ is the actual Euclidean distance between the two
-    # grippers at the moment of grip (measured from the sim). Using 2.0 (abstract
-    # units) in world-frame makes the initial-state + handle-grasp equality
-    # constraints contradictory, so the problem is infeasible before the solver
-    # takes a single step.
-    dₚ = use_world_frame ? sqrt(sum(abs2, sim_eef0 .- sim_eef1)) : 2.0
+    collision_avoidance = 0.25
+    arm_speed_limit = 0.5
+    child_speed_limit = 0.3
+    dₚ = sqrt(sum(abs2, base_initial_state1 .- base_initial_state2))
 
     # ── Scenario ───────────────────────────────────────────────────────────────
     # Single Integrator 3D: state = [px, py, pz]
-    if use_world_frame
-        # World-frame (metres): robot 0 on +y side, robot 1 on −y side, GR1 on −x side.
-        # Table surface z ≈ 0.8 m; handles at z ≈ 0.84 m, ±0.17 m from pot centre in y.
-        # Goals: lift the pot straight up by sim_lift_height while holding the handles.
-        base_initial_state1 = collect(Float64, sim_eef0)
-        base_initial_state2 = collect(Float64, sim_eef1)
-        goal_position1      = base_initial_state1 .+ [0.0, 0.0, sim_lift_height]
-        goal_position2      = base_initial_state2 .+ [0.0, 0.0, sim_lift_height]
-        initial_state3      = isnothing(sim_eef2) ? [-0.55, 0.0, 1.0] : collect(Float64, sim_eef2)
-        goal_position3      = 0.5 .* (base_initial_state1 .+ base_initial_state2)  # pot centre
-    else
-        # Abstract coordinates for standalone testing.
-        base_initial_state1 = [-1.0, 6.0, 1.5]
-        base_initial_state2 = [1.0, 6.0, 1.5]
-        goal_position1 = [-1.0, -5.0, 3.5]
-        goal_position2 = [1.0, -5.0, 3.5]
-        initial_state3 = [-3.0, -1.0, 0.0]
-        goal_position3 = [0.0, 0.0, 0.0]
-    end
-    obstacle_position = [0.25, 0.15, 0.0]   # placeholder
+    goal_y_offset = 0.2
+    goal_z_offset = 0.3
+    goal_position1      = base_initial_state1 .+ [0.0, goal_y_offset, goal_z_offset]
+    goal_position2      = base_initial_state2 .+ [0.0, goal_y_offset, goal_z_offset]
+    goal_position3      = 0.5 .* (base_initial_state1 .+ base_initial_state2)  # pot centre
 
     # Miscellaneous
     map_end = 10
@@ -543,11 +508,7 @@ function demo_scenario_config(;
     # ── Build dynamics ─────────────────────────────────────────────────────────
     state_dimension = 3
     control_dimension = 3
-    # World-frame: control = velocity (m/s); ±1 m/s is realistic for a robot arm.
-    # Abstract: keep legacy large bounds.
-    control_bounds = use_world_frame ?
-        (; lb = [-1.0, -1.0, -1.0], ub = [1.0, 1.0, 1.0]) :
-        (; lb = [-10.0, -10.0, -10.0], ub = [10.0, 10.0, 10.0])
+    control_bounds = (; lb = [-1.0, -1.0, -1.0], ub = [1.0, 1.0, 1.0])
 
     # Per-player dynamics: the combined two-arm agent stacks both arms into one
     # 6D single integrator; the child keeps the plain 3D single integrator.
@@ -568,7 +529,6 @@ function demo_scenario_config(;
         Δt,
         dₚ,
         collision_avoidance,
-        child_initial_buffer,
         arm_speed_limit,
         child_speed_limit,
         base_initial_state1,
@@ -577,12 +537,10 @@ function demo_scenario_config(;
         goal_position2,
         initial_state3,
         goal_position3,
-        obstacle_position,
         use_scalarized_baseline,
         use_social_equilibrium_baseline,
         use_running_goal_cost,
         use_up_and_over_warmstart,
-        use_world_frame,
     )
 end
 
