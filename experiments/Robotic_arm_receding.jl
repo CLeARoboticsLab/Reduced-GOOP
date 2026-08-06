@@ -633,6 +633,143 @@ function build_receding_warmstart(shifted_primal, previous_z, kkt_system, mode::
     warmstart
 end
 
+function build_mpc_context(
+    obs;
+    planning_horizon::Integer = 30,
+    kwargs...,
+)
+    base_initial_state1 = collect(Float64, obs["robot0_eef_pos"])
+    base_initial_state2 = collect(Float64, obs["robot1_eef_pos"])
+    initial_state3      = collect(Float64, obs["robot2_eef_pos"])
+    scenario_config = demo_scenario_config(;
+        planning_horizon,
+        base_initial_state1,
+        base_initial_state2,
+        initial_state3,
+    )
+    # Print geometry before the (slow) KKT build so the user can verify
+    _print_scenario_config(scenario_config)
+    build_mpc_context(scenario_config; kwargs...)
+end
+
+function _print_scenario_config(scenario_config::ScenarioConfig)
+    (; base_initial_state1, base_initial_state2, goal_position1, goal_position2,
+       initial_state3, goal_position3, arm_speed_limit, child_speed_limit,
+       Δt, planning_horizon, collision_avoidance, dₚ) = scenario_config
+    total_plan_time = planning_horizon * Δt
+    max_reach = arm_speed_limit * total_plan_time
+    dist1 = sqrt(sum(abs2, goal_position1 .- base_initial_state1))
+    dist2 = sqrt(sum(abs2, goal_position2 .- base_initial_state2))
+    println("\n── MPC scenario configuration ──────────────────────────────────────")
+    println("  horizon:      T=$(planning_horizon) × Δt=$(Δt) s = $(total_plan_time) s total")
+    println("  arm speed:    ≤ $(arm_speed_limit) m/s  →  max reach $(round(max_reach; digits = 3)) m per horizon")
+    println("  child speed:  ≤ $(child_speed_limit) m/s")
+    println("  safety dist:  $(collision_avoidance) m  (grip separation dₚ=$(round(dₚ; digits = 4)) m)")
+    println("  arm 1  pos:   $(round.(base_initial_state1; digits = 4))")
+    println("         goal:  $(round.(goal_position1; digits = 4))  dist=$(round(dist1; digits = 4)) m")
+    println("  arm 2  pos:   $(round.(base_initial_state2; digits = 4))")
+    println("         goal:  $(round.(goal_position2; digits = 4))  dist=$(round(dist2; digits = 4)) m")
+    println("  child  pos:   $(round.(initial_state3; digits = 4))")
+    println("         goal:  $(round.(goal_position3; digits = 4))")
+    dist1 > max_reach && @warn "arm 1 goal $(round(dist1; digits=3)) m exceeds horizon reach $(round(max_reach; digits=3)) m"
+    dist2 > max_reach && @warn "arm 2 goal $(round(dist2; digits=3)) m exceeds horizon reach $(round(max_reach; digits=3)) m"
+    println("─────────────────────────────────────────────────────────────────────")
+end
+
+"""Immutable context for one MPC instance: KKT system, options, and timing metadata."""
+struct MpcContext
+    GOOP_kkt_system::Any
+    scenario_config::Any
+    flatten_parameters::Any
+    primal_dimensions::Vector{Int}
+    options::Any
+    planning_horizon::Int
+    arm_state_dimension::Int
+    arm_control_dimension::Int
+    dual_warmstart::Symbol
+    problem_setup_time_sec::Float64
+    kkt_build_time_sec::Float64
+end
+
+"""Mutable per-step planner state: arm/child positions, boundary controls, warmstart."""
+mutable struct MpcState
+    arm_state1::Vector{Float64}
+    arm_state2::Vector{Float64}
+    child_state::Vector{Float64}
+    ctrl1::Vector{Float64}
+    ctrl2::Vector{Float64}
+    ctrl3::Vector{Float64}
+    warmstart::Vector{Float64}
+    step::Int
+end
+
+"""
+Initialise an `MpcState` from the scenario defaults or supplied initial positions.
+
+Override `arm_state1`, `arm_state2`, or `child_state` to start from a pose
+other than the one baked into `ctx.scenario_config` (e.g. actual post-grip
+EEF positions read from the simulator rather than the nominal scenario start).
+"""
+function init_mpc_state(
+    ctx::MpcContext;
+    arm_state1 = ctx.scenario_config.base_initial_state1,
+    arm_state2 = ctx.scenario_config.base_initial_state2,
+    child_state = ctx.scenario_config.initial_state3,
+)
+    initial_states = (;
+        initial_state1 = arm_state1,
+        initial_state2 = arm_state2,
+        initial_state3 = child_state,
+    )
+    (; warmstart_solution) = build_default_warmstart(initial_states, ctx.scenario_config)
+    controls = extract_initial_controls(
+        warmstart_solution, ctx.primal_dimensions, ctx.scenario_config.dynamics,
+    )
+    MpcState(
+        copy(arm_state1),
+        copy(arm_state2),
+        copy(child_state),
+        copy(controls.initial_control1),
+        copy(controls.initial_control2),
+        copy(controls.initial_control3),
+        warmstart_solution,
+        0,
+    )
+end
+export init_mpc_state
+
+"""
+Advance the planner by one MPC step: solve (with optional rescue), update
+`state` in place, and return the full step result for logging or trajectory
+recording.
+"""
+function step_mpc!(state::MpcState, ctx::MpcContext, solver; kwargs...)
+    instance_states = (;
+        initial_state1  = state.arm_state1,
+        initial_state2  = state.arm_state2,
+        initial_state3  = state.child_state,
+        initial_control1 = state.ctrl1,
+        initial_control2 = state.ctrl2,
+        initial_control3 = state.ctrl3,
+    )
+    result = _mpc_solve(
+        solver, ctx.GOOP_kkt_system, ctx.flatten_parameters, ctx.scenario_config,
+        ctx.options, ctx.primal_dimensions,
+        ctx.arm_state_dimension, ctx.arm_control_dimension,
+        ctx.dual_warmstart, instance_states, state.warmstart; kwargs...,
+    )
+    state.arm_state1  = result.new_state1
+    state.arm_state2  = result.new_state2
+    state.child_state = result.new_state_child
+    state.ctrl1 = result.new_ctrl1
+    state.ctrl2 = result.new_ctrl2
+    state.ctrl3 = result.new_ctrl3
+    state.warmstart = result.next_warmstart
+    state.step += 1
+    result
+end
+export step_mpc!
+
 """
 Solve the problem associated to one receding-horizon MPC step.
 
@@ -1163,33 +1300,6 @@ end
 # closed-loop sim correction, update state.arm_state1/2 / state.child_state
 # from obs before calling step_mpc! (see the comment inside create_planner_from_context).
 
-"""Immutable context for one MPC instance: KKT system, options, and timing metadata."""
-struct MpcContext
-    GOOP_kkt_system::Any
-    scenario_config::Any
-    flatten_parameters::Any
-    primal_dimensions::Vector{Int}
-    options::Any
-    planning_horizon::Int
-    arm_state_dimension::Int
-    arm_control_dimension::Int
-    dual_warmstart::Symbol
-    problem_setup_time_sec::Float64
-    kkt_build_time_sec::Float64
-end
-
-"""Mutable per-step planner state: arm/child positions, boundary controls, warmstart."""
-mutable struct MpcState
-    arm_state1::Vector{Float64}
-    arm_state2::Vector{Float64}
-    child_state::Vector{Float64}
-    ctrl1::Vector{Float64}
-    ctrl2::Vector{Float64}
-    ctrl3::Vector{Float64}
-    warmstart::Vector{Float64}
-    step::Int
-end
-
 """
 Build the KKT system and solver options from a pre-constructed `ScenarioConfig`.
 
@@ -1308,132 +1418,8 @@ function build_mpc_context(
 end
 
 """
-Python-facing entry point: build context from a post-grip simulator observation.
-
-Extracts world-frame EEF positions from `obs`, constructs a `ScenarioConfig`,
-then delegates to `build_mpc_context(::ScenarioConfig; ...)`.
-"""
-function build_mpc_context(
-    obs;
-    planning_horizon::Integer = 30,
-    kwargs...,
-)
-    base_initial_state1 = collect(Float64, obs["robot0_eef_pos"])
-    base_initial_state2 = collect(Float64, obs["robot1_eef_pos"])
-    initial_state3      = collect(Float64, obs["robot2_eef_pos"])
-    scenario_config = demo_scenario_config(;
-        planning_horizon,
-        base_initial_state1,
-        base_initial_state2,
-        initial_state3,
-    )
-    # Print geometry before the (slow) KKT build so the user can verify
-    _print_scenario_config(scenario_config)
-    build_mpc_context(scenario_config; kwargs...)
-end
-
-function _print_scenario_config(scenario_config::ScenarioConfig)
-    (; base_initial_state1, base_initial_state2, goal_position1, goal_position2,
-       initial_state3, goal_position3, arm_speed_limit, child_speed_limit,
-       Δt, planning_horizon, collision_avoidance, dₚ) = scenario_config
-    total_plan_time = planning_horizon * Δt
-    max_reach = arm_speed_limit * total_plan_time
-    dist1 = sqrt(sum(abs2, goal_position1 .- base_initial_state1))
-    dist2 = sqrt(sum(abs2, goal_position2 .- base_initial_state2))
-    println("\n── MPC scenario configuration ──────────────────────────────────────")
-    println("  horizon:      T=$(planning_horizon) × Δt=$(Δt) s = $(total_plan_time) s total")
-    println("  arm speed:    ≤ $(arm_speed_limit) m/s  →  max reach $(round(max_reach; digits = 3)) m per horizon")
-    println("  child speed:  ≤ $(child_speed_limit) m/s")
-    println("  safety dist:  $(collision_avoidance) m  (grip separation dₚ=$(round(dₚ; digits = 4)) m)")
-    println("  arm 1  pos:   $(round.(base_initial_state1; digits = 4))")
-    println("         goal:  $(round.(goal_position1; digits = 4))  dist=$(round(dist1; digits = 4)) m")
-    println("  arm 2  pos:   $(round.(base_initial_state2; digits = 4))")
-    println("         goal:  $(round.(goal_position2; digits = 4))  dist=$(round(dist2; digits = 4)) m")
-    println("  child  pos:   $(round.(initial_state3; digits = 4))")
-    println("         goal:  $(round.(goal_position3; digits = 4))")
-    dist1 > max_reach && @warn "arm 1 goal $(round(dist1; digits=3)) m exceeds horizon reach $(round(max_reach; digits=3)) m"
-    dist2 > max_reach && @warn "arm 2 goal $(round(dist2; digits=3)) m exceeds horizon reach $(round(max_reach; digits=3)) m"
-    println("─────────────────────────────────────────────────────────────────────")
-end
-
-"""
-Initialise an `MpcState` from the scenario defaults or supplied initial positions.
-
-Override `arm_state1`, `arm_state2`, or `child_state` to start from a pose
-other than the one baked into `ctx.scenario_config` (e.g. actual post-grip
-EEF positions read from the simulator rather than the nominal scenario start).
-"""
-function init_mpc_state(
-    ctx::MpcContext;
-    arm_state1 = ctx.scenario_config.base_initial_state1,
-    arm_state2 = ctx.scenario_config.base_initial_state2,
-    child_state = ctx.scenario_config.initial_state3,
-)
-    initial_states = (;
-        initial_state1 = arm_state1,
-        initial_state2 = arm_state2,
-        initial_state3 = child_state,
-    )
-    (; warmstart_solution) = build_default_warmstart(initial_states, ctx.scenario_config)
-    controls = extract_initial_controls(
-        warmstart_solution, ctx.primal_dimensions, ctx.scenario_config.dynamics,
-    )
-    MpcState(
-        copy(arm_state1),
-        copy(arm_state2),
-        copy(child_state),
-        copy(controls.initial_control1),
-        copy(controls.initial_control2),
-        copy(controls.initial_control3),
-        warmstart_solution,
-        0,
-    )
-end
-export init_mpc_state
-
-"""
-Advance the planner by one MPC step: solve (with optional rescue), update
-`state` in place, and return the full step result for logging or trajectory
-recording.
-"""
-function step_mpc!(state::MpcState, ctx::MpcContext, solver; kwargs...)
-    instance_states = (;
-        initial_state1  = state.arm_state1,
-        initial_state2  = state.arm_state2,
-        initial_state3  = state.child_state,
-        initial_control1 = state.ctrl1,
-        initial_control2 = state.ctrl2,
-        initial_control3 = state.ctrl3,
-    )
-    result = _mpc_solve(
-        solver, ctx.GOOP_kkt_system, ctx.flatten_parameters, ctx.scenario_config,
-        ctx.options, ctx.primal_dimensions,
-        ctx.arm_state_dimension, ctx.arm_control_dimension,
-        ctx.dual_warmstart, instance_states, state.warmstart; kwargs...,
-    )
-    state.arm_state1  = result.new_state1
-    state.arm_state2  = result.new_state2
-    state.child_state = result.new_state_child
-    state.ctrl1 = result.new_ctrl1
-    state.ctrl2 = result.new_ctrl2
-    state.ctrl3 = result.new_ctrl3
-    state.warmstart = result.next_warmstart
-    state.step += 1
-    result
-end
-export step_mpc!
-
-"""Return goal positions for overlay visualization."""
-function get_current_goal_positions(ctx::MpcContext, obs)::Vector{Vector{Float64}}
-    (; goal_position1, goal_position2) = ctx.scenario_config
-    eef0 = collect(Float64, obs["robot0_eef_pos"])
-    eef1 = collect(Float64, obs["robot1_eef_pos"])
-    [collect(Float64, goal_position1), collect(Float64, goal_position2), 0.5 .* (eef0 .+ eef1)]
-end
-export get_current_goal_positions
-
-"""
 Return a stateful `plan_fn(obs) -> Vector{Float64}` closure backed by an `MpcState`.
+To be used in Python as a callable that returns one interpolated waypoint per call for OSC tracking.
 
 Each call drains one pre-computed waypoint from an internal interpolation buffer.
 The buffer is refilled by one `step_mpc!` call every
@@ -1507,5 +1493,14 @@ function create_planner_from_context(
 
     plan_next_fn
 end
+
+"""Return goal positions for overlay visualization."""
+function get_current_goal_positions(ctx::MpcContext, obs)::Vector{Vector{Float64}}
+    (; goal_position1, goal_position2) = ctx.scenario_config
+    eef0 = collect(Float64, obs["robot0_eef_pos"])
+    eef1 = collect(Float64, obs["robot1_eef_pos"])
+    [collect(Float64, goal_position1), collect(Float64, goal_position2), 0.5 .* (eef0 .+ eef1)]
+end
+export get_current_goal_positions
 
 end
