@@ -636,17 +636,24 @@ end
 function build_mpc_context(
     obs;
     planning_horizon::Integer = 30,
+    # When true, ignore obs positions and use demo_scenario_config nominal values,
+    # giving bit-identical initial conditions to demo().
+    use_nominal_initial_state::Bool = false,
     kwargs...,
 )
-    base_initial_state1 = collect(Float64, obs["robot0_eef_pos"])
-    base_initial_state2 = collect(Float64, obs["robot1_eef_pos"])
-    initial_state3      = collect(Float64, obs["robot2_eef_pos"])
-    scenario_config = demo_scenario_config(;
-        planning_horizon,
-        base_initial_state1,
-        base_initial_state2,
-        initial_state3,
-    )
+    scenario_config = if use_nominal_initial_state
+        demo_scenario_config(; planning_horizon)
+    else
+        base_initial_state1 = collect(Float64, obs["robot0_eef_pos"])
+        base_initial_state2 = collect(Float64, obs["robot1_eef_pos"])
+        initial_state3      = collect(Float64, obs["robot2_eef_pos"])
+        demo_scenario_config(;
+            planning_horizon,
+            base_initial_state1,
+            base_initial_state2,
+            initial_state3,
+        )
+    end
     # Print geometry before the (slow) KKT build so the user can verify
     _print_scenario_config(scenario_config)
     build_mpc_context(scenario_config; kwargs...)
@@ -725,6 +732,13 @@ function init_mpc_state(
     controls = extract_initial_controls(
         warmstart_solution, ctx.primal_dimensions, ctx.scenario_config.dynamics,
     )
+    println(
+        "MPC init:",
+        "\n  arm1  = ", round.(arm_state1; digits = 6),
+        "\n  arm2  = ", round.(arm_state2; digits = 6),
+        "\n  child = ", round.(child_state; digits = 6),
+        "\n  dₚ    = ", round(ctx.scenario_config.dₚ; digits = 6),
+    )
     MpcState(
         copy(arm_state1),
         copy(arm_state2),
@@ -800,6 +814,15 @@ function _mpc_solve(
     instance_parameters =
         build_instance_parameters(flatten_parameters, instance_states, scenario_config)
     (; θ1, θ2, θ3, θ) = instance_parameters
+
+    if !isempty(step_label)
+        println(
+            "  ", step_label, "state:",
+            "\n    arm1  = ", round.(instance_states.initial_state1; digits = 6),
+            "\n    arm2  = ", round.(instance_states.initial_state2; digits = 6),
+            "\n    child = ", round.(instance_states.initial_state3; digits = 6),
+        )
+    end
 
     elapsed_time = @elapsed primary_output =
         ReducedGOOP.solve(solver, GOOP_kkt_system, θ; z₀ = stage_warmstart, options)
