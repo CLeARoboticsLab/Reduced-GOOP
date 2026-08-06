@@ -30,3 +30,9 @@ data/
 
 # macOS Finder metadata
 .DS_Store
+
+# AI agent scaffolding — local only, not part of the published repo
+AGENTS.md
+CLAUDE.md
+.claude/
+.codebase-memory/

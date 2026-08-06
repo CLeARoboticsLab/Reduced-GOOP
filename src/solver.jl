@@ -12,7 +12,7 @@ Base.@kwdef struct InteriorPointOptions
     tightening_rate::Float64
     loosening_rate::Float64
     min_stepsize::Float64
-    linesearch::Symbol
+    linesearch::Symbol = :backtracking
     record_convergence::Bool = false
     record_condition_number::Bool = false
     max_eta_retries::Int = 5
@@ -23,7 +23,7 @@ Base.@kwdef struct InteriorPointOptions
     ρ_high::Float64 = 0.75
     tsvd_threshold::Float64 = 0.0
     use_marquardt_scaling::Bool = false
-    linear_solver::Symbol = :svd
+    linear_solver::Symbol = :klu
     armijo_constant::Float64 = 1e-4
     warmstart_slack_floor::Float64 = 1e-4
     warmstart_dual_floor::Float64 = 1e-4
@@ -37,49 +37,49 @@ end
 
 """ Basic interior point solver, based on Nocedal & Wright, ch. 19.
 Computes step directions `δz` by solving the relaxed primal-dual system, i.e.
-						 ∇F(z; ϵ) δz = -F(z; ϵ).
+                         ∇F(z; ϵ) δz = -F(z; ϵ).
 
 Given a step direction `δz`, performs a "fraction to the boundary" linesearch,
 i.e., for `(x, s)` it chooses step size `α_s` such that
-			  α_s = max(α ∈ [0, 1] : s + α δs ≥ (1 - τ) s)
+              α_s = max(α ∈ [0, 1] : s + α δs ≥ (1 - τ) s)
 and for `y` it chooses step size `α_s` such that
-			  α_y = max(α ∈ [0, 1] : y + α δy ≥ (1 - τ) y).
+              α_y = max(α ∈ [0, 1] : y + α δy ≥ (1 - τ) y).
 
 A typical value of τ is 0.995. Once we converge to ||F(z; \epsilon)|| ≤ ϵ,
 we typically decrease ϵ by a factor of 0.1 or 0.2, with smaller values chosen
 when the previous subproblem is solved in fewer iterations.
 
 Positional arguments:
-	- `mcp::GOOPKKTSystem`: the mixed complementarity problem to solve. #TODO: FIX LATER
-	- `θ::AbstractVector{<:Real}`: the parameter vector.
+    - `mcp::GOOPKKTSystem`: the mixed complementarity problem to solve. #TODO: FIX LATER
+    - `θ::AbstractVector{<:Real}`: the parameter vector.
 
 Keyword arguments:
-	- `z₀`: optional primal-only or full-length warm start.
-	- `options::InteriorPointOptions`: solver and diagnostic settings.
+    - `z₀`: optional primal-only or full-length warm start.
+    - `options::InteriorPointOptions`: solver and diagnostic settings.
 
 Selected `InteriorPointOptions` fields:
-	- `record_convergence`: record KKT-error, η, step-size, and gain-ratio histories.
-	- `record_condition_number`: record dense-SVD condition-number history.
-	- `linear_solver::Symbol = :svd`: `:svd` (dense SVD with Tikhonov filter) or `:klu`
-	  (sparse KLU on the balanced augmented system `[√ηI J; Jᵀ -√ηI]`, with one
-	  symbolic analysis followed by numeric refactorizations). `:klu` does not support
-	  `record_condition_number`, `tsvd_threshold > 0`, or `use_marquardt_scaling`.
-	- `armijo_constant::Float64 = 1e-4`: sufficient-decrease constant `c` of the
-	  backtracking Armijo condition on φ(z) = ‖F‖²/2; `0.0` recovers the plain
-	  decrease test.
-	- `warmstart_slack_floor`, `warmstart_dual_floor`, `warmstart_dual_cap`: positivity
-	  safeguards applied to slacks/inequality duals when `z₀` has full length
-	  (`variable_dimension`), which warmstarts duals and slacks in addition to primals.
-	- `klu_singularity_eta_growth::Float64 = 100.0`: factor applied to η after a
-	  singular KLU factorization. The failed numeric object is discarded before
-	  retrying. This is independent of `eta_retry_growth`, which handles an
-	  exhausted line search.
-	- `klu_singularity_max_retries::Int = 3`: maximum number of fresh KLU rebuilds
-	  at successively escalated η values before using the dense-SVD fallback.
-	- `reuse_factorization_iters::Int = 0`: with `:klu` + backtracking, reuse the
-	  Jacobian/factorization for up to this many consecutive iterations while the
-	  last step was full and reduced ‖F‖ below `reuse_quality_threshold` (modified
-	  Newton); `0` disables reuse.
+    - `record_convergence`: record KKT-error, η, step-size, and gain-ratio histories.
+    - `record_condition_number`: record dense-SVD condition-number history.
+    - `linear_solver::Symbol = :svd`: `:svd` (dense SVD with Tikhonov filter) or `:klu`
+      (sparse KLU on the balanced augmented system `[√ηI J; Jᵀ -√ηI]`, with one
+      symbolic analysis followed by numeric refactorizations). `:klu` does not support
+      `record_condition_number`, `tsvd_threshold > 0`, or `use_marquardt_scaling`.
+    - `armijo_constant::Float64 = 1e-4`: sufficient-decrease constant `c` of the
+      backtracking Armijo condition on φ(z) = ‖F‖²/2; `0.0` recovers the plain
+      decrease test.
+    - `warmstart_slack_floor`, `warmstart_dual_floor`, `warmstart_dual_cap`: positivity
+      safeguards applied to slacks/inequality duals when `z₀` has full length
+      (`variable_dimension`), which warmstarts duals and slacks in addition to primals.
+    - `klu_singularity_eta_growth::Float64 = 100.0`: factor applied to η after a
+      singular KLU factorization. The failed numeric object is discarded before
+      retrying. This is independent of `eta_retry_growth`, which handles an
+      exhausted line search.
+    - `klu_singularity_max_retries::Int = 3`: maximum number of fresh KLU rebuilds
+      at successively escalated η values before using the dense-SVD fallback.
+    - `reuse_factorization_iters::Int = 0`: with `:klu` + backtracking, reuse the
+      Jacobian/factorization for up to this many consecutive iterations while the
+      last step was full and reduced ‖F‖ below `reuse_quality_threshold` (modified
+      Newton); `0` disables reuse.
 """
 function solve(
     ::InteriorPoint,
@@ -118,12 +118,10 @@ function solve(
     linear_solver ∈ (:svd, :klu) || throw(
         ArgumentError("Unsupported linear_solver $(linear_solver). Use :svd or :klu."),
     )
-    klu_singularity_eta_growth >= 1 || throw(
-        ArgumentError("klu_singularity_eta_growth must be at least 1."),
-    )
-    klu_singularity_max_retries >= 0 || throw(
-        ArgumentError("klu_singularity_max_retries must be nonnegative."),
-    )
+    klu_singularity_eta_growth >= 1 ||
+        throw(ArgumentError("klu_singularity_eta_growth must be at least 1."))
+    klu_singularity_max_retries >= 0 ||
+        throw(ArgumentError("klu_singularity_max_retries must be nonnegative."))
     use_klu = linear_solver === :klu
     if use_klu && (record_condition_number || tsvd_threshold > 0 || use_marquardt_scaling)
         throw(
@@ -523,11 +521,12 @@ function solve(
                             )
                             F_z_next = norm(F_trial, 2)
                             while (
-                                      F_z_next^2 >=
-                                      F_z^2 + 2.0 * armijo_constant * α * armijo_slope
-                                  ) ||
-                                  _nonnegativity_violated(σ, δσ, α) ||
-                                  _nonnegativity_violated(γ, δγ, α)
+                                          F_z_next^2 >=
+                                          F_z^2 +
+                                          2.0 * armijo_constant * α * armijo_slope
+                                      ) ||
+                                      _nonnegativity_violated(σ, δσ, α) ||
+                                      _nonnegativity_violated(γ, δγ, α)
                                 if α < min_stepsize
                                     break # exhausted at this η — escalate below
                                 end
@@ -824,8 +823,8 @@ The KKT Jacobian `J` is rectangular (m×n), so the regularized step
 its √η-balanced form (γ = √η, any diagonal pair with product η gives the same
 δz in exact arithmetic):
 
-	[ γI_m    J   ] [ w  ]   [ -F ]
-	[  Jᵀ   -γI_n ] [ δz ] = [  0 ]
+    [ γI_m    J   ] [ w  ]   [ -F ]
+    [  Jᵀ   -γI_n ] [ δz ] = [  0 ]
 
 The balanced scaling keeps the matrix condition ~κ(J) even when the
 regularization escalates to large η; the naive `[I J; Jᵀ -ηI]` form loses
@@ -1020,7 +1019,7 @@ function _svd_fallback_step!(δz, ∇F, F, η)
 end
 
 """Helper function to compute the step size `α` which solves:
-				   α* = max(α ∈ [0, 1] : v + α δ ≥ (1 - τ) v).
+                   α* = max(α ∈ [0, 1] : v + α δ ≥ (1 - τ) v).
 """
 function fraction_to_the_boundary_linesearch(
     v,

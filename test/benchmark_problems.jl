@@ -47,20 +47,16 @@ set as g(x) >= 0 because exp(r) - 1 = 0 iff r = 0, and exp(r) - 1 > 0 iff r > 0.
 
 function default_interior_point_options(; verbose = false)
     return ReducedGOOP.InteriorPointOptions(;
-        tol = 1e-8,
+        tol = 1e-6,
         η₀ = 0.0,
-        ϵ₀ = :auto,
+        ϵ₀ = 1e-9,
         max_inner_iters = 5000,
         max_outer_iters = 20,
         tightening_rate = 2.0,
         loosening_rate = 0.5,
         min_stepsize = 1e-20,
-        linesearch = :fraction_to_boundary,
-        record_convergence = false,
-        record_condition_number = false,
-        eta_retry_growth = 0.3,
-        tsvd_threshold = 0.0,
-        use_marquardt_scaling = true,
+        linesearch = :backtracking,
+        linear_solver = :klu,
         verbose,
     )
 end
@@ -68,6 +64,7 @@ end
 # Generate KKT systems 
 complete_kkt_system(problem) = ReducedGOOP.generate_slacked_complete_kkt_system(problem)
 reduced_kkt_system(problem) = ReducedGOOP.generate_slacked_reduced_kkt_system(problem)
+quasi_kkt_system(problem) = ReducedGOOP.generate_slacked_quasi_kkt_system(problem)
 
 function solve_with_interior_point(
     problem,

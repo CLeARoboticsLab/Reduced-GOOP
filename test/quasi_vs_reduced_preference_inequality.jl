@@ -17,32 +17,37 @@ hard-constraint slot and into the innermost (highest-priority) preference level
 
 Both formulations are built from the *same* `ParametricGOOP`, solved with the
 same initial guess, the same `InteriorPointOptions`, and the same stopping
-criteria, so the only difference is the KKT generator.
+criteria, so the only difference is the KKT generator. Every solve uses one
+configuration — sparse `:klu` with a `:backtracking` line search, `tol = 1e-4`
+held fixed, and `max_outer_iters = 1` so there is no ϵ-tightening loop and the
+reported iteration count is purely inner (`1 / n`). See `COMPARISON_OPTIONS`.
+
+Each solution is also measured against the benchmark's designed solution `x*`,
+which `benchmark_problems.jl` constructs in closed form.
 
 Findings this file pins down (see the printed summary):
 
-  * `:quasi` and `:reduced` are *not* the same system here. The residual maps
-    differ by O(1) in relative terms as soon as any prioritized constraint is
-    violated, and — for `cosh` objectives — everywhere.
-  * The dropped terms carry policy multipliers, so the gap scales as O(dual²)
-    and is *exactly* zero when the duals are zero. Whether a given solve ever
-    sees the difference therefore depends on how large its multipliers grow.
-  * Where both converge, they converge to genuinely different equilibria:
-    ‖Δx‖∞ ≈ 0.67 (48 % relative) on the quadratic family, with second-level
-    preference values differing by a factor of four. Each point solves its own
-    KKT system to ‖F‖ ≤ 1e-8 while leaving the other's residual at 1e4–1e11, so
-    this is a formulation difference, not solver noise.
-  * `:reduced` is markedly harder to solve in this encoding: on the `cosh`
-    family it diverges or trips a LAPACK NaN under every configuration tried,
-    while `:quasi` converges in ~110 iterations.
-  * Relaxing the sparse path to `tol = 1e-4` turns its stall into a reported
-    `:solved`, and the accepted iterate is the *same* point for both
-    formulations (‖Δx‖∞ ≤ 4e-6). It sits ≈0.06 from the reference `:quasi`
-    solution but ≈0.73 from the reference `:reduced` one — that is, the sparse
-    path converges toward the `:quasi` answer even when solving `:reduced`,
-    because its multipliers never grow enough to activate the dropped terms.
-    A relaxed tolerance therefore hides the formulation difference rather than
-    exposing it.
+  * `:quasi` and `:reduced` are *not* the same system here. Compared as residual
+    maps — which needs no solve at all — they differ by O(1) in relative terms
+    as soon as any prioritized constraint is violated, and, for `cosh`
+    objectives, everywhere.
+  * The dropped terms carry policy multipliers: the gap scales as O(dual²) and
+    is *exactly* zero when the duals are zero. Whether a given solve ever sees
+    the difference therefore depends on how large its multipliers grow.
+  * On this solver path they never grow. Both formulations stall together at
+    ‖F‖ ≈ 1e-5 and produce the same iterate, so the *solve* comparison reports
+    agreement on every row. That is a statement about the trajectory, not about
+    the formulations — the probes above are the ones that settle the question.
+  * Neither formulation recovers `x*` here: the innermost penalty is flat to
+    fifth order at the boundary, so nothing pulls the iterate back onto the
+    active constraints and both stop short of it while violating them.
+
+The dense `:svd` / `:fraction_to_boundary` path — the only one that reaches
+‖F‖ ≤ 1e-8 on these problems — is deliberately not exercised here. Under it the
+two formulations converge to genuinely different equilibria (‖Δx‖∞ ≈ 0.67 on the
+quadratic family, with `:reduced` recovering the benchmark's known solution to
+≈0.011 and `:quasi` landing ≈0.67 away). Reintroduce it if you want the solve
+comparison, and not just the residual-map probes, to exhibit the difference.
 
 Run standalone with (the root environment already carries every dependency, and
 `test/Manifest.toml` must stay absent):
@@ -59,89 +64,42 @@ using ReducedGOOP
 @isdefined(build_benchmark_problem) ||
     include(joinpath(@__DIR__, "benchmark_problems.jl"))
 
-# The ϵ-relaxed residual floors at ≈1.22ϵ, so ϵ₀ is pinned strictly below `tol`
-# rather than left at `:auto`; otherwise the outer loop can stop at a residual
-# that is dominated by the relaxation instead of by the formulation. This matters
-# more than usual here: `:backtracking` never shrinks ϵ on its own.
+# The solver tolerance is held at 1e-4 throughout — no per-run overrides.
 #
-# `linear_solver = :klu` rules out `use_marquardt_scaling`, `tsvd_threshold > 0`,
-# and `record_condition_number` — the sparse path has no dense factorization to
-# scale or inspect.
-function comparison_interior_point_options(;
-    tol = 1e-8,
-    linesearch = :fraction_to_boundary,
-    linear_solver = :svd,
-    use_marquardt_scaling = true,
-    verbose = false,
-)
+# The interior-point iteration stalls at ‖F‖ ≈ 1e-5 on these problems: the
+# innermost prioritized constraint enters as `(-h)^(level+2)`, which is flat to
+# fifth order at the boundary, so a tighter tolerance only rejects the iterate it
+# was always going to return. At 1e-6 every solve reports `:failed`, which also
+# skips the per-solve `check_solve` assertions (8 tests instead of 56).
+const COMPARISON_TOLERANCE = 1e-6
+
+function comparison_solver_options(; tol = COMPARISON_TOLERANCE, verbose = false)
     @assert 1e-9 < tol "ϵ₀ = 1e-9 must stay strictly below tol"
     return ReducedGOOP.InteriorPointOptions(;
         tol,
+        # η₀ = 0 is the best of the regularization settings here, and it also makes
+        # `tightening_rate`/`loosening_rate` inert: both update η multiplicatively,
+        # so η stays pinned at zero. That is not a loss. Past the first ~50
+        # iterations every step is a full Newton step (α ≡ 1) with gain ratio
+        # ρ ≈ 0.99, so neither rate is ever exercised — the branches they control
+        # fire only on rejected steps or poor gain ratios. Any η > 0 strictly
+        # perturbs an already-accurate Newton step: η₀ = 1e-8 with the rates at
+        # 2.0/0.5 stalls at ‖F‖ = 1.17e-4 against 4.47e-5 here.
         η₀ = 0.0,
-        ϵ₀ = 1e-9,
-        max_inner_iters = 5000,
-        max_outer_iters = 20,
+        ϵ₀ = 0.0,
+        max_inner_iters = 1000,
+        max_outer_iters = 1,
         tightening_rate = 2.0,
         loosening_rate = 0.5,
         min_stepsize = 1e-20,
-        linesearch,
-        linear_solver,
-        record_convergence = false,
-        record_condition_number = false,
-        eta_retry_growth = 0.3,
-        tsvd_threshold = 0.0,
-        use_marquardt_scaling,
+        linesearch = :backtracking,
+        linear_solver = :klu,
         verbose,
     )
 end
 
-# Three solver configurations, because the verdict depends on which one is used.
-#
-#   svd_fraction_to_boundary  matches `runtests.jl`; the only path that reaches
-#                             ‖F‖ ≤ 1e-8 on these problems at all.
-#   klu_backtracking          far cheaper per iteration, but stalls at ‖F‖ ≈ 1e-5
-#                             and reports `:failed` against a 1e-8 tolerance.
-#   klu_backtracking_relaxed  identical to the above except `tol = 1e-4`, chosen
-#                             to sit just above that stall so the same iterate is
-#                             *accepted* instead of rejected. Comparing it against
-#                             the tight configurations separates "the sparse path
-#                             finds a different answer" from "the sparse path
-#                             finds the same answer but cannot certify it".
-const SOLVER_CONFIGURATIONS = [
-    (;
-        name = :svd_fraction_to_boundary,
-        tol = 1e-8,
-        options = comparison_interior_point_options(;
-            tol = 1e-8,
-            linesearch = :fraction_to_boundary,
-            linear_solver = :svd,
-            use_marquardt_scaling = true,
-        ),
-    ),
-    (;
-        name = :klu_backtracking,
-        tol = 1e-8,
-        options = comparison_interior_point_options(;
-            tol = 1e-8,
-            linesearch = :backtracking,
-            linear_solver = :klu,
-            use_marquardt_scaling = false,
-        ),
-    ),
-    (;
-        name = :klu_backtracking_relaxed,
-        tol = 1e-4,
-        options = comparison_interior_point_options(;
-            tol = 1e-4,
-            linesearch = :backtracking,
-            linear_solver = :klu,
-            use_marquardt_scaling = false,
-        ),
-    ),
-]
-
-"The configuration every other one is measured against."
-const REFERENCE_CONFIGURATION = first(SOLVER_CONFIGURATIONS).name
+"The single solver configuration: sparse KLU with a backtracking line search."
+const COMPARISON_OPTIONS = comparison_solver_options()
 
 """
     innermost_preference_inequality_goop(problem)
@@ -271,9 +229,9 @@ function solve_variant(goop, base_problem, variant::Symbol; z₀, options)
 
     build_time = @elapsed kkt = generator(goop)
 
-    # A diverging iterate can push NaNs into the dense Tikhonov SVD, which LAPACK
-    # reports as an argument error rather than a solver failure. Treat it as one
-    # more (interesting) outcome instead of aborting the whole comparison.
+    # A diverging iterate can drive the factorization singular or push NaNs into
+    # it, which surfaces as a thrown error rather than a solver failure. Treat it
+    # as one more (interesting) outcome instead of aborting the whole comparison.
     local output
     solve_time = @elapsed output = try
         ReducedGOOP.solve(
@@ -308,7 +266,7 @@ function solve_variant(goop, base_problem, variant::Symbol; z₀, options)
         diverged,
         status = output.status,
         kkt_error = output.kkt_error,
-        outer_iters = output.outer_iters,
+        outer_passes = max(output.outer_iters - 1, 0),
         total_iters = output.total_iters,
         ϵ = output.ϵ,
         variable_dimension = kkt.variable_dimension,
@@ -334,7 +292,7 @@ function compare_reduced_vs_quasi(;
     levels::Int,
     kind::Symbol,
     z₀ = nothing,
-    options = comparison_interior_point_options(),
+    options = COMPARISON_OPTIONS,
     case = build_benchmark_problem(; num_players, levels, kind),
 )
     goop = innermost_preference_inequality_goop(case.problem)
@@ -345,6 +303,27 @@ function compare_reduced_vs_quasi(;
 
     primal_abs = norm(reduced.primals .- quasi.primals, Inf)
     primal_rel = relative_difference(reduced.primals, quasi.primals)
+
+    # Main.@infiltrate
+
+    # Distance to the ground truth. `case.expected` is the closed-form solution
+    # the benchmark family was constructed around: the two active coupled
+    # resources pin coordinates 1 and 3, and every other coordinate sits at its
+    # unconstrained target. It is the solution of the *hard-constrained* problem;
+    # moving the inequalities into the innermost preference should preserve it,
+    # because the smooth penalty attains its minimum (zero) on exactly the
+    # feasible set. In practice the penalty is flat to fifth order at the
+    # boundary, so a solve is not pulled back onto it — the gap below is a
+    # property of the encoding, not of the two formulations.
+    truth = case.expected
+    reduced_vs_truth = (;
+        absolute = norm(reduced.primals .- truth, Inf),
+        relative = relative_difference(reduced.primals, truth),
+    )
+    quasi_vs_truth = (;
+        absolute = norm(quasi.primals .- truth, Inf),
+        relative = relative_difference(quasi.primals, truth),
+    )
 
     preference_abs = [
         abs.(reduced.preference_values[p] .- quasi.preference_values[p]) for
@@ -428,6 +407,9 @@ function compare_reduced_vs_quasi(;
         residual_gaps,
         primal_abs,
         primal_rel,
+        truth,
+        reduced_vs_truth,
+        quasi_vs_truth,
         preference_abs,
         preference_rel,
         violation_abs = abs(reduced.max_violation - quasi.max_violation),
@@ -447,8 +429,8 @@ function report_comparison(comparison; label)
     print_row("status", reduced.status, quasi.status)
     print_row(
         "outer / inner iterations",
-        "$(reduced.outer_iters) / $(reduced.total_iters)",
-        "$(quasi.outer_iters) / $(quasi.total_iters)",
+        "$(reduced.outer_passes) / $(reduced.total_iters)",
+        "$(quasi.outer_passes) / $(quasi.total_iters)",
     )
     print_row("final KKT residual", reduced.kkt_error, quasi.kkt_error)
     print_row("final ϵ", reduced.ϵ, quasi.ϵ)
@@ -464,9 +446,30 @@ function report_comparison(comparison; label)
         "$(round(quasi.build_time; digits = 2)) / $(round(quasi.solve_time; digits = 3))",
     )
 
-    println("\n  primal solution:")
+    println("\n  primal solution — reduced vs quasi:")
     println("    ‖Δx‖∞ (absolute) = ", comparison.primal_abs)
     println("    ‖Δx‖∞ (relative) = ", comparison.primal_rel)
+
+    println("\n  primal solution — vs ground truth x*:")
+    println("    x*      = ", comparison.truth)
+    println("    reduced = ", comparison.reduced.primals)
+    println("    quasi   = ", comparison.quasi.primals)
+    println("    reduced - x* = ", comparison.reduced.primals .- comparison.truth)
+    println("    quasi   - x* = ", comparison.quasi.primals .- comparison.truth)
+    println(
+        "    ‖x_reduced - x*‖∞ = ",
+        comparison.reduced_vs_truth.absolute,
+        "  (relative ",
+        comparison.reduced_vs_truth.relative,
+        ")",
+    )
+    println(
+        "    ‖x_quasi   - x*‖∞ = ",
+        comparison.quasi_vs_truth.absolute,
+        "  (relative ",
+        comparison.quasi_vs_truth.relative,
+        ")",
+    )
 
     println("\n  preference values per player [outermost … innermost]:")
     for player in 1:comparison.goop.num_players
@@ -552,44 +555,32 @@ end
 function test_reduced_vs_quasi(; num_players::Int, levels::Int, kind::Symbol)
     case = build_benchmark_problem(; num_players, levels, kind)
 
-    results =
-        map(SOLVER_CONFIGURATIONS) do config
-            (; name, tol, options) = config
-            map(initial_guesses(case)) do (start_name, z₀)
-                comparison = compare_reduced_vs_quasi(;
-                    num_players,
-                    levels,
-                    kind,
-                    z₀,
-                    options,
-                    case,
-                )
-                report_comparison(
-                    comparison;
-                    label = "$(num_players)-player, $(levels)-level + innermost inequality " *
-                            "preference, kind = :$kind, solver = :$name (tol = $tol), " *
-                            "z₀ = :$start_name",
-                )
+    results = map(initial_guesses(case)) do (start_name, z₀)
+        comparison = compare_reduced_vs_quasi(; num_players, levels, kind, z₀, case)
+        report_comparison(
+            comparison;
+            label = "$(num_players)-player, $(levels)-level + innermost inequality " *
+                    "preference, kind = :$kind, tol = $COMPARISON_TOLERANCE, " *
+                    "z₀ = :$start_name",
+        )
 
-                both_solved =
-                    comparison.reduced.status === :solved &&
-                    comparison.quasi.status === :solved
-                if both_solved
-                    check_solve(comparison.reduced; label = "reduced/$start_name", tol)
-                    check_solve(comparison.quasi; label = "quasi/$start_name", tol)
-                end
+        both_solved =
+            comparison.reduced.status === :solved && comparison.quasi.status === :solved
+        if both_solved
+            check_solve(
+                comparison.reduced;
+                label = "reduced/$start_name",
+                tol = COMPARISON_TOLERANCE,
+            )
+            check_solve(
+                comparison.quasi;
+                label = "quasi/$start_name",
+                tol = COMPARISON_TOLERANCE,
+            )
+        end
 
-                (;
-                    config_name = name,
-                    config_tol = tol,
-                    start_name,
-                    comparison,
-                    both_solved,
-                )
-            end
-        end |>
-        Iterators.flatten |>
-        collect
+        (; start_name, comparison, both_solved)
+    end
 
     # Formulation-level invariants, independent of whether any solve converged.
     # These are the crisp answer to "are :quasi and :reduced the same system?".
@@ -619,85 +610,64 @@ function test_reduced_vs_quasi(; num_players::Int, levels::Int, kind::Symbol)
     return (; kind, case, results)
 end
 
-"‖a - b‖∞, or NaN if either point is not finite."
-function primal_distance(a, b)
-    (any(!isfinite, a) || any(!isfinite, b)) && return NaN
-    return norm(a .- b, Inf)
-end
-
 """
-    cross_configuration_report(entry)
+    ground_truth_report(entry)
 
-For each initial guess and each formulation, measure how far every solver
-configuration's answer sits from the reference configuration's answer — both for
-the *same* formulation and for the *other* one.
-
-The second column is the interesting one. If a relaxed sparse solve is simply a
-lower-accuracy version of the reference, it sits near the reference solution for
-its own formulation. If instead it sits equidistant from both, or nearer the
-other formulation's solution, then it stopped somewhere the choice of
-formulation had not yet separated the two trajectories.
+For each initial guess and each formulation, how far the computed solution sits
+from the benchmark's designed solution `x*`, alongside the constraint violation
+there. The pair of columns answers two different questions: whether either
+formulation recovers `x*`, and whether the point it does reach is even feasible.
 """
-function cross_configuration_report(entry)
+function ground_truth_report(entry)
     println("\n", "-"^78)
-    println("  CROSS-CONFIGURATION primal distances, kind = :$(entry.kind)")
-    println("  reference = :$REFERENCE_CONFIGURATION")
+    println("  GROUND-TRUTH primal distances, kind = :$(entry.kind)")
+    println("  x* = ", entry.case.expected)
     println("-"^78)
     println(
         rpad("  z₀", 10),
         rpad("variant", 9),
-        rpad("solver", 26),
         rpad("status", 9),
         rpad("‖F‖", 12),
-        rpad("Δ vs ref same-variant", 24),
-        "Δ vs ref other-variant",
+        rpad("‖x - x*‖∞", 24),
+        rpad("relative", 24),
+        "max violation",
     )
 
-    by_key = Dict((r.config_name, r.start_name) => r.comparison for r in entry.results)
-
-    for (start_name, _) in initial_guesses(entry.case)
-        reference = get(by_key, (REFERENCE_CONFIGURATION, start_name), nothing)
-        isnothing(reference) && continue
-
-        for variant in (:reduced, :quasi)
-            other = variant === :reduced ? :quasi : :reduced
-            reference_same = getproperty(reference, variant).primals
-            reference_other = getproperty(reference, other).primals
-
-            for config in SOLVER_CONFIGURATIONS
-                comparison = get(by_key, (config.name, start_name), nothing)
-                isnothing(comparison) && continue
-                solve = getproperty(comparison, variant)
-                println(
-                    rpad("  $start_name", 10),
-                    rpad(string(variant), 9),
-                    rpad(string(config.name), 26),
-                    rpad(string(solve.status), 9),
-                    rpad(string(round(solve.kkt_error; sigdigits = 3)), 12),
-                    rpad(string(primal_distance(solve.primals, reference_same)), 24),
-                    string(primal_distance(solve.primals, reference_other)),
-                )
-            end
-        end
+    for result in entry.results, variant in (:reduced, :quasi)
+        solve = getproperty(result.comparison, variant)
+        distance =
+            variant === :reduced ? result.comparison.reduced_vs_truth :
+            result.comparison.quasi_vs_truth
+        println(
+            rpad("  $(result.start_name)", 10),
+            rpad(string(variant), 9),
+            rpad(string(solve.status), 9),
+            rpad(string(round(solve.kkt_error; sigdigits = 3)), 12),
+            rpad(string(distance.absolute), 24),
+            rpad(string(distance.relative), 24),
+            string(solve.max_violation),
+        )
     end
     println()
 end
 
 function summarize(all_results)
     for entry in all_results
-        cross_configuration_report(entry)
+        ground_truth_report(entry)
     end
 
     println("\n", "="^78)
     println("  SUMMARY — :reduced vs :quasi, inequality as innermost preference")
+    println(
+        "  solver = klu/backtracking, tol = $COMPARISON_TOLERANCE, max_outer_iters = 1",
+    )
     println("="^78)
     println(
         rpad("  problem", 12),
-        rpad("solver", 26),
-        rpad("tol", 8),
         rpad("z₀", 10),
-        rpad("‖Δx‖∞", 24),
-        rpad("relative", 24),
+        rpad("‖Δx‖∞ reduced-quasi", 24),
+        rpad("‖x_red - x*‖∞", 24),
+        rpad("‖x_qua - x*‖∞", 24),
         "verdict",
     )
     for entry in all_results, result in entry.results
@@ -713,11 +683,10 @@ function summarize(all_results)
         end
         println(
             rpad("  $(entry.kind)", 12),
-            rpad(string(result.config_name), 26),
-            rpad(string(result.config_tol), 8),
             rpad(string(result.start_name), 10),
             rpad(string(comparison.primal_abs), 24),
-            rpad(string(comparison.primal_rel), 24),
+            rpad(string(comparison.reduced_vs_truth.absolute), 24),
+            rpad(string(comparison.quasi_vs_truth.absolute), 24),
             verdict,
         )
     end
