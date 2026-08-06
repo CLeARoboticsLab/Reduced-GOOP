@@ -1209,16 +1209,12 @@ Build the KKT system once from the post-grip EEF positions (world frame).
 """
 function build_mpc_context(
 	obs;
-	planning_horizon::Integer = 10,
+	planning_horizon::Integer = 30,
 	goop_version::Symbol = :quasi,
 	dual_warmstart::Symbol = :all_except_innermost_stationarity,
 	fd_codegen_chunk_size::Integer = 128,
 	tol::Float64 = 0.008,
 	max_inner_iters::Integer = 500,
-	# Target lift height (metres above grip position). Must be reachable within
-	# the planning horizon: sim_lift_height < planning_horizon * Δt * arm_speed_limit
-	# (default: 10 × 0.1 × 0.5 = 0.50 m, so 0.25 m leaves a 2× margin).
-	sim_lift_height::Float64 = 0.25,
 	verbose::Bool = false,
 )
 	dual_warmstart in DUAL_WARMSTART_MODES || throw(

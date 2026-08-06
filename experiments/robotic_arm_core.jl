@@ -68,6 +68,7 @@ Base.@kwdef struct ScenarioConfig{DM,D,CB}
     dₚ::Float64 = 2.0
     collision_avoidance::Float64 = 2.0
     safety_buffer_margin::Float64 = 1.0
+    child_initial_buffer::Float64 = 4.0
     arm_speed_limit::Float64 = 5.0
     child_speed_limit::Float64 = 3.0
     base_initial_state1::Vector{Float64} = [-1.0, 6.0, 0.0]
@@ -270,11 +271,11 @@ function get_setup(scenario_config::ScenarioConfig)
                 end : empty_constraint
 
             # Uncomment to restrict the child to stay within the ground plane
-            # child_ground_constraint =
-            #     (i == 2) ?
-            #     mapreduce(u -> [u[child_vertical_control_index]], vcat, us) :
-            #     empty_constraint
-            child_ground_constraint = empty_constraint
+            child_ground_constraint =
+                (i == 2) ?
+                mapreduce(u -> [u[child_vertical_control_index]], vcat, us) :
+                empty_constraint
+            # child_ground_constraint = empty_constraint
 
             vcat(
                 initial_state_constraint,
@@ -481,9 +482,9 @@ function demo_scenario_config(;
     # planning grid without duplicating the rest of the scenario.
     planning_horizon = 30,
     Δt = 0.1,
-    base_initial_state1,
-    base_initial_state2,
-    initial_state3,
+    base_initial_state1 = [-0.1582, -0.0022, 0.9294],
+    base_initial_state2 = [0.1582, 0.0022, 0.9294],
+    initial_state3 = [-0.708, -0.2523, 1.1012],
 )
     dynamics_model = SingleIntegrator3D()
 
@@ -495,7 +496,7 @@ function demo_scenario_config(;
 
     # ── Scenario ───────────────────────────────────────────────────────────────
     # Single Integrator 3D: state = [px, py, pz]
-    goal_y_offset = 0.2
+    goal_y_offset = -0.2
     goal_z_offset = 0.3
     goal_position1      = base_initial_state1 .+ [0.0, goal_y_offset, goal_z_offset]
     goal_position2      = base_initial_state2 .+ [0.0, goal_y_offset, goal_z_offset]
