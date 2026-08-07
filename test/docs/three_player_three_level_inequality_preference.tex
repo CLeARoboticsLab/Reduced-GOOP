@@ -103,11 +103,11 @@ level:
 where each level's solution set is defined by the next one down:
 \[
 \begin{aligned}
-  \mathcal{S}_p^{(2)}(x_{-p}) &= \argmin_{y \in \mathbb{R}^5} \; J_p^{(2)}(y)
-    \quad \text{subject to} \quad y \in \mathcal{S}_p^{(3)}(x_{-p}), \\
-  \mathcal{S}_p^{(3)}(x_{-p}) &= \argmin_{y \in \mathbb{R}^5} \; J_p^{(3)}(y)
-    \quad \text{subject to} \quad y \in \mathcal{S}_p^{(4)}(x_{-p}), \\
-  \mathcal{S}_p^{(4)}(x_{-p}) &= \argmin_{y \in \mathbb{R}^5} \; P_p(y, x_{-p}).
+  \mathcal{S}_p^{(2)}(x_{-p}) &= \argmin_{x_p \in \mathbb{R}^5} \; J_p^{(2)}(x_p)
+    \quad \text{subject to} \quad x_p \in \mathcal{S}_p^{(3)}(x_{-p}), \\
+  \mathcal{S}_p^{(3)}(x_{-p}) &= \argmin_{x_p \in \mathbb{R}^5} \; J_p^{(3)}(x_p)
+    \quad \text{subject to} \quad x_p \in \mathcal{S}_p^{(4)}(x_{-p}), \\
+  \mathcal{S}_p^{(4)}(x_{-p}) &= \argmin_{x_p \in \mathbb{R}^5} \; P_p(x_p, x_{-p}).
 \end{aligned}
 \]
 The innermost problem is \emph{unconstrained} --- that is the whole point of the
@@ -170,17 +170,17 @@ Objectives are squared distances to the targets; the constraint rows are affine.
 \]
 \[
 \begin{aligned}
-  \mathcal{S}_1^{(2)} &= \argmin_{y} \;
-    (y_3-0.15)^2 + (y_4-1.20)^2
-    \quad \text{s.t.} \quad y \in \mathcal{S}_1^{(3)}, \\
-  \mathcal{S}_1^{(3)} &= \argmin_{y} \;
-    (y_1-1.00)^2 + (y_2-0.90)^2
-    \quad \text{s.t.} \quad y \in \mathcal{S}_1^{(4)}, \\
-  \mathcal{S}_1^{(4)} &= \argmin_{y} \;
-    \Bigl[ \max\bigl(-(0.6375 - y_1 - 0.25x_{2,1} - 0.25x_{3,1}),\,0\bigr)^6 \\
-    &\qquad\qquad + \max\bigl(-(2.4250 - y_2 - 0.25x_{2,2} - 0.25x_{3,2}),\,0\bigr)^6 \\
-    &\qquad\qquad + \max\bigl(-(y_3 + 0.25x_{2,3} + 0.25x_{3,3} - 0.8625),\,0\bigr)^6 \\
-    &\qquad\qquad + \max\bigl(-(y_4 + 0.25x_{2,4} + 0.25x_{3,4} - 0.8750),\,0\bigr)^6 \Bigr].
+  \mathcal{S}_1^{(2)} &= \argmin_{x_1} \;
+    (x_{1,3}-0.15)^2 + (x_{1,4}-1.20)^2
+    \quad \text{s.t.} \quad x_1 \in \mathcal{S}_1^{(3)}, \\
+  \mathcal{S}_1^{(3)} &= \argmin_{x_1} \;
+    (x_{1,1}-1.00)^2 + (x_{1,2}-0.90)^2
+    \quad \text{s.t.} \quad x_1 \in \mathcal{S}_1^{(4)}, \\
+  \mathcal{S}_1^{(4)} &= \argmin_{x_1} \;
+    \Bigl[ \max\bigl(-(0.6375 - x_{1,1} - 0.25x_{2,1} - 0.25x_{3,1}),\,0\bigr)^6 \\
+    &\qquad\qquad + \max\bigl(-(2.4250 - x_{1,2} - 0.25x_{2,2} - 0.25x_{3,2}),\,0\bigr)^6 \\
+    &\qquad\qquad + \max\bigl(-(x_{1,3} + 0.25x_{2,3} + 0.25x_{3,3} - 0.8625),\,0\bigr)^6 \\
+    &\qquad\qquad + \max\bigl(-(x_{1,4} + 0.25x_{2,4} + 0.25x_{3,4} - 0.8750),\,0\bigr)^6 \Bigr].
 \end{aligned}
 \]
 
@@ -193,17 +193,17 @@ Objectives are squared distances to the targets; the constraint rows are affine.
 \]
 \[
 \begin{aligned}
-  \mathcal{S}_2^{(2)} &= \argmin_{y} \;
-    (y_3-0.20)^2 + (y_4-1.30)^2
-    \quad \text{s.t.} \quad y \in \mathcal{S}_2^{(3)}, \\
-  \mathcal{S}_2^{(3)} &= \argmin_{y} \;
-    (y_1-1.05)^2 + (y_2-1.00)^2
-    \quad \text{s.t.} \quad y \in \mathcal{S}_2^{(4)}, \\
-  \mathcal{S}_2^{(4)} &= \argmin_{y} \;
-    \Bigl[ \max\bigl(-(0.6750 - y_1 - 0.25x_{1,1} - 0.25x_{3,1}),\,0\bigr)^6 \\
-    &\qquad\qquad + \max\bigl(-(2.5000 - y_2 - 0.25x_{1,2} - 0.25x_{3,2}),\,0\bigr)^6 \\
-    &\qquad\qquad + \max\bigl(-(y_3 + 0.25x_{1,3} + 0.25x_{3,3} - 0.9000),\,0\bigr)^6 \\
-    &\qquad\qquad + \max\bigl(-(y_4 + 0.25x_{1,4} + 0.25x_{3,4} - 0.9500),\,0\bigr)^6 \Bigr].
+  \mathcal{S}_2^{(2)} &= \argmin_{x_2} \;
+    (x_{2,3}-0.20)^2 + (x_{2,4}-1.30)^2
+    \quad \text{s.t.} \quad x_2 \in \mathcal{S}_2^{(3)}, \\
+  \mathcal{S}_2^{(3)} &= \argmin_{x_2} \;
+    (x_{2,1}-1.05)^2 + (x_{2,2}-1.00)^2
+    \quad \text{s.t.} \quad x_2 \in \mathcal{S}_2^{(4)}, \\
+  \mathcal{S}_2^{(4)} &= \argmin_{x_2} \;
+    \Bigl[ \max\bigl(-(0.6750 - x_{2,1} - 0.25x_{1,1} - 0.25x_{3,1}),\,0\bigr)^6 \\
+    &\qquad\qquad + \max\bigl(-(2.5000 - x_{2,2} - 0.25x_{1,2} - 0.25x_{3,2}),\,0\bigr)^6 \\
+    &\qquad\qquad + \max\bigl(-(x_{2,3} + 0.25x_{1,3} + 0.25x_{3,3} - 0.9000),\,0\bigr)^6 \\
+    &\qquad\qquad + \max\bigl(-(x_{2,4} + 0.25x_{1,4} + 0.25x_{3,4} - 0.9500),\,0\bigr)^6 \Bigr].
 \end{aligned}
 \]
 
@@ -216,17 +216,17 @@ Objectives are squared distances to the targets; the constraint rows are affine.
 \]
 \[
 \begin{aligned}
-  \mathcal{S}_3^{(2)} &= \argmin_{y} \;
-    (y_3-0.25)^2 + (y_4-1.40)^2
-    \quad \text{s.t.} \quad y \in \mathcal{S}_3^{(3)}, \\
-  \mathcal{S}_3^{(3)} &= \argmin_{y} \;
-    (y_1-1.10)^2 + (y_2-1.10)^2
-    \quad \text{s.t.} \quad y \in \mathcal{S}_3^{(4)}, \\
-  \mathcal{S}_3^{(4)} &= \argmin_{y} \;
-    \Bigl[ \max\bigl(-(0.7125 - y_1 - 0.25x_{1,1} - 0.25x_{2,1}),\,0\bigr)^6 \\
-    &\qquad\qquad + \max\bigl(-(2.5750 - y_2 - 0.25x_{1,2} - 0.25x_{2,2}),\,0\bigr)^6 \\
-    &\qquad\qquad + \max\bigl(-(y_3 + 0.25x_{1,3} + 0.25x_{2,3} - 0.9375),\,0\bigr)^6 \\
-    &\qquad\qquad + \max\bigl(-(y_4 + 0.25x_{1,4} + 0.25x_{2,4} - 1.0250),\,0\bigr)^6 \Bigr].
+  \mathcal{S}_3^{(2)} &= \argmin_{x_3} \;
+    (x_{3,3}-0.25)^2 + (x_{3,4}-1.40)^2
+    \quad \text{s.t.} \quad x_3 \in \mathcal{S}_3^{(3)}, \\
+  \mathcal{S}_3^{(3)} &= \argmin_{x_3} \;
+    (x_{3,1}-1.10)^2 + (x_{3,2}-1.10)^2
+    \quad \text{s.t.} \quad x_3 \in \mathcal{S}_3^{(4)}, \\
+  \mathcal{S}_3^{(4)} &= \argmin_{x_3} \;
+    \Bigl[ \max\bigl(-(0.7125 - x_{3,1} - 0.25x_{1,1} - 0.25x_{2,1}),\,0\bigr)^6 \\
+    &\qquad\qquad + \max\bigl(-(2.5750 - x_{3,2} - 0.25x_{1,2} - 0.25x_{2,2}),\,0\bigr)^6 \\
+    &\qquad\qquad + \max\bigl(-(x_{3,3} + 0.25x_{1,3} + 0.25x_{2,3} - 0.9375),\,0\bigr)^6 \\
+    &\qquad\qquad + \max\bigl(-(x_{3,4} + 0.25x_{1,4} + 0.25x_{2,4} - 1.0250),\,0\bigr)^6 \Bigr].
 \end{aligned}
 \]
 
@@ -251,17 +251,17 @@ the rows are no longer affine, and \(\cosh\) has nonvanishing derivatives of eve
 \]
 \[
 \begin{aligned}
-  \mathcal{S}_1^{(2)} &= \argmin_{y} \;
-    \bigl[\cosh(y_3-0.15)-1\bigr] + \bigl[\cosh(y_4-1.20)-1\bigr]
-    \quad \text{s.t.} \quad y \in \mathcal{S}_1^{(3)}, \\
-  \mathcal{S}_1^{(3)} &= \argmin_{y} \;
-    \bigl[\cosh(y_1-1.00)-1\bigr] + \bigl[\cosh(y_2-0.90)-1\bigr]
-    \quad \text{s.t.} \quad y \in \mathcal{S}_1^{(4)}, \\
-  \mathcal{S}_1^{(4)} &= \argmin_{y} \;
-    \Bigl[ \max\bigl(1 - e^{\,0.6375 - y_1 - 0.25x_{2,1} - 0.25x_{3,1}},\,0\bigr)^6 \\
-    &\qquad\qquad + \max\bigl(1 - e^{\,2.4250 - y_2 - 0.25x_{2,2} - 0.25x_{3,2}},\,0\bigr)^6 \\
-    &\qquad\qquad + \max\bigl(1 - e^{\,y_3 + 0.25x_{2,3} + 0.25x_{3,3} - 0.8625},\,0\bigr)^6 \\
-    &\qquad\qquad + \max\bigl(1 - e^{\,y_4 + 0.25x_{2,4} + 0.25x_{3,4} - 0.8750},\,0\bigr)^6 \Bigr].
+  \mathcal{S}_1^{(2)} &= \argmin_{x_1} \;
+    \bigl[\cosh(x_{1,3}-0.15)-1\bigr] + \bigl[\cosh(x_{1,4}-1.20)-1\bigr]
+    \quad \text{s.t.} \quad x_1 \in \mathcal{S}_1^{(3)}, \\
+  \mathcal{S}_1^{(3)} &= \argmin_{x_1} \;
+    \bigl[\cosh(x_{1,1}-1.00)-1\bigr] + \bigl[\cosh(x_{1,2}-0.90)-1\bigr]
+    \quad \text{s.t.} \quad x_1 \in \mathcal{S}_1^{(4)}, \\
+  \mathcal{S}_1^{(4)} &= \argmin_{x_1} \;
+    \Bigl[ \max\bigl(1 - e^{\,0.6375 - x_{1,1} - 0.25x_{2,1} - 0.25x_{3,1}},\,0\bigr)^6 \\
+    &\qquad\qquad + \max\bigl(1 - e^{\,2.4250 - x_{1,2} - 0.25x_{2,2} - 0.25x_{3,2}},\,0\bigr)^6 \\
+    &\qquad\qquad + \max\bigl(1 - e^{\,x_{1,3} + 0.25x_{2,3} + 0.25x_{3,3} - 0.8625},\,0\bigr)^6 \\
+    &\qquad\qquad + \max\bigl(1 - e^{\,x_{1,4} + 0.25x_{2,4} + 0.25x_{3,4} - 0.8750},\,0\bigr)^6 \Bigr].
 \end{aligned}
 \]
 
@@ -274,17 +274,17 @@ the rows are no longer affine, and \(\cosh\) has nonvanishing derivatives of eve
 \]
 \[
 \begin{aligned}
-  \mathcal{S}_2^{(2)} &= \argmin_{y} \;
-    \bigl[\cosh(y_3-0.20)-1\bigr] + \bigl[\cosh(y_4-1.30)-1\bigr]
-    \quad \text{s.t.} \quad y \in \mathcal{S}_2^{(3)}, \\
-  \mathcal{S}_2^{(3)} &= \argmin_{y} \;
-    \bigl[\cosh(y_1-1.05)-1\bigr] + \bigl[\cosh(y_2-1.00)-1\bigr]
-    \quad \text{s.t.} \quad y \in \mathcal{S}_2^{(4)}, \\
-  \mathcal{S}_2^{(4)} &= \argmin_{y} \;
-    \Bigl[ \max\bigl(1 - e^{\,0.6750 - y_1 - 0.25x_{1,1} - 0.25x_{3,1}},\,0\bigr)^6 \\
-    &\qquad\qquad + \max\bigl(1 - e^{\,2.5000 - y_2 - 0.25x_{1,2} - 0.25x_{3,2}},\,0\bigr)^6 \\
-    &\qquad\qquad + \max\bigl(1 - e^{\,y_3 + 0.25x_{1,3} + 0.25x_{3,3} - 0.9000},\,0\bigr)^6 \\
-    &\qquad\qquad + \max\bigl(1 - e^{\,y_4 + 0.25x_{1,4} + 0.25x_{3,4} - 0.9500},\,0\bigr)^6 \Bigr].
+  \mathcal{S}_2^{(2)} &= \argmin_{x_2} \;
+    \bigl[\cosh(x_{2,3}-0.20)-1\bigr] + \bigl[\cosh(x_{2,4}-1.30)-1\bigr]
+    \quad \text{s.t.} \quad x_2 \in \mathcal{S}_2^{(3)}, \\
+  \mathcal{S}_2^{(3)} &= \argmin_{x_2} \;
+    \bigl[\cosh(x_{2,1}-1.05)-1\bigr] + \bigl[\cosh(x_{2,2}-1.00)-1\bigr]
+    \quad \text{s.t.} \quad x_2 \in \mathcal{S}_2^{(4)}, \\
+  \mathcal{S}_2^{(4)} &= \argmin_{x_2} \;
+    \Bigl[ \max\bigl(1 - e^{\,0.6750 - x_{2,1} - 0.25x_{1,1} - 0.25x_{3,1}},\,0\bigr)^6 \\
+    &\qquad\qquad + \max\bigl(1 - e^{\,2.5000 - x_{2,2} - 0.25x_{1,2} - 0.25x_{3,2}},\,0\bigr)^6 \\
+    &\qquad\qquad + \max\bigl(1 - e^{\,x_{2,3} + 0.25x_{1,3} + 0.25x_{3,3} - 0.9000},\,0\bigr)^6 \\
+    &\qquad\qquad + \max\bigl(1 - e^{\,x_{2,4} + 0.25x_{1,4} + 0.25x_{3,4} - 0.9500},\,0\bigr)^6 \Bigr].
 \end{aligned}
 \]
 
@@ -297,17 +297,17 @@ the rows are no longer affine, and \(\cosh\) has nonvanishing derivatives of eve
 \]
 \[
 \begin{aligned}
-  \mathcal{S}_3^{(2)} &= \argmin_{y} \;
-    \bigl[\cosh(y_3-0.25)-1\bigr] + \bigl[\cosh(y_4-1.40)-1\bigr]
-    \quad \text{s.t.} \quad y \in \mathcal{S}_3^{(3)}, \\
-  \mathcal{S}_3^{(3)} &= \argmin_{y} \;
-    \bigl[\cosh(y_1-1.10)-1\bigr] + \bigl[\cosh(y_2-1.10)-1\bigr]
-    \quad \text{s.t.} \quad y \in \mathcal{S}_3^{(4)}, \\
-  \mathcal{S}_3^{(4)} &= \argmin_{y} \;
-    \Bigl[ \max\bigl(1 - e^{\,0.7125 - y_1 - 0.25x_{1,1} - 0.25x_{2,1}},\,0\bigr)^6 \\
-    &\qquad\qquad + \max\bigl(1 - e^{\,2.5750 - y_2 - 0.25x_{1,2} - 0.25x_{2,2}},\,0\bigr)^6 \\
-    &\qquad\qquad + \max\bigl(1 - e^{\,y_3 + 0.25x_{1,3} + 0.25x_{2,3} - 0.9375},\,0\bigr)^6 \\
-    &\qquad\qquad + \max\bigl(1 - e^{\,y_4 + 0.25x_{1,4} + 0.25x_{2,4} - 1.0250},\,0\bigr)^6 \Bigr].
+  \mathcal{S}_3^{(2)} &= \argmin_{x_3} \;
+    \bigl[\cosh(x_{3,3}-0.25)-1\bigr] + \bigl[\cosh(x_{3,4}-1.40)-1\bigr]
+    \quad \text{s.t.} \quad x_3 \in \mathcal{S}_3^{(3)}, \\
+  \mathcal{S}_3^{(3)} &= \argmin_{x_3} \;
+    \bigl[\cosh(x_{3,1}-1.10)-1\bigr] + \bigl[\cosh(x_{3,2}-1.10)-1\bigr]
+    \quad \text{s.t.} \quad x_3 \in \mathcal{S}_3^{(4)}, \\
+  \mathcal{S}_3^{(4)} &= \argmin_{x_3} \;
+    \Bigl[ \max\bigl(1 - e^{\,0.7125 - x_{3,1} - 0.25x_{1,1} - 0.25x_{2,1}},\,0\bigr)^6 \\
+    &\qquad\qquad + \max\bigl(1 - e^{\,2.5750 - x_{3,2} - 0.25x_{1,2} - 0.25x_{2,2}},\,0\bigr)^6 \\
+    &\qquad\qquad + \max\bigl(1 - e^{\,x_{3,3} + 0.25x_{1,3} + 0.25x_{2,3} - 0.9375},\,0\bigr)^6 \\
+    &\qquad\qquad + \max\bigl(1 - e^{\,x_{3,4} + 0.25x_{1,4} + 0.25x_{2,4} - 1.0250},\,0\bigr)^6 \Bigr].
 \end{aligned}
 \]
 

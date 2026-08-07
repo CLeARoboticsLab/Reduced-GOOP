@@ -1406,6 +1406,13 @@ end
 function plot_convergence_plot_aggregate_comparison(;
     reduced_kkt_error_histories,
     complete_kkt_error_histories,
+    reduced_label = "Reduced",
+    complete_label = "Complete",
+    # `nothing` is Makie's solid default. Dashing one series makes two traces that
+    # coincide to plotting precision — as `:reduced` and `:quasi` do on the
+    # innermost-preference benchmarks — both visible instead of one hiding the other.
+    reduced_linestyle = nothing,
+    complete_linestyle = nothing,
     show_legend = true,
     show_ylabel = true,
 )
@@ -1487,7 +1494,8 @@ function plot_convergence_plot_aggregate_comparison(;
         reduced_stats.y_mean;
         color = :dodgerblue,
         linewidth = 3,
-        label = "Reduced",
+        linestyle = reduced_linestyle,
+        label = reduced_label,
     )
 
     CairoMakie.band!(
@@ -1503,7 +1511,8 @@ function plot_convergence_plot_aggregate_comparison(;
         complete_stats.y_mean;
         color = :crimson,
         linewidth = 3,
-        label = "Complete",
+        linestyle = complete_linestyle,
+        label = complete_label,
     )
 
     if show_legend

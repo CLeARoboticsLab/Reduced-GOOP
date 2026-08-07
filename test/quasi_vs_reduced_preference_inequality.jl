@@ -73,18 +73,14 @@ using ReducedGOOP
 # skips the per-solve `check_solve` assertions (8 tests instead of 56).
 const COMPARISON_TOLERANCE = 1e-6
 
-function comparison_solver_options(; tol = COMPARISON_TOLERANCE, verbose = false)
+function comparison_solver_options(;
+    tol = COMPARISON_TOLERANCE,
+    verbose = false,
+    record_convergence = false,
+)
     @assert 1e-9 < tol "ϵ₀ = 1e-9 must stay strictly below tol"
     return ReducedGOOP.InteriorPointOptions(;
         tol,
-        # η₀ = 0 is the best of the regularization settings here, and it also makes
-        # `tightening_rate`/`loosening_rate` inert: both update η multiplicatively,
-        # so η stays pinned at zero. That is not a loss. Past the first ~50
-        # iterations every step is a full Newton step (α ≡ 1) with gain ratio
-        # ρ ≈ 0.99, so neither rate is ever exercised — the branches they control
-        # fire only on rejected steps or poor gain ratios. Any η > 0 strictly
-        # perturbs an already-accurate Newton step: η₀ = 1e-8 with the rates at
-        # 2.0/0.5 stalls at ‖F‖ = 1.17e-4 against 4.47e-5 here.
         η₀ = 0.0,
         ϵ₀ = 0.0,
         max_inner_iters = 1000,
@@ -94,6 +90,7 @@ function comparison_solver_options(; tol = COMPARISON_TOLERANCE, verbose = false
         min_stepsize = 1e-20,
         linesearch = :backtracking,
         linear_solver = :klu,
+        record_convergence,
         verbose,
     )
 end
@@ -719,22 +716,29 @@ function summarize(all_results)
     println()
 end
 
-@testset "Quasi vs Reduced — inequalities as innermost preference" begin
-    all_results = []
+# `quasi_vs_reduced_convergence_plot.jl` includes this file only for the helpers
+# above, and defines `RUN_QUASI_VS_REDUCED_TESTSET = false` beforehand so the
+# comparison suite is not re-run underneath it. Every other entry point — a bare
+# `include`, or `julia --project=. test/quasi_vs_reduced_preference_inequality.jl`
+# — leaves the flag undefined and runs the suite as before.
+if !@isdefined(RUN_QUASI_VS_REDUCED_TESTSET) || RUN_QUASI_VS_REDUCED_TESTSET
+    @testset "Quasi vs Reduced — inequalities as innermost preference" begin
+        all_results = []
 
-    @testset "Three-level quadratic" begin
-        push!(
-            all_results,
-            test_reduced_vs_quasi(; num_players = 3, levels = 3, kind = :quadratic),
-        )
+        @testset "Three-level quadratic" begin
+            push!(
+                all_results,
+                test_reduced_vs_quasi(; num_players = 3, levels = 3, kind = :quadratic),
+            )
+        end
+
+        @testset "Three-level nonconvex" begin
+            push!(
+                all_results,
+                test_reduced_vs_quasi(; num_players = 3, levels = 3, kind = :nonlinear),
+            )
+        end
+
+        summarize(all_results)
     end
-
-    @testset "Three-level nonconvex" begin
-        push!(
-            all_results,
-            test_reduced_vs_quasi(; num_players = 3, levels = 3, kind = :nonlinear),
-        )
-    end
-
-    summarize(all_results)
 end

@@ -502,6 +502,7 @@ function solve(
 
                         @timeit TO "line search" begin
                             # Armijo condition on the merit function φ(z) = ‖F‖²/2:
+                            # TODO: try using merit function φ(z) = ‖F‖²/2 + ‖feasibility‖
                             # accept α iff φ(z + αδz) ≤ φ(z) + c·α·∇φᵀδz with ∇φᵀδz = Fᵀ(Jδz).
                             # Strict decrease alone (F_z_next < F_z) accepts arbitrarily
                             # small improvements and can grind for thousands of iterations
@@ -660,6 +661,21 @@ function solve(
                     @. s += α_σ * δs
                     @. σ += α_σ * δσ
                     @. γ += α_γ * δγ
+
+                    # The backtracking branch already evaluated the residual at the
+                    # accepted trial point and copied it into `F`, so `F` matches the
+                    # iterate just written. The fraction-to-boundary branch evaluates no
+                    # trial residual at all: without this refresh `F` would still hold
+                    # F(z) from *before* the step, and `kkt_error` — together with the
+                    # `:solved`/`:failed` verdict and the loop's stopping test — would
+                    # describe a point the solver does not return. That lag is not
+                    # cosmetic: a step taken from an already-converged iterate can land
+                    # somewhere far worse, and the solve would still report the old,
+                    # small residual (observed: reported 7.16e-9 against an actual
+                    # 7.13e-5 at the returned `z`). #TODO: 이거 더 이쁘지 만들 수 있을 듯
+                    if is_fraction_to_boundary_linesearch
+                        @timeit TO "residual evaluation" mcp.F!(F, z; θ, ϵ, η = 0.0)
+                    end
 
                     kkt_error = norm(F, 2)
                 end
