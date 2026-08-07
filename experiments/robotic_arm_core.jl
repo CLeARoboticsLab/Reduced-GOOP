@@ -270,11 +270,12 @@ function get_setup(scenario_config::ScenarioConfig)
                     [sum(abs2, gripper_separation) - dₚ^2]
                 end : empty_constraint
 
-            # The child is modeled with the same 3D single-integrator dynamics, but its
-            # vertical velocity is fixed to zero.
+            # Uncomment to restrict the child to stay within the ground plane
             child_ground_constraint =
-                i == 2 ? mapreduce(u -> [u[child_vertical_control_index]], vcat, us) :
+                (i == 2) ?
+                mapreduce(u -> [u[child_vertical_control_index]], vcat, us) :
                 empty_constraint
+            # child_ground_constraint = empty_constraint
 
             vcat(
                 initial_state_constraint,
@@ -481,36 +482,34 @@ function demo_scenario_config(;
     # planning grid without duplicating the rest of the scenario.
     planning_horizon = 30,
     Δt = 0.1,
+    base_initial_state1 = [-0.1582, -0.0022, 0.9294],
+    base_initial_state2 = [0.1582, 0.0022, 0.9294],
+    initial_state3 = [-0.708, -0.2523, 1.1012],
 )
     dynamics_model = SingleIntegrator3D()
 
-    # ── Problem parameters ─────────────────────────────────────────────────────
-    # Player 1: combined two-arm agent, Player 2: child/pet.
     num_players = 2
-    collision_avoidance = 2.5
-    child_initial_buffer = 4.0
-    arm_speed_limit = 5.0
-    child_speed_limit = 3.0
-    dₚ = 2.0
+    collision_avoidance = 0.25
+    arm_speed_limit = 0.5
+    child_speed_limit = 0.3
+    dₚ = sqrt(sum(abs2, base_initial_state1 .- base_initial_state2))
 
     # ── Scenario ───────────────────────────────────────────────────────────────
     # Single Integrator 3D: state = [px, py, pz]
-    base_initial_state1 = [-1.0, 6.0, 1.5]
-    base_initial_state2 = [1.0, 6.0, 1.5]
-    goal_position1 = [-1.0, -5.0, 3.5]
-    goal_position2 = [1.0, -5.0, 3.5]
-    initial_state3 = [-3.0, -1.0, 0.0]
-    goal_position3 = [0.0, 0.0, 0.0]
-    obstacle_position = [0.25, 0.15, 0.0]   # placeholder
+    goal_y_offset = -0.2
+    goal_z_offset = 0.3
+    goal_position1      = base_initial_state1 .+ [0.0, goal_y_offset, goal_z_offset]
+    goal_position2      = base_initial_state2 .+ [0.0, goal_y_offset, goal_z_offset]
+    goal_position3      = 0.5 .* (base_initial_state1 .+ base_initial_state2)  # pot centre
 
-    # Miscellaneous 
+    # Miscellaneous
     map_end = 10
     lane_width = 2
 
     # ── Build dynamics ─────────────────────────────────────────────────────────
     state_dimension = 3
     control_dimension = 3
-    control_bounds = (; lb = [-10.0, -10.0, -10.0], ub = [10.0, 10.0, 10.0])
+    control_bounds = (; lb = [-1.0, -1.0, -1.0], ub = [1.0, 1.0, 1.0])
 
     # Per-player dynamics: the combined two-arm agent stacks both arms into one
     # 6D single integrator; the child keeps the plain 3D single integrator.
@@ -531,7 +530,6 @@ function demo_scenario_config(;
         Δt,
         dₚ,
         collision_avoidance,
-        child_initial_buffer,
         arm_speed_limit,
         child_speed_limit,
         base_initial_state1,
@@ -540,7 +538,6 @@ function demo_scenario_config(;
         goal_position2,
         initial_state3,
         goal_position3,
-        obstacle_position,
         use_scalarized_baseline,
         use_social_equilibrium_baseline,
         use_running_goal_cost,

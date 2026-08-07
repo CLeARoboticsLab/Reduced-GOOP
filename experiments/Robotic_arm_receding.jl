@@ -111,30 +111,22 @@ function demo(;
         ),
     )
 
-    # ── Settings ───────────────────────────────────────────────────────────────
+    # ── Scenario ───────────────────────────────────────────────────────────────
+    scenario_overrides = (;
+        (isnothing(planning_horizon) ? (;) : (; planning_horizon))...,
+        (isnothing(Δt) ? (;) : (; Δt))...,
+    )
+    scenario_config = demo_scenario_config(; use_running_goal_cost = false, scenario_overrides...)
+
+    # run_id uses the kwarg values (possibly nothing) before re-binding from scenario.
     run_id =
         "Robotic_arm_receding_" *
         Dates.format(Dates.now(), "yyyy-mm-dd_HHMMSS") *
         "_$(goop_version)_$(dual_warmstart)" *
         (isnothing(planning_horizon) ? "" : "_T$(planning_horizon)") *
         (isnothing(Δt) ? "" : "_dt$(Δt)")
-    kkt_backend = :symbolics
-    kkt_backend_options = (;)
-    kkt_codegen = :fast_differentiation
-    solver = ReducedGOOP.InteriorPoint()
-    linesearch = :backtracking
-    ϵ₀ = 0.1 # placeholder in the robotic arm scenario (no inequality constraints here)
-    use_running_goal_cost = false
 
-    # ── Scenario and problem (identical to the open-loop demo) ─────────────────
-    # Player 1: combined two-arm agent, Player 2: child/pet.
-    scenario_overrides = (;
-        (isnothing(planning_horizon) ? (;) : (; planning_horizon))...,
-        (isnothing(Δt) ? (;) : (; Δt))...,
-    )
-    scenario_config = demo_scenario_config(; use_running_goal_cost, scenario_overrides...)
-    # The scenario is the single source of truth from here on; re-bind the local
-    # names so a `nothing` kwarg picks up the scenario default.
+    # Re-bind so a `nothing` kwarg picks up the scenario default.
     (;
         dynamics_model,
         dynamics,
@@ -153,57 +145,35 @@ function demo(;
         child_speed_limit,
         dₚ,
     ) = scenario_config
-    arm_state_dimension, state_remainder = divrem(dynamics[1].state_dimension, 2)
-    arm_control_dimension, control_remainder = divrem(dynamics[1].control_dimension, 2)
-    iszero(state_remainder) || error("Expected an even stacked two-arm state dimension.")
-    iszero(control_remainder) ||
-        error("Expected an even stacked two-arm control dimension.")
 
-    problem_setup_time_sec = @elapsed @timeit TO "problem setup" begin
-        (; problem, flatten_parameters) = get_setup(scenario_config)
-    end
+    ϵ₀ = 0.1  # placeholder; no inequality constraints in this scenario
 
-    # Built exactly once; every MPC iteration reuses the compiled KKT system and
-    # only changes θ (initial states and controls) and the warm start.
-    kkt_generators = Dict(
-        :complete => ReducedGOOP.generate_slacked_complete_kkt_system,
-        :reduced => ReducedGOOP.generate_slacked_reduced_kkt_system,
-        :quasi => ReducedGOOP.generate_slacked_quasi_kkt_system,
+    # ── Context: KKT system + options, built once ──────────────────────────────
+    ctx = @timeit TO "context build" build_mpc_context(
+        scenario_config;
+        goop_version,
+        dual_warmstart,
+        fd_codegen_chunk_size,
+        tol,
+        max_inner_iters,
+        linear_solver,
+        klu_singularity_eta_growth,
+        η_max,
+        η₀,
+        ϵ₀,
+        armijo_constant,
+        reuse_factorization_iters,
+        record_convergence,
+        record_condition_number,
+        verbose,
     )
-
-    GOOP_kkt_generator = get(kkt_generators, goop_version, nothing)
-    isnothing(GOOP_kkt_generator) && error("Unknown GOOP version: $(goop_version)")
-
-    symbolic_backends = Dict(
-        :symbolics => ReducedGOOP.SymbolicTracingUtils.SymbolicsBackend(),
-        :fast_differentiation =>
-            ReducedGOOP.SymbolicTracingUtils.FastDifferentiationBackend(),
-    )
-    backend = get(symbolic_backends, kkt_backend, nothing)
-    isnothing(backend) && error("Unknown KKT backend: $(kkt_backend)")
-
-    @info "Building $(goop_version) KKT system once for the receding-horizon loop (T = $(planning_horizon))..."
-    kkt_build_time_sec = @elapsed GOOP_kkt_system = @timeit TO "KKT construction" begin
-        GOOP_kkt_generator(
-            problem;
-            backend,
-            backend_options = kkt_backend_options,
-            codegen = kkt_codegen,
-            fd_codegen_chunk_size,
-        )
-        # ReducedGOOP.generate_slacked_reduced_kkt_system(
-        # problem;
-        # backend = ReducedGOOP.SymbolicTracingUtils.SymbolicsBackend(),
-        # backend_options = (;),
-        # codegen = :fast_differentiation,
-        # fd_codegen_chunk_size,
-    end
+    (; GOOP_kkt_system, primal_dimensions, problem_setup_time_sec, kkt_build_time_sec) = ctx
     println(
         "one-time setup: problem construction $(round(problem_setup_time_sec; digits = 2)) s, ",
         "symbolic KKT build $(round(kkt_build_time_sec; digits = 2)) s",
     )
-    println("[Primal-Dual] KKT Dimension: ", GOOP_kkt_system.kkt_dimension)
-    println("[Primal-Dual] variable Dimension: ", GOOP_kkt_system.variable_dimension)
+
+    # Dual warm-start metadata needed for run_metadata save
     total_equality_stationarity_dual_count =
         length(GOOP_kkt_system.all_equality_stationarity_dual_dims)
     selected_dual_count = if dual_warmstart === :primal_only
@@ -220,39 +190,6 @@ function demo(;
         "equality/stationarity dual coordinates carried)",
     )
 
-    # Same options as the open-loop demo, except record_condition_number stays a
-    # kwarg (default false): it costs a dense SVD per Newton iteration, which is
-    # prohibitive across an MPC loop.
-    options = ReducedGOOP.InteriorPointOptions(;
-        tol,
-        η₀ = 1e-6,
-        η_max,
-        ϵ₀,
-        max_inner_iters,
-        max_outer_iters = 1,
-        tightening_rate = 1.2,
-        loosening_rate = 3.0,
-        min_stepsize = 1e-20,
-        linesearch,
-        record_convergence,
-        record_condition_number,
-        eta_retry_growth = 2.0,
-        ρ_low = 0.75,
-        ρ_high = 0.75,
-        tsvd_threshold = 0.0,
-        use_marquardt_scaling = false,
-        linear_solver,
-        klu_singularity_eta_growth,
-        armijo_constant,
-        reuse_factorization_iters,
-        verbose,
-    )
-
-    primal_dimensions = [
-        (dyn.state_dimension + dyn.control_dimension) * planning_horizon for
-        dyn in dynamics
-    ]
-
     # ── Output directories ─────────────────────────────────────────────────────
     dirs = if save_outputs
         @timeit TO "output directory setup" prepare_receding_output_dirs(run_id; debug)
@@ -262,29 +199,15 @@ function demo(;
     visualization_config =
         save_outputs ? VisualizationConfig(; dirs, show_interactive_trajectory) : nothing
 
-    # ── MPC state ──────────────────────────────────────────────────────────────
-    current_state1 = copy(base_initial_state1)
-    current_state2 = copy(base_initial_state2)
-    current_state_child = copy(initial_state3)
+    # ── MPC state: starts from scenario initial conditions ─────────────────────
+    state = @timeit TO "warmstart construction" init_mpc_state(ctx)
+    solver = ReducedGOOP.InteriorPoint()
 
-    closed_loop_xs = [[vcat(current_state1, current_state2)], [copy(current_state_child)]]
+    closed_loop_xs = [
+        [vcat(copy(state.arm_state1), copy(state.arm_state2))],
+        [copy(state.child_state)],
+    ]
     closed_loop_us = [Vector{Float64}[] for _ in 1:num_players]
-
-    instance_states = (;
-        initial_state1 = current_state1,
-        initial_state2 = current_state2,
-        initial_state3 = current_state_child,
-    )
-    (; warmstart_solution) = @timeit TO "warmstart construction" build_default_warmstart(
-        instance_states,
-        scenario_config,
-    )
-    stage_warmstart = warmstart_solution
-    initial_controls =
-        extract_initial_controls(stage_warmstart, primal_dimensions, dynamics)
-    current_control1 = initial_controls.initial_control1
-    current_control2 = initial_controls.initial_control2
-    current_control_child = initial_controls.initial_control3
 
     step_statuses = Symbol[]
     step_kkt_errors = Float64[]
@@ -304,18 +227,19 @@ function demo(;
     # ── MPC loop ───────────────────────────────────────────────────────────────
     for k in 1:num_mpc_steps
         # Refresh the state/control boundary parameters without rebuilding the
-        # KKT system.
+        # KKT system
         instance_states = (;
-            initial_state1 = current_state1,
-            initial_state2 = current_state2,
-            initial_state3 = current_state_child,
-            initial_control1 = current_control1,
-            initial_control2 = current_control2,
-            initial_control3 = current_control_child,
+            initial_state1 = state.arm_state1,
+            initial_state2 = state.arm_state2,
+            initial_state3 = state.child_state,
+            initial_control1 = state.ctrl1,
+            initial_control2 = state.ctrl2,
+            initial_control3 = state.ctrl3,
         )
+        stage_warmstart = save_outputs ? copy(state.warmstart) : nothing
         instance_parameters =
             @timeit TO "instance parameter construction" build_instance_parameters(
-                flatten_parameters,
+                ctx.flatten_parameters,
                 instance_states,
                 scenario_config,
             )
@@ -343,49 +267,26 @@ function demo(;
             )
         end
 
-        elapsed_time = @elapsed output = @timeit TO "solver invocation" ReducedGOOP.solve(
-            solver,
-            GOOP_kkt_system,
-            θ;
-            z₀ = stage_warmstart,
-            options,
+        result = @timeit TO "MPC step" step_mpc!(
+            state, ctx, solver;
+            rescue_failed_steps,
+            step_label = "step $(k): ",
         )
-        primary_output = output
-        rescue_status = :not_run
-        rescue_kkt_error = NaN
-        rescue_iters = 0
-        rescue_klu_singular_retries = 0
-        rescue_svd_fallback_count = 0
-        if output.status == :failed && rescue_failed_steps
-            # The shifted warmstart occasionally lands in a bad basin (the solver
-            # stalls with η pinned at η_max, or at a merit-function local minimum
-            # where ‖F‖ stays large). A fresh solve from the default warmstart is
-            # cheap with the KLU path and usually recovers the step.
-            println(
-                "  step $(k): solve from shifted warmstart failed ",
-                "(kkt_error=$(round(output.kkt_error; sigdigits = 3))); ",
-                "retrying from the default warmstart.",
-            )
-            rescue_warmstart =
-                build_default_warmstart(instance_states, scenario_config).warmstart_solution
-            elapsed_time += @elapsed rescue_output =
-                @timeit TO "solver invocation (rescue)" ReducedGOOP.solve(
-                    solver,
-                    GOOP_kkt_system,
-                    θ;
-                    z₀ = rescue_warmstart,
-                    options,
-                )
-            rescue_status = rescue_output.status
-            rescue_kkt_error = rescue_output.kkt_error
-            rescue_iters = rescue_output.total_iters
-            rescue_klu_singular_retries = rescue_output.klu_singular_retries
-            rescue_svd_fallback_count = rescue_output.svd_fallback_count
-            if rescue_output.status == :solved ||
-               rescue_output.kkt_error < output.kkt_error
-                output = rescue_output
-            end
-        end
+        (;
+            output,
+            primary_output,
+            strategies,
+            θ1,
+            θ2,
+            θ3,
+            elapsed_time,
+            rescue_status,
+            rescue_kkt_error,
+            rescue_iters,
+            rescue_klu_singular_retries,
+            rescue_svd_fallback_count,
+        ) = result
+
         converged = output.status == :solved
         push!(step_statuses, output.status)
         push!(step_kkt_errors, output.kkt_error)
@@ -424,30 +325,12 @@ function demo(;
             )
         end
 
-        strategies = @timeit TO "solution postprocessing" extract_player_strategies(
-            output.x,
-            primal_dimensions,
-            dynamics,
-        )
-
         # Apply the first control: advance every player to its first predicted
         # state (equivalent to applying us[1] through the dynamics constraints).
         for player in 1:num_players
             push!(closed_loop_us[player], collect(strategies[player].us[1]))
             push!(closed_loop_xs[player], collect(strategies[player].xs[2]))
         end
-        combined_arm_state = closed_loop_xs[1][end]
-        current_state1 = combined_arm_state[1:arm_state_dimension]
-        current_state2 =
-            combined_arm_state[(arm_state_dimension + 1):(2 * arm_state_dimension)]
-        current_state_child = closed_loop_xs[2][end]
-        # The shifted warm start begins at the old second knot, so carry those
-        # controls into θ as the next solve's fixed initial controls.
-        combined_arm_control = strategies[1].us[2]
-        current_control1 = combined_arm_control[1:arm_control_dimension]
-        current_control2 =
-            combined_arm_control[(arm_control_dimension + 1):(2 * arm_control_dimension)]
-        current_control_child = strategies[2].us[2]
 
         if save_outputs
             @timeit TO "solution output and plotting" begin
@@ -526,24 +409,6 @@ function demo(;
                 )
             end
         end
-
-        # Shifted previous solution warm-starts the next solve.
-        shifted_strategies = @timeit TO "warmstart shift" shift_strategies(
-            strategies,
-            dynamics,
-            planning_horizon,
-        )
-        shifted_primal = flatten_warmstart_solution(
-            planning_horizon,
-            [strategy.xs for strategy in shifted_strategies],
-            [strategy.us for strategy in shifted_strategies],
-        )
-        stage_warmstart = build_receding_warmstart(
-            shifted_primal,
-            output.z,
-            GOOP_kkt_system,
-            dual_warmstart,
-        )
     end
 
     # ── Closed-loop outputs ────────────────────────────────────────────────────
@@ -766,6 +631,271 @@ function build_receding_warmstart(shifted_primal, previous_z, kkt_system, mode::
         warmstart[kkt_system.innermost_stationarity_dual_dims] .= zero(T)
     end
     warmstart
+end
+
+function build_mpc_context(
+    obs;
+    planning_horizon::Integer = 30,
+    # When true, ignore obs positions and use demo_scenario_config nominal values,
+    # giving bit-identical initial conditions to demo().
+    use_nominal_initial_state::Bool = false,
+    kwargs...,
+)
+    scenario_config = if use_nominal_initial_state
+        demo_scenario_config(; planning_horizon)
+    else
+        base_initial_state1 = collect(Float64, obs["robot0_eef_pos"])
+        base_initial_state2 = collect(Float64, obs["robot1_eef_pos"])
+        initial_state3      = collect(Float64, obs["robot2_eef_pos"])
+        demo_scenario_config(;
+            planning_horizon,
+            base_initial_state1,
+            base_initial_state2,
+            initial_state3,
+        )
+    end
+    # Print geometry before the (slow) KKT build so the user can verify
+    _print_scenario_config(scenario_config)
+    build_mpc_context(scenario_config; kwargs...)
+end
+
+function _print_scenario_config(scenario_config::ScenarioConfig)
+    (; base_initial_state1, base_initial_state2, goal_position1, goal_position2,
+       initial_state3, goal_position3, arm_speed_limit, child_speed_limit,
+       Δt, planning_horizon, collision_avoidance, dₚ) = scenario_config
+    total_plan_time = planning_horizon * Δt
+    max_reach = arm_speed_limit * total_plan_time
+    dist1 = sqrt(sum(abs2, goal_position1 .- base_initial_state1))
+    dist2 = sqrt(sum(abs2, goal_position2 .- base_initial_state2))
+    println("\n── MPC scenario configuration ──────────────────────────────────────")
+    println("  horizon:      T=$(planning_horizon) × Δt=$(Δt) s = $(total_plan_time) s total")
+    println("  arm speed:    ≤ $(arm_speed_limit) m/s  →  max reach $(round(max_reach; digits = 3)) m per horizon")
+    println("  child speed:  ≤ $(child_speed_limit) m/s")
+    println("  safety dist:  $(collision_avoidance) m  (grip separation dₚ=$(round(dₚ; digits = 4)) m)")
+    println("  arm 1  pos:   $(round.(base_initial_state1; digits = 4))")
+    println("         goal:  $(round.(goal_position1; digits = 4))  dist=$(round(dist1; digits = 4)) m")
+    println("  arm 2  pos:   $(round.(base_initial_state2; digits = 4))")
+    println("         goal:  $(round.(goal_position2; digits = 4))  dist=$(round(dist2; digits = 4)) m")
+    println("  child  pos:   $(round.(initial_state3; digits = 4))")
+    println("         goal:  $(round.(goal_position3; digits = 4))")
+    dist1 > max_reach && @warn "arm 1 goal $(round(dist1; digits=3)) m exceeds horizon reach $(round(max_reach; digits=3)) m"
+    dist2 > max_reach && @warn "arm 2 goal $(round(dist2; digits=3)) m exceeds horizon reach $(round(max_reach; digits=3)) m"
+    println("─────────────────────────────────────────────────────────────────────")
+end
+
+"""Immutable context for one MPC instance: KKT system, options, and timing metadata."""
+struct MpcContext
+    GOOP_kkt_system::Any
+    scenario_config::Any
+    flatten_parameters::Any
+    primal_dimensions::Vector{Int}
+    options::Any
+    planning_horizon::Int
+    arm_state_dimension::Int
+    arm_control_dimension::Int
+    dual_warmstart::Symbol
+    problem_setup_time_sec::Float64
+    kkt_build_time_sec::Float64
+end
+
+"""Mutable per-step planner state: arm/child positions, boundary controls, warmstart."""
+mutable struct MpcState
+    arm_state1::Vector{Float64}
+    arm_state2::Vector{Float64}
+    child_state::Vector{Float64}
+    ctrl1::Vector{Float64}
+    ctrl2::Vector{Float64}
+    ctrl3::Vector{Float64}
+    warmstart::Vector{Float64}
+    step::Int
+end
+
+"""
+Initialise an `MpcState` from the scenario defaults or supplied initial positions.
+
+Override `arm_state1`, `arm_state2`, or `child_state` to start from a pose
+other than the one baked into `ctx.scenario_config` (e.g. actual post-grip
+EEF positions read from the simulator rather than the nominal scenario start).
+"""
+function init_mpc_state(
+    ctx::MpcContext;
+    arm_state1 = ctx.scenario_config.base_initial_state1,
+    arm_state2 = ctx.scenario_config.base_initial_state2,
+    child_state = ctx.scenario_config.initial_state3,
+)
+    initial_states = (;
+        initial_state1 = arm_state1,
+        initial_state2 = arm_state2,
+        initial_state3 = child_state,
+    )
+    (; warmstart_solution) = build_default_warmstart(initial_states, ctx.scenario_config)
+    controls = extract_initial_controls(
+        warmstart_solution, ctx.primal_dimensions, ctx.scenario_config.dynamics,
+    )
+    println(
+        "MPC init:",
+        "\n  arm1  = ", round.(arm_state1; digits = 6),
+        "\n  arm2  = ", round.(arm_state2; digits = 6),
+        "\n  child = ", round.(child_state; digits = 6),
+        "\n  dₚ    = ", round(ctx.scenario_config.dₚ; digits = 6),
+    )
+    MpcState(
+        copy(arm_state1),
+        copy(arm_state2),
+        copy(child_state),
+        copy(controls.initial_control1),
+        copy(controls.initial_control2),
+        copy(controls.initial_control3),
+        warmstart_solution,
+        0,
+    )
+end
+export init_mpc_state
+
+"""
+Advance the planner by one MPC step: solve (with optional rescue), update
+`state` in place, and return the full step result for logging or trajectory
+recording.
+"""
+function step_mpc!(state::MpcState, ctx::MpcContext, solver; kwargs...)
+    instance_states = (;
+        initial_state1  = state.arm_state1,
+        initial_state2  = state.arm_state2,
+        initial_state3  = state.child_state,
+        initial_control1 = state.ctrl1,
+        initial_control2 = state.ctrl2,
+        initial_control3 = state.ctrl3,
+    )
+    result = _mpc_solve(
+        solver, ctx.GOOP_kkt_system, ctx.flatten_parameters, ctx.scenario_config,
+        ctx.options, ctx.primal_dimensions,
+        ctx.arm_state_dimension, ctx.arm_control_dimension,
+        ctx.dual_warmstart, instance_states, state.warmstart; kwargs...,
+    )
+    state.arm_state1  = result.new_state1
+    state.arm_state2  = result.new_state2
+    state.child_state = result.new_state_child
+    state.ctrl1 = result.new_ctrl1
+    state.ctrl2 = result.new_ctrl2
+    state.ctrl3 = result.new_ctrl3
+    state.warmstart = result.next_warmstart
+    state.step += 1
+    result
+end
+export step_mpc!
+
+"""
+Solve the problem associated to one receding-horizon MPC step.
+
+Builds parameters from `instance_states`, runs the primary solve, optionally
+rescues from the current-state default warmstart on failure, advances the state
+to the first predicted next knot, and shifts the warmstart forward one stage.
+
+Both `demo` and `create_planner_from_context` call this so the solve, rescue,
+and warmstart-shift logic is shared across entry points.
+"""
+function _mpc_solve(
+    solver,
+    GOOP_kkt_system,
+    flatten_parameters,
+    scenario_config,
+    options,
+    primal_dimensions,
+    arm_state_dimension,
+    arm_control_dimension,
+    dual_warmstart,
+    instance_states,
+    stage_warmstart;
+    rescue_failed_steps::Bool = true,
+    step_label::String = "",
+)
+    (; dynamics, planning_horizon) = scenario_config
+
+    instance_parameters =
+        build_instance_parameters(flatten_parameters, instance_states, scenario_config)
+    (; θ1, θ2, θ3, θ) = instance_parameters
+
+    if !isempty(step_label)
+        println(
+            "  ", step_label, "state:",
+            "\n    arm1  = ", round.(instance_states.initial_state1; digits = 6),
+            "\n    arm2  = ", round.(instance_states.initial_state2; digits = 6),
+            "\n    child = ", round.(instance_states.initial_state3; digits = 6),
+        )
+    end
+
+    elapsed_time = @elapsed primary_output =
+        ReducedGOOP.solve(solver, GOOP_kkt_system, θ; z₀ = stage_warmstart, options)
+    output = primary_output
+    rescue_status = :not_run
+    rescue_kkt_error = NaN
+    rescue_iters = 0
+    rescue_klu_singular_retries = 0
+    rescue_svd_fallback_count = 0
+
+    if output.status == :failed && rescue_failed_steps
+        println(
+            "  $(step_label)solve from shifted warmstart failed ",
+            "(kkt_error=$(round(output.kkt_error; sigdigits = 3))); ",
+            "retrying from the default warmstart.",
+        )
+        rescue_warmstart =
+            build_default_warmstart(instance_states, scenario_config).warmstart_solution
+        elapsed_time += @elapsed rescue_output =
+            ReducedGOOP.solve(solver, GOOP_kkt_system, θ; z₀ = rescue_warmstart, options)
+        rescue_status = rescue_output.status
+        rescue_kkt_error = rescue_output.kkt_error
+        rescue_iters = rescue_output.total_iters
+        rescue_klu_singular_retries = rescue_output.klu_singular_retries
+        rescue_svd_fallback_count = rescue_output.svd_fallback_count
+        if rescue_output.status == :solved || rescue_output.kkt_error < output.kkt_error
+            output = rescue_output
+        end
+    end
+
+    strategies = extract_player_strategies(output.x, primal_dimensions, dynamics)
+
+    combined_arm_state = collect(Float64, strategies[1].xs[2])
+    new_state1 = combined_arm_state[1:arm_state_dimension]
+    new_state2 = combined_arm_state[(arm_state_dimension + 1):(2 * arm_state_dimension)]
+    new_state_child = collect(Float64, strategies[2].xs[2])
+
+    combined_arm_control = collect(Float64, strategies[1].us[2])
+    new_ctrl1 = combined_arm_control[1:arm_control_dimension]
+    new_ctrl2 = combined_arm_control[(arm_control_dimension + 1):(2 * arm_control_dimension)]
+    new_ctrl3 = collect(Float64, strategies[2].us[2])
+
+    shifted_strategies = shift_strategies(strategies, dynamics, planning_horizon)
+    shifted_primal = flatten_warmstart_solution(
+        planning_horizon,
+        [s.xs for s in shifted_strategies],
+        [s.us for s in shifted_strategies],
+    )
+    next_warmstart =
+        build_receding_warmstart(shifted_primal, output.z, GOOP_kkt_system, dual_warmstart)
+
+    (;
+        output,
+        primary_output,
+        instance_parameters,
+        strategies,
+        θ1,
+        θ2,
+        θ3,
+        elapsed_time,
+        new_state1,
+        new_state2,
+        new_state_child,
+        new_ctrl1,
+        new_ctrl2,
+        new_ctrl3,
+        next_warmstart,
+        rescue_status,
+        rescue_kkt_error,
+        rescue_iters,
+        rescue_klu_singular_retries,
+        rescue_svd_fallback_count,
+    )
 end
 
 """
@@ -1168,5 +1298,232 @@ function prepare_receding_output_dirs(run_id; debug)
         timing_plots_dir,
     )
 end
+
+# ── MPC types and shared API ──────────────────────────────────────────────────
+#
+# Both the Julia demo() entry point and the Python closure share the same
+# context / state / step machinery:
+#
+#   Julia:  scenario = demo_scenario_config(...)
+#           ctx      = build_mpc_context(scenario; kwargs...)
+#           state    = init_mpc_state(ctx)
+#           while ...; result = step_mpc!(state, ctx, solver); end
+#
+#   Python: ctx      = jl.Robotic_arm_receding.build_mpc_context(obs; kwargs...)
+#           plan_fn  = jl.Robotic_arm_receding.create_planner_from_context(ctx, 20; ...)
+#           action   = np.array(plan_fn(obs))   # one interpolated waypoint per call
+#           # returns Float64[] after num_mpc_steps MPC solves → done
+#
+# The only structural difference is the output mechanism: demo() collects a
+# full closed-loop trajectory and saves plots; create_planner_from_context
+# streams linearly-interpolated waypoints for OSC tracking.
+#
+# Observation feedback hook: plan_fn(obs) receives the simulator observation
+# on every call. State is propagated from the plan by default. To enable
+# closed-loop sim correction, update state.arm_state1/2 / state.child_state
+# from obs before calling step_mpc! (see the comment inside create_planner_from_context).
+
+"""
+Build the KKT system and solver options from a pre-constructed `ScenarioConfig`.
+
+This is the shared implementation used by both `demo` (Julia entry point) and
+the Python-facing `build_mpc_context(obs; ...)` wrapper below.
+"""
+function build_mpc_context(
+    scenario_config::ScenarioConfig;
+    goop_version::Symbol = :quasi,
+    dual_warmstart::Symbol = :all_except_innermost_stationarity,
+    fd_codegen_chunk_size::Integer = 128,
+    tol::Float64 = 0.008,
+    max_inner_iters::Integer = 500,
+    linear_solver::Symbol = :klu,
+    klu_singularity_eta_growth::Float64 = 100.0,
+    η_max::Float64 = 1e2,
+    η₀::Float64 = 1e-6,
+    ϵ₀::Float64 = 0.1,
+    armijo_constant::Float64 = 1e-4,
+    reuse_factorization_iters::Integer = 0,
+    record_convergence::Bool = false,
+    record_condition_number::Bool = false,
+    verbose::Bool = false,
+)
+    dual_warmstart in DUAL_WARMSTART_MODES || throw(
+        ArgumentError(
+            "Unknown dual_warmstart mode $(dual_warmstart); expected one of " *
+            "$(join(DUAL_WARMSTART_MODES, ", ")).",
+        ),
+    )
+
+    (; dynamics, planning_horizon) = scenario_config
+    arm_state_dimension, _ = divrem(dynamics[1].state_dimension, 2)
+    arm_control_dimension, _ = divrem(dynamics[1].control_dimension, 2)
+
+    problem_setup_time_sec = @elapsed (; problem, flatten_parameters) = get_setup(scenario_config)
+
+    kkt_generators = Dict(
+        :complete => ReducedGOOP.generate_slacked_complete_kkt_system,
+        :reduced => ReducedGOOP.generate_slacked_reduced_kkt_system,
+        :quasi => ReducedGOOP.generate_slacked_quasi_kkt_system,
+    )
+    GOOP_kkt_generator = get(kkt_generators, goop_version, nothing)
+    isnothing(GOOP_kkt_generator) && error("Unknown GOOP version: $(goop_version)")
+
+    @info "Building $(goop_version) KKT system (T = $(planning_horizon))..."
+    kkt_build_time_sec = @elapsed GOOP_kkt_system = GOOP_kkt_generator(
+        problem;
+        backend = ReducedGOOP.SymbolicTracingUtils.SymbolicsBackend(),
+        backend_options = (;),
+        codegen = :fast_differentiation,
+        fd_codegen_chunk_size,
+    )
+    println(
+        "context build: problem $(round(problem_setup_time_sec; digits = 2)) s, ",
+        "KKT $(round(kkt_build_time_sec; digits = 2)) s",
+    )
+    println("[Primal-Dual] KKT dimension: ", GOOP_kkt_system.kkt_dimension)
+    println("[Primal-Dual] variable dimension: ", GOOP_kkt_system.variable_dimension)
+    total_eq_stat_duals = length(GOOP_kkt_system.all_equality_stationarity_dual_dims)
+    selected_duals = if dual_warmstart === :primal_only
+        0
+    elseif dual_warmstart === :equality_duals
+        length(GOOP_kkt_system.equality_constraint_dual_dims)
+    else
+        total_eq_stat_duals - length(GOOP_kkt_system.innermost_stationarity_dual_dims)
+    end
+    println(
+        "dual warm-start: $(dual_warmstart) ",
+        "($(selected_duals)/$(total_eq_stat_duals) equality/stationarity duals carried)",
+    )
+
+    primal_dimensions = [
+        (dyn.state_dimension + dyn.control_dimension) * planning_horizon
+        for dyn in dynamics
+    ]
+
+    options = ReducedGOOP.InteriorPointOptions(;
+        tol,
+        η₀,
+        η_max,
+        ϵ₀,
+        max_inner_iters,
+        max_outer_iters = 1,
+        tightening_rate = 1.2,
+        loosening_rate = 3.0,
+        min_stepsize = 1e-20,
+        linesearch = :backtracking,
+        linear_solver,
+        klu_singularity_eta_growth,
+        armijo_constant,
+        reuse_factorization_iters,
+        eta_retry_growth = 2.0,
+        ρ_low = 0.75,
+        ρ_high = 0.75,
+        tsvd_threshold = 0.0,
+        use_marquardt_scaling = false,
+        record_convergence,
+        record_condition_number,
+        verbose,
+    )
+
+    MpcContext(
+        GOOP_kkt_system,
+        scenario_config,
+        flatten_parameters,
+        primal_dimensions,
+        options,
+        Int(planning_horizon),
+        Int(arm_state_dimension),
+        Int(arm_control_dimension),
+        dual_warmstart,
+        problem_setup_time_sec,
+        kkt_build_time_sec,
+    )
+end
+
+"""
+Return a stateful `plan_fn(obs) -> Vector{Float64}` closure backed by an `MpcState`.
+To be used in Python as a callable that returns one interpolated waypoint per call for OSC tracking.
+
+Each call drains one pre-computed waypoint from an internal interpolation buffer.
+The buffer is refilled by one `step_mpc!` call every
+`ratio = low_level_freq ÷ planner_freq` simulator steps, producing `ratio`
+linearly interpolated positions for smooth OSC tracking.
+
+Returns `Float64[]` after `num_mpc_steps` MPC solves to signal completion.
+"""
+function create_planner_from_context(
+    ctx::MpcContext,
+    num_mpc_steps::Integer = 20;
+    planner_freq::Integer = 10,
+    low_level_freq::Integer = 10,
+)
+    low_level_freq >= planner_freq ||
+        error("low_level_freq ($(low_level_freq)) must be ≥ planner_freq ($(planner_freq))")
+    ratio = div(low_level_freq, planner_freq)
+    low_level_freq == planner_freq * ratio ||
+        @warn "low_level_freq $(low_level_freq) is not an exact multiple of planner_freq $(planner_freq); using ratio=$(ratio)"
+
+    state  = init_mpc_state(ctx)
+    solver = ReducedGOOP.InteriorPoint()
+    buffer = Vector{Float64}[]
+
+    function plan_next_fn(obs)
+        if isempty(buffer)
+            state.step >= num_mpc_steps && return Float64[]
+
+            prev_arm1  = copy(state.arm_state1)
+            prev_arm2  = copy(state.arm_state2)
+            prev_child = copy(state.child_state)
+
+            # ── Sim-feedback correction hook ───────────────────────────────────
+            # Uncomment to re-anchor state from actual EEF positions each step:
+            # state.arm_state1  = collect(Float64, obs["robot0_eef_pos"])
+            # state.arm_state2  = collect(Float64, obs["robot1_eef_pos"])
+            # state.child_state = collect(Float64, obs["robot2_eef_pos"])
+
+            result = step_mpc!(
+                state, ctx, solver;
+                rescue_failed_steps = true,
+                step_label = "step $(state.step + 1): ",
+            )
+
+            (; goal_position1, goal_position2) = ctx.scenario_config
+            dist1 = sqrt(sum(abs2, state.arm_state1 .- goal_position1))
+            dist2 = sqrt(sum(abs2, state.arm_state2 .- goal_position2))
+            output = result.output
+            println(
+                "[mpc] step=$(state.step)/$(num_mpc_steps), status=$(output.status), ",
+                "iters=$(output.total_iters), ",
+                "kkt_err=$(round(output.kkt_error; sigdigits = 4)), ",
+                "time=$(round(result.elapsed_time; digits = 3)) s | ",
+                "arm1→goal=$(round(dist1; digits = 4)) m  ",
+                "arm2→goal=$(round(dist2; digits = 4)) m",
+            )
+
+            # Create a linear interpolation buffer of `ratio` waypoints
+            # between the previous and current states for smooth OSC tracking
+            for i in 1:ratio
+                α = i / ratio
+                push!(buffer, vcat(
+                    prev_arm1  .+ α .* (state.arm_state1  .- prev_arm1),  [1.0],
+                    prev_arm2  .+ α .* (state.arm_state2  .- prev_arm2),  [1.0],
+                    prev_child .+ α .* (state.child_state .- prev_child),
+                ))
+            end
+        end
+        popfirst!(buffer)
+    end
+
+    plan_next_fn
+end
+
+"""Return goal positions for overlay visualization."""
+function get_current_goal_positions(ctx::MpcContext, obs)::Vector{Vector{Float64}}
+    (; goal_position1, goal_position2) = ctx.scenario_config
+    eef0 = collect(Float64, obs["robot0_eef_pos"])
+    eef1 = collect(Float64, obs["robot1_eef_pos"])
+    [collect(Float64, goal_position1), collect(Float64, goal_position2), 0.5 .* (eef0 .+ eef1)]
+end
+export get_current_goal_positions
 
 end
