@@ -201,6 +201,17 @@ function generate_slacked_reduced_kkt_system(
             goop.shared_inequality_constraint(x, θ)
     end
 
+    # Construct the innermost preference functions for each player and pass it to BuildGOOPKKTSystem as innermost_preference_symbolic.
+    innermost_preference_symbolic = @timeit TO "innermost preference construction" begin
+        preferences = symbolic_type[]
+        for player in 1:goop.num_players
+            if goop.is_prioritized_constraint[player][end]
+                append!(preferences, goop.preferences[player][end](x, θ))
+            end
+        end
+        isempty(preferences) ? nothing : Vector{symbolic_type}(preferences)
+    end
+
     # Keep track of all the preference (s) and interior point (σ) slacks we create.
     s = symbolic_type[]
     Σ = symbolic_type[]
@@ -735,6 +746,7 @@ function generate_slacked_reduced_kkt_system(
         stationarity_dual_dims,
         all_equality_stationarity_dual_dims,
         innermost_stationarity_dual_dims,
+        innermost_preference_symbolic,
         backend_options,
         codegen,
         fd_codegen_chunk_size,

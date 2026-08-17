@@ -45,18 +45,31 @@ The nonlinear constraint transform preserves the same feasible set and active
 set as g(x) >= 0 because exp(r) - 1 = 0 iff r = 0, and exp(r) - 1 > 0 iff r > 0.
 =#
 
-function default_interior_point_options(; verbose = false)
+function default_interior_point_options(;
+    verbose = false,
+    η₀ = 0.0,
+    use_feasibility_merit = false,
+    μ₀ = 1.0,
+    μ_max = 1e4,
+    mu_growth = 10.0,
+    record_convergence = false,
+)
     return ReducedGOOP.InteriorPointOptions(;
         tol = 1e-6,
-        η₀ = 0.0,
+        η₀,
         ϵ₀ = 1e-9,
         max_inner_iters = 5000,
-        max_outer_iters = 20,
+        max_outer_iters = 2,
         tightening_rate = 2.0,
         loosening_rate = 0.5,
         min_stepsize = 1e-20,
         linesearch = :backtracking,
         linear_solver = :klu,
+        use_feasibility_merit,
+        μ₀,
+        μ_max,
+        mu_growth,
+        record_convergence,
         verbose,
     )
 end

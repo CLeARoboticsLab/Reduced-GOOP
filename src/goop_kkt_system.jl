@@ -11,7 +11,7 @@ TODO (@Jingqi/@DongHo): Please flesh this comment out with more of the math,
 or with a pointer to a LaTeX derivation somewhere in this repository.
 """
 
-struct GOOPKKTSystem{T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11}
+struct GOOPKKTSystem{T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13}
     "A callable function that computes F!(val, z; θ, ϵ) in-place for 'val'"
     F!::T1
     "A callable function that computes ∇F!(val, z; θ, ϵ) in-place for 'val'"
@@ -40,6 +40,12 @@ struct GOOPKKTSystem{T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11}
     F_symbolic::T11
     "z in symbolics"
     z_symbolic::T11
+    "In-place evaluator for the innermost prioritized-preference inequalities"
+    innermost_preference!::T12
+    "Sparse Jacobian evaluator for the innermost preferences with respect to z"
+    ∇innermost_preference_z!::T13
+    "Number of innermost prioritized-preference inequalities"
+    innermost_preference_dimension::T10
 end
 
 """
@@ -216,6 +222,7 @@ function BuildGOOPKKTSystem(
     stationarity_dual_dims = Int[],
     all_equality_stationarity_dual_dims = Int[],
     innermost_stationarity_dual_dims = Int[],
+    innermost_preference_symbolic = nothing,
     backend_options = (;),
     codegen = :native,
     fd_codegen_chunk_size = nothing,
@@ -317,6 +324,96 @@ function BuildGOOPKKTSystem(
             end
         end
 
+        innermost_preference!, ∇innermost_preference_z!, innermost_preference_dimension =
+            if isnothing(innermost_preference_symbolic)
+                nothing, nothing, 0
+            else
+                preference! = @timeit TO "innermost preference function build" let
+                    _preference! = if use_fd_codegen
+                        _build_fd_codegen_function(
+                            innermost_preference_symbolic,
+                            z_symbolic,
+                            θ_symbolic,
+                            ϵ_symbolic,
+                            η_symbolic,
+                            chunk_size = fd_codegen_chunk_size,
+                        )
+                    else
+                        SymbolicTracingUtils.build_function(
+                            innermost_preference_symbolic,
+                            z_symbolic,
+                            θ_symbolic,
+                            ϵ_arg,
+                            η_arg;
+                            in_place = true,
+                            backend_options,
+                        )
+                    end
+                    (result, z; θ, ϵ, η) -> _preference!(result, z, θ, ϵ, η)
+                end
+
+                preference_jacobian! =
+                    @timeit TO "innermost preference Jacobian function construction" let
+                        preference_jacobian_symbolic =
+                            @timeit TO "innermost preference Jacobian symbolic construction" begin
+                                if T === SymbolicTracingUtils.Symbolics.Num
+                                    _build_symbolics_sparse_jacobian(
+                                        innermost_preference_symbolic,
+                                        z_symbolic,
+                                    )
+                                else
+                                    SymbolicTracingUtils.sparse_jacobian(
+                                        innermost_preference_symbolic,
+                                        z_symbolic,
+                                    )
+                                end
+                            end
+                        _preference_jacobian! =
+                            @timeit TO "innermost preference Jacobian function build" if use_fd_codegen
+                                _Jvals! = _build_fd_codegen_function(
+                                    SparseArrays.findnz(preference_jacobian_symbolic)[3],
+                                    z_symbolic,
+                                    θ_symbolic,
+                                    ϵ_symbolic,
+                                    η_symbolic,
+                                    chunk_size = fd_codegen_chunk_size,
+                                )
+                                (result, z, θ, ϵ, η) -> _Jvals!(
+                                    SparseArrays.nonzeros(result),
+                                    z,
+                                    θ,
+                                    ϵ,
+                                    η,
+                                )
+                            else
+                                SymbolicTracingUtils.build_function(
+                                    preference_jacobian_symbolic,
+                                    z_symbolic,
+                                    θ_symbolic,
+                                    ϵ_arg,
+                                    η_arg;
+                                    in_place = true,
+                                    backend_options,
+                                )
+                            end
+
+                        rows, cols, _ = SparseArrays.findnz(preference_jacobian_symbolic)
+                        constant_entries = SymbolicTracingUtils.get_constant_entries(
+                            preference_jacobian_symbolic,
+                            z_symbolic,
+                        )
+                        SymbolicTracingUtils.SparseFunction(
+                            (result, z; θ, ϵ, η) ->
+                                _preference_jacobian!(result, z, θ, ϵ, η),
+                            rows,
+                            cols,
+                            size(preference_jacobian_symbolic),
+                            constant_entries,
+                        )
+                    end
+                preference!, preference_jacobian!, length(innermost_preference_symbolic)
+            end
+
         GOOPKKTSystem(
             F!,
             ∇F_z!,
@@ -332,6 +429,9 @@ function BuildGOOPKKTSystem(
             length(z_symbolic),
             F_symbolic,
             z_symbolic,
+            innermost_preference!,
+            ∇innermost_preference_z!,
+            innermost_preference_dimension,
         )
     end
 end

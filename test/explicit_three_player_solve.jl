@@ -3,9 +3,11 @@
 #
 # This is a report script, not part of `runtests.jl` — running it *is* the test:
 #
-#     julia --project=. test/explicit_three_player_solve.jl
+#     julia --project=experiments test/explicit_three_player_solve.jl
 #
-# (`--project=test` also works once that environment has been instantiated.)
+# The experiments environment supplies CairoMakie for the step-history PDF.
+# Running with `--project=.` still performs the solves and tests, but skips the
+# PDF with a warning because CairoMakie is intentionally not a root dependency.
 #
 # Edit `build_explicit_three_player_problem` below and rerun; every number in
 # the report is recomputed from the problem definition, so nothing has to be
@@ -20,6 +22,11 @@ using Printf: @printf, @sprintf, Format, format
 using BlockArrays: Block, BlockArray
 using LinearAlgebra: norm
 using ReducedGOOP
+
+const CAIRO_MAKIE_AVAILABLE = !isnothing(Base.find_package("CairoMakie"))
+if CAIRO_MAKIE_AVAILABLE
+    @eval import CairoMakie
+end
 
 @isdefined(default_interior_point_options) ||
     include(joinpath(@__DIR__, "benchmark_problems.jl"))
@@ -54,15 +61,15 @@ Preferences are stored `[outermost, ..., innermost]`, so for each player p:
   level 3 (innermost, highest priority): (x_{p,1} - t_{p,1})^2 + (x_{p,2} - t_{p,2})^2
 
 `t_p` is player p's *raw* target — where the objective would sit with no
-constraints. It is x_p* shifted by [+0.6, 0, -0.4, 0, 0], so each player wants
-coordinate 1 larger and coordinate 3 smaller than the equilibrium allows:
+constraints:
 
-  t_1 = [1.00, 0.90, 0.15, 1.20, 0.80]     x_1* = [0.40, 0.90, 0.55, 1.20, 0.80]
-  t_2 = [1.05, 1.00, 0.20, 1.30, 0.90]     x_2* = [0.45, 1.00, 0.60, 1.30, 0.90]
-  t_3 = [1.10, 1.10, 0.25, 1.40, 1.00]     x_3* = [0.50, 1.10, 0.65, 1.40, 1.00]
+  t_1 = [1.00, 0.90, 0.15, 1.20, 0.80]
+  t_2 = [1.05, 1.00, 0.20, 1.30, 0.90]
+  t_3 = [1.10, 1.10, 0.25, 1.40, 1.00]
 
-Coordinates 2, 4, 5 are unconstrained, so they sit at their targets and
-x_{p,j}* = t_{p,j} there.
+No expected primal solution is stored in this problem definition. The report
+solves the hard-inequality formulation first and uses that returned primal
+vector, as computed, as the reference for the two preference formulations.
 
 The coupled resource `c_{p,j}(x) = x_{p,j} + 0.25 * sum(x_{k,j} for k != p)`
 gives every player a feasible set that depends on all players' variables — a
@@ -140,15 +147,7 @@ function build_explicit_three_player_problem()
         shared_inequality_constraint = nothing,
     )
 
-    #! format: off
-    expected = [
-        0.40, 0.90, 0.55, 1.20, 0.80,   # x_1*
-        0.45, 1.00, 0.60, 1.30, 0.90,   # x_2*
-        0.50, 1.10, 0.65, 1.40, 1.00,   # x_3*
-    ]
-    #! format: on
-
-    return (; problem, expected, primal_dims)
+    return (; problem, primal_dims)
 end
 
 """
@@ -196,7 +195,8 @@ function solve_explicit_three_player(;
     θ = zeros(sum(problem.parameter_dims))
     initial_guess = isnothing(z₀) ? zeros(sum(case.primal_dims)) : z₀
 
-    output = ReducedGOOP.solve(
+    local output
+    elapsed_solve_time = @elapsed output = ReducedGOOP.solve(
         ReducedGOOP.InteriorPoint(),
         kkt,
         θ;
@@ -218,7 +218,7 @@ function solve_explicit_three_player(;
 
     # `F` is recomputed here rather than trusted from the solve so the reported
     # residual is unambiguously the one at the returned `z`.
-    residual = zeros(kkt.variable_dimension)
+    residual = zeros(kkt.kkt_dimension)
     kkt.F!(residual, output.z; θ, ϵ = output.ϵ, η = 0.0)
 
     return (;
@@ -231,6 +231,7 @@ function solve_explicit_three_player(;
         x_blocks,
         objectives,
         constraints,
+        elapsed_solve_time,
         residual_norm = norm(residual, 2),
         max_violation = maximum(
             maximum(max.(0.0, .-constraints[player])) for player in 1:problem.num_players
@@ -242,17 +243,23 @@ end
 formulation_title(formulation::Symbol) =
     formulation === :hard_inequality ?
     "hard inequality (interior-point slacks and duals)" :
-    "innermost preference (smooth penalty, no hard inequalities)"
+    formulation === :innermost_preference ?
+    "innermost preference (smooth penalty, no hard inequalities)" :
+    "innermost preference with feasibility-augmented merit"
 
-"Print `result` from `solve_explicit_three_player` as a readable report."
-function report_explicit_three_player(result)
+"Print `result` relative to the hard-inequality primal reference."
+function report_explicit_three_player(
+    result;
+    label = result.formulation,
+    reference_primals,
+)
     (; case, kkt, output, primals, objectives, constraints) = result
     problem = case.problem
     num_players = problem.num_players
 
     println("=" ^ 72)
     println("Explicit three-player, three-level GOOP")
-    println("  formulation: ", formulation_title(result.formulation))
+    println("  formulation: ", formulation_title(label))
     println("=" ^ 72)
 
     println("\n-- Problem ------------------------------------------------------")
@@ -279,7 +286,10 @@ function report_explicit_three_player(result)
     @printf("  outer / total iters    %d / %d\n", output.outer_iters, output.total_iters)
     @printf("  final KKT error        %.6e\n", output.kkt_error)
     @printf("  ‖F(z_returned)‖₂       %.6e\n", result.residual_norm)
+    @printf("  elapsed solve time     %.6f s\n", result.elapsed_solve_time)
     @printf("  final ϵ                %.6e\n", output.ϵ)
+    @printf("  final μ                %.6e\n", output.μ)
+    @printf("  feasibility error      %.6e\n", output.feasibility_error)
     @printf("  KLU singular retries   %d\n", output.klu_singular_retries)
     @printf("  SVD fallbacks          %d\n", output.svd_fallback_count)
 
@@ -311,9 +321,9 @@ function report_explicit_three_player(result)
     end
     @printf("  max violation          %.6e\n", result.max_violation)
 
-    println("\n-- Distance to the known solution -------------------------------")
-    @printf("  ‖x - x*‖∞              %.6e\n", norm(primals .- case.expected, Inf))
-    @printf("  ‖x - x*‖₂              %.6e\n", norm(primals .- case.expected, 2))
+    println("\n-- Distance to hard-inequality primal reference -----------------")
+    @printf("  ‖x - x_hard‖∞          %.6e\n", norm(primals .- reference_primals, Inf))
+    @printf("  ‖x - x_hard‖₂          %.6e\n", norm(primals .- reference_primals, 2))
 
     println("\n-- Dual and slack blocks ----------------------------------------")
     _min = v -> isempty(v) ? "     —" : @sprintf("%.6e", minimum(v))
@@ -340,7 +350,7 @@ end
 """
     compare_formulations(results)
 
-Print the two formulations side by side. `results` maps a formulation symbol to
+Print the three formulations side by side. `results` maps a formulation symbol to
 the tuple returned by [`solve_explicit_three_player`](@ref).
 
 The rows worth watching when inequality rows are commented out of
@@ -350,37 +360,46 @@ The rows worth watching when inequality rows are commented out of
     constraint is enforced exactly. The preference solve cannot: `(-g)^(level+2)`
     is flat to high order at the boundary, so a small residual still permits a
     sizeable violation.
-  - `‖x - x*‖∞` — how far each formulation lands from the closed-form solution
-    of the *hard-constrained* problem.
+  - `‖x - x_hard‖∞` — how far each preference formulation lands from the primal
+    vector returned by the hard-inequality solve in this same run.
   - `KKT unknowns / equations` — the preference formulation is underdetermined,
     which is why its residual stalls rather than converging.
 """
 function compare_formulations(results)
-    order = (:hard_inequality, :innermost_preference)
-    labels = ("hard inequality", "innermost preference")
+    order = (
+        :hard_inequality,
+        :innermost_preference,
+        :innermost_preference_augmented,
+    )
+    labels = ("hard inequality", "preference", "preference + feasibility")
+    reference_primals = results[:hard_inequality].primals
 
     println("\n", "=" ^ 72)
     println("Formulation comparison")
     println("=" ^ 72)
-    @printf("  %-24s %22s %22s\n", "", labels[1], labels[2])
+    @printf("  %-24s %22s %22s %22s\n", "", labels...)
 
     # `Format` is built at runtime because each row carries its own spec;
     # `@sprintf` would need the format to be a literal.
     row(name, spec, f) = @printf(
-        "  %-24s %22s %22s\n",
+        "  %-24s %22s %22s %22s\n",
         name,
         format(Format(spec), f(results[order[1]])),
         format(Format(spec), f(results[order[2]])),
+        format(Format(spec), f(results[order[3]])),
     )
 
     row("status", "%s", r -> r.output.status)
     row("KKT equations", "%d", r -> r.kkt.kkt_dimension)
     row("KKT unknowns", "%d", r -> r.kkt.variable_dimension)
     row("total iterations", "%d", r -> r.output.total_iters)
+    row("elapsed solve time (s)", "%.6f", r -> r.elapsed_solve_time)
     row("final KKT error", "%.6e", r -> r.output.kkt_error)
     row("‖F(z_returned)‖₂", "%.6e", r -> r.residual_norm)
     row("max violation", "%.6e", r -> r.max_violation)
-    row("‖x - x*‖∞", "%.6e", r -> norm(r.primals .- r.case.expected, Inf))
+    row("‖x - x_hard‖∞", "%.6e", r -> norm(r.primals .- reference_primals, Inf))
+    row("final μ", "%.6e", r -> r.output.μ)
+    row("feasibility error", "%.6e", r -> r.output.feasibility_error)
     row("interior-point slacks", "%d", r -> length(r.output.σ))
     row("inequality duals", "%d", r -> length(r.output.γ))
     row("preference slacks", "%d", r -> length(r.output.s))
@@ -392,21 +411,230 @@ function compare_formulations(results)
         )
     end
 
-    primal_gap = norm(results[order[1]].primals .- results[order[2]].primals, Inf)
-    @printf("\n  ‖x_hard - x_preference‖∞  %.6e\n", primal_gap)
     println("=" ^ 72)
 
     return nothing
 end
 
-results = Dict(
-    formulation => solve_explicit_three_player(; formulation) for
-    formulation in (:hard_inequality, :innermost_preference)
+"Map positive history values to base-10 logarithms, leaving invalid values as gaps."
+_positive_log10(values) = [
+    isfinite(value) && value > 0 ? log10(value) : NaN for value in values
+]
+
+"""
+    save_step_history_comparison(results; path)
+
+Write one PDF comparing the raw Newton-direction norm and accepted backtracking
+factor for the hard, preference, and feasibility-augmented preference solves.
+Every recorded iteration is passed to CairoMakie; rasterizing the line artists
+keeps the PDF compact even for very long solves.
+"""
+function save_step_history_comparison(
+    results;
+    path = joinpath(
+        @__DIR__,
+        "..",
+        "output",
+        "pdf",
+        "explicit_three_player_step_history.pdf",
+    ),
+)
+    if !CAIRO_MAKIE_AVAILABLE
+        @warn "CairoMakie is unavailable; run with `julia --project=experiments test/explicit_three_player_solve.jl` to generate the step-history PDF."
+        return nothing
+    end
+
+    order = (
+        :hard_inequality,
+        :innermost_preference,
+        :innermost_preference_augmented,
+    )
+    labels = Dict(
+        :hard_inequality => "Hard inequality",
+        :innermost_preference => "Innermost preference",
+        :innermost_preference_augmented => "Preference + feasibility",
+    )
+    colors = Dict(
+        :hard_inequality => :black,
+        :innermost_preference => :dodgerblue,
+        :innermost_preference_augmented => :orangered,
+    )
+    figure = CairoMakie.Figure(
+        size = (1050, 780),
+        fonts = (;
+            regular = "TeX Gyre Termes Makie",
+            bold = "TeX Gyre Termes Makie",
+        ),
+    )
+    direction_axis = CairoMakie.Axis(
+        figure[1, 1];
+        title = "Explicit three-player solve: Newton step histories",
+        ylabel = "log₁₀ ‖δzₖ‖₂",
+        xscale = log10,
+    )
+    alpha_axis = CairoMakie.Axis(
+        figure[2, 1];
+        xlabel = "accepted Newton iteration (log scale)",
+        ylabel = "log₁₀ αₖ",
+        xscale = log10,
+    )
+
+    for key in order
+        output = results[key].output
+        direction_norms = output.delta_z_norm_history
+        alphas = output.alpha_history
+        @assert length(direction_norms) == length(alphas)
+        iterations = collect(1:length(alphas))
+        CairoMakie.lines!(
+            direction_axis,
+            iterations,
+            _positive_log10(direction_norms);
+            color = colors[key],
+            linewidth = 2,
+            label = labels[key],
+            rasterize = 2,
+        )
+        CairoMakie.lines!(
+            alpha_axis,
+            iterations,
+            _positive_log10(alphas);
+            color = colors[key],
+            linewidth = 2,
+            rasterize = 2,
+        )
+    end
+
+    CairoMakie.axislegend(direction_axis; position = :lb, framevisible = false)
+    CairoMakie.linkxaxes!(direction_axis, alpha_axis)
+    CairoMakie.hidexdecorations!(direction_axis; grid = false)
+    CairoMakie.rowgap!(figure.layout, 14)
+
+    mkpath(dirname(path))
+    CairoMakie.save(path, figure)
+    return abspath(path)
+end
+
+"""
+    save_kkt_error_history_comparison(results; path)
+
+Write one PDF comparing the KKT residual norm at every accepted iteration for
+the same three solves and with the same color assignment as the step-history
+figure.
+"""
+function save_kkt_error_history_comparison(
+    results;
+    path = joinpath(
+        @__DIR__,
+        "..",
+        "output",
+        "pdf",
+        "explicit_three_player_kkt_error_history.pdf",
+    ),
+)
+    if !CAIRO_MAKIE_AVAILABLE
+        @warn "CairoMakie is unavailable; run with `julia --project=experiments test/explicit_three_player_solve.jl` to generate the KKT-error PDF."
+        return nothing
+    end
+
+    order = (
+        :hard_inequality,
+        :innermost_preference,
+        :innermost_preference_augmented,
+    )
+    labels = Dict(
+        :hard_inequality => "Hard inequality",
+        :innermost_preference => "Innermost preference",
+        :innermost_preference_augmented => "Preference + feasibility",
+    )
+    colors = Dict(
+        :hard_inequality => :black,
+        :innermost_preference => :dodgerblue,
+        :innermost_preference_augmented => :orangered,
+    )
+
+    figure = CairoMakie.Figure(
+        size = (1050, 520),
+        fonts = (;
+            regular = "TeX Gyre Termes Makie",
+            bold = "TeX Gyre Termes Makie",
+        ),
+    )
+    axis = CairoMakie.Axis(
+        figure[1, 1];
+        title = "Explicit three-player solve: KKT residual histories",
+        xlabel = "accepted Newton iteration (log scale)",
+        ylabel = "log₁₀ ‖F(zₖ)‖₂",
+        xscale = log10,
+    )
+
+    for key in order
+        errors = results[key].output.kkt_error_history
+        iterations = collect(1:length(errors))
+        CairoMakie.lines!(
+            axis,
+            iterations,
+            _positive_log10(errors);
+            color = colors[key],
+            linewidth = 2,
+            label = labels[key],
+            rasterize = 2,
+        )
+    end
+
+    CairoMakie.axislegend(axis; position = :lb, framevisible = false)
+    mkpath(dirname(path))
+    CairoMakie.save(path, figure)
+    return abspath(path)
+end
+
+hard_options = default_interior_point_options(; record_convergence = true)
+preference_options = default_interior_point_options(;
+    η₀ = 1e-6,
+    record_convergence = true,
+)
+augmented_preference_options = default_interior_point_options(;
+    η₀ = 1e-6,
+    use_feasibility_merit = true,
+    μ₀ = 1.0,
+    μ_max = 1e4,
+    mu_growth = 10.0,
+    record_convergence = true,
 )
 
-for formulation in (:hard_inequality, :innermost_preference)
-    report_explicit_three_player(results[formulation])
+results = Dict(
+    :hard_inequality => solve_explicit_three_player(;
+        formulation = :hard_inequality,
+        options = hard_options,
+    ),
+    :innermost_preference => solve_explicit_three_player(;
+        formulation = :innermost_preference,
+        options = preference_options,
+    ),
+    :innermost_preference_augmented => solve_explicit_three_player(;
+        formulation = :innermost_preference,
+        options = augmented_preference_options,
+    ),
+)
+
+reference_primals = results[:hard_inequality].primals
+for label in (:hard_inequality, :innermost_preference, :innermost_preference_augmented)
+    report_explicit_three_player(results[label]; label, reference_primals)
     println()
 end
 
 compare_formulations(results)
+
+step_history_pdf = save_step_history_comparison(results)
+!isnothing(step_history_pdf) && println("\nStep-history PDF written to $step_history_pdf")
+kkt_error_history_pdf = save_kkt_error_history_comparison(results)
+!isnothing(kkt_error_history_pdf) &&
+    println("KKT-error-history PDF written to $kkt_error_history_pdf")
+
+@test results[:innermost_preference_augmented].max_violation <
+      results[:innermost_preference].max_violation
+for result in values(results)
+    @test !isempty(result.output.alpha_history)
+    @test length(result.output.delta_z_norm_history) ==
+          length(result.output.alpha_history)
+    @test length(result.output.kkt_error_history) == length(result.output.alpha_history)
+end

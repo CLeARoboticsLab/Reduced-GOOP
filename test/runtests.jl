@@ -346,6 +346,7 @@ end
 	@test fdgen.variable_dimension == native.variable_dimension
 	@test fdgen_chunked.kkt_dimension == native.kkt_dimension
 	@test fdgen_chunked.variable_dimension == native.variable_dimension
+	@test all(col -> col in native.primal_dims, native.∇innermost_preference_z!.cols)
 
 	reference_symbolic_jacobian = ReducedGOOP.SymbolicTracingUtils.sparse_jacobian(
 		native.F_symbolic,
@@ -373,12 +374,33 @@ end
 		fdgen_chunked.F!(F_fd_chunked, z; θ, ϵ, η)
 		@test isapprox(F_native, F_fd_chunked; atol = 1e-12, rtol = 1e-12)
 
+		q = native.innermost_preference_dimension
+		@test q == fdgen.innermost_preference_dimension ==
+			  fdgen_chunked.innermost_preference_dimension
+		c_native = zeros(q)
+		c_fd = zeros(q)
+		c_fd_chunked = zeros(q)
+		native.innermost_preference!(c_native, z; θ, ϵ, η)
+		fdgen.innermost_preference!(c_fd, z; θ, ϵ, η)
+		fdgen_chunked.innermost_preference!(c_fd_chunked, z; θ, ϵ, η)
+		@test isapprox(c_native, c_fd; atol = 1e-12, rtol = 1e-12)
+		@test isapprox(c_native, c_fd_chunked; atol = 1e-12, rtol = 1e-12)
+
 		J_fd_chunked = copy(fdgen_chunked.∇F_z!.result_buffer)
 		native.∇F_z!(J_native, z; θ, ϵ, η)
 		fdgen.∇F_z!(J_fd, z; θ, ϵ, η)
 		fdgen_chunked.∇F_z!(J_fd_chunked, z; θ, ϵ, η)
 		@test isapprox(J_native, J_fd; atol = 1e-12, rtol = 1e-12)
 		@test isapprox(J_native, J_fd_chunked; atol = 1e-12, rtol = 1e-12)
+
+		C_native = copy(native.∇innermost_preference_z!.result_buffer)
+		C_fd = copy(fdgen.∇innermost_preference_z!.result_buffer)
+		C_fd_chunked = copy(fdgen_chunked.∇innermost_preference_z!.result_buffer)
+		native.∇innermost_preference_z!(C_native, z; θ, ϵ, η)
+		fdgen.∇innermost_preference_z!(C_fd, z; θ, ϵ, η)
+		fdgen_chunked.∇innermost_preference_z!(C_fd_chunked, z; θ, ϵ, η)
+		@test isapprox(C_native, C_fd; atol = 1e-12, rtol = 1e-12)
+		@test isapprox(C_native, C_fd_chunked; atol = 1e-12, rtol = 1e-12)
 	end
 end
 
@@ -446,6 +468,115 @@ end
 
 			@test isapprox(δz_klu, δz_svd; rtol = 1e-8)
 		end
+	end
+
+	@testset "Feasibility-augmented direction and fixed-pattern update" begin
+		J = ReducedGOOP.SparseArrays.sparse(
+			[1, 2, 1, 2],
+			[1, 1, 2, 3],
+			[1.0, -0.5, 2.0, 1.5],
+			2,
+			3,
+		)
+		C = ReducedGOOP.SparseArrays.sparse(
+			[1, 2, 1, 2],
+			[1, 1, 2, 3],
+			[1.5, -1.0, 0.25, 2.0],
+			2,
+			3,
+		)
+		F = [0.7, -1.2]
+		c = [-0.4, 0.3]
+		η = 2e-3
+		μ = 3.0
+
+		feasibility_cache =
+			ReducedGOOP._build_feasibility_augmentation_cache(J, C, 2, 2, 3)
+		feasibility_cache.c .= c
+		ReducedGOOP._constraint_violation!(
+			feasibility_cache.bar_c,
+			feasibility_cache.c,
+		)
+		ReducedGOOP._update_feasibility_augmentation!(
+			feasibility_cache,
+			J,
+			C,
+			F,
+			μ,
+		)
+		augmented_cache =
+			ReducedGOOP._build_augmented_kkt_cache(feasibility_cache.J_aug, 4, 3)
+		ReducedGOOP._update_augmented_kkt!(
+			augmented_cache,
+			feasibility_cache.J_aug,
+			η,
+		)
+		δz = zeros(3)
+		ReducedGOOP._solve_augmented!(δz, augmented_cache, feasibility_cache.F_aug)
+
+		function dense_reference(J, C, F, c, η, μ)
+			bar_c = max.(-c, 0.0)
+			bar_C = zeros(size(C))
+			for row in axes(C, 1)
+				if c[row] < 0
+					bar_C[row, :] .= -C[row, :]
+				end
+			end
+			J_dense = Matrix(J)
+			C_dense = Matrix(bar_C)
+			-(J_dense' * J_dense + μ * C_dense' * C_dense + η * ReducedGOOP.LinearAlgebra.I) \
+			 (J_dense' * F + μ * C_dense' * bar_c)
+		end
+
+		@test isapprox(δz, dense_reference(J, C, F, c, η, μ); rtol = 1e-10)
+		ReducedGOOP.LinearAlgebra.mul!(
+			feasibility_cache.J_aug_δz,
+			feasibility_cache.J_aug,
+			δz,
+		)
+		slope = ReducedGOOP.LinearAlgebra.dot(
+			feasibility_cache.F_aug,
+			feasibility_cache.J_aug_δz,
+		)
+		@test isapprox(
+			slope,
+			-ReducedGOOP.LinearAlgebra.dot(
+				feasibility_cache.J_aug_δz,
+				feasibility_cache.J_aug_δz,
+			) - η * ReducedGOOP.LinearAlgebra.dot(δz, δz);
+			atol = 1e-11,
+			rtol = 1e-10,
+		)
+
+		# Change both the active row and the penalty while preserving the exact
+		# J_aug and KLU cache objects (numeric klu! refactorization only).
+		J_aug_object = feasibility_cache.J_aug
+		K_object = augmented_cache.K
+		klu_factorization_object = augmented_cache.klu_fact[]
+		c .= [0.2, -0.5]
+		μ = 11.0
+		feasibility_cache.c .= c
+		ReducedGOOP._constraint_violation!(
+			feasibility_cache.bar_c,
+			feasibility_cache.c,
+		)
+		ReducedGOOP._update_feasibility_augmentation!(
+			feasibility_cache,
+			J,
+			C,
+			F,
+			μ,
+		)
+		ReducedGOOP._update_augmented_kkt!(
+			augmented_cache,
+			feasibility_cache.J_aug,
+			η,
+		)
+		ReducedGOOP._solve_augmented!(δz, augmented_cache, feasibility_cache.F_aug)
+		@test feasibility_cache.J_aug === J_aug_object
+		@test augmented_cache.K === K_object
+		@test augmented_cache.klu_fact[] === klu_factorization_object
+		@test isapprox(δz, dense_reference(J, C, F, c, η, μ); rtol = 1e-10)
 	end
 
 	@testset "Solve-level agreement between :svd and :klu" begin
