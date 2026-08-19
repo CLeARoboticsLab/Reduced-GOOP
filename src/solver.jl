@@ -5,6 +5,7 @@ struct InteriorPoint <: SolverType end
 
 Base.@kwdef struct InteriorPointOptions
     tol::Float64
+    feasibility_tol::Float64 = 1e-3
     η₀::Float64
     ϵ₀::Union{Float64,Symbol}
     max_inner_iters::Int
@@ -62,6 +63,8 @@ Keyword arguments:
     - `options::InteriorPointOptions`: solver and diagnostic settings.
 
 Selected `InteriorPointOptions` fields:
+    - `feasibility_tol::Float64 = 1e-3`: maximum innermost-preference constraint
+      violation accepted by feasibility-merit convergence.
     - `record_convergence`: record KKT-error, η, raw direction norm, accepted
       step-size, and gain-ratio histories.
     - `record_condition_number`: record dense-SVD condition-number history.
@@ -94,6 +97,7 @@ function solve(
     options::InteriorPointOptions,
 )
     tol = options.tol
+    feasibility_tol = options.feasibility_tol
     η₀ = options.η₀
     ϵ₀ = options.ϵ₀
     max_inner_iters = options.max_inner_iters
@@ -141,6 +145,7 @@ function solve(
     end
     # merit function prototype currently does not support dense :svd, fraction-to-boundary linesearch, factorization reuse, complete KKT system, or zero innermost-preference dimension.
     if use_feasibility_merit
+        feasibility_tol > 0 || throw(ArgumentError("feasibility_tol must be positive."))
         μ₀ > 0 || throw(ArgumentError("μ₀ must be positive."))
         μ_max >= μ₀ || throw(ArgumentError("μ_max must be at least μ₀."))
         mu_growth >= 1 || throw(ArgumentError("mu_growth must be at least 1."))
@@ -207,6 +212,7 @@ function solve(
         Jδz = zeros(mcp.kkt_dimension)
         z_trial = similar(z)
         δz = zeros(mcp.variable_dimension)
+        merit_gradient = use_feasibility_merit ? similar(δz) : nothing
         δx = @view δz[x_dims]
         δs = @view δz[mcp.preference_slack_dims]
         δσ = @view δz[mcp.interior_point_slack_dims]
@@ -288,6 +294,9 @@ function solve(
         inner_iters = 1
         outer_iters = 1
         kkt_error = Inf
+        merit_stationarity = Inf
+        feasibility_error = Inf
+        stopping_criterion = false
         is_fraction_to_boundary_linesearch = (linesearch == :fraction_to_boundary)
         kkt_error_history = Float64[]
         condition_number_history = Float64[]
@@ -304,11 +313,16 @@ function solve(
 
         verbose && @info "Outer iteration $(outer_iters): ϵ = $ϵ, kkt_error = $kkt_error"
 
-        while inner_iters < max_inner_iters && (kkt_error > tol) # (!is_fraction_to_boundary_linesearch || kkt_error > tol)
+        while inner_iters < max_inner_iters && (use_feasibility_merit || kkt_error > tol)
             @timeit TO "inner iteration loop" begin
                 total_iters += 1
                 # Compute the residual at the current iterate
                 @timeit TO "residual evaluation" mcp.F!(F, z; θ, ϵ, η = 0.0)
+                kkt_error = norm(F, 2)
+                if !use_feasibility_merit
+                    stopping_criterion = kkt_error <= tol
+                    stopping_criterion && break
+                end
                 # @assert all(.!isnan.(F)) "Found NaN in F - aborting!"
                 verbose && println("inner iter $inner_iters")
                 condition_number = NaN
@@ -404,7 +418,7 @@ function solve(
                 else
                     # Backtracking linesearch: if the line search exhausts at the current η,
                     # grow η and re-solve the Newton step rather than failing outright.
-                    F_z = norm(F, 2)
+                    F_z = kkt_error
                     eta_retries = 0
                     reused_jacobian = false
                     needs_refactor = true
@@ -461,6 +475,21 @@ function solve(
                                         feasibility_cache.J_aug,
                                         η,
                                     )
+                                end
+                                mul!(
+                                    merit_gradient,
+                                    transpose(feasibility_cache.J_aug),
+                                    feasibility_cache.F_aug,
+                                )
+                                merit_stationarity = norm(merit_gradient, Inf)
+                                feasibility_error =
+                                    _violation_norm_inf(feasibility_cache.c)
+                                stopping_criterion =
+                                    merit_stationarity <= tol &&
+                                    feasibility_error <= feasibility_tol
+                                if stopping_criterion
+                                    status = :merit_stationarity
+                                    break
                                 end
                             else
                                 @timeit TO "KKT system assembly" _update_augmented_kkt!(
@@ -761,7 +790,7 @@ function solve(
                         break
                     end
 
-                    F .= F_trial
+                    # Update μ for feasibility merit if constraint violation is not decreasing sufficiently.
                     if use_feasibility_merit
                         old_violation = _norm2(feasibility_cache.bar_c)
                         new_violation = _norm2(feasibility_cache.bar_c_trial)
@@ -828,19 +857,10 @@ function solve(
                     @. σ += α_σ * δσ
                     @. γ += α_γ * δγ
 
-                    # The backtracking branch already evaluated the residual at the
-                    # accepted trial point and copied it into `F`, so `F` matches the
-                    # iterate just written. The fraction-to-boundary branch evaluates no
-                    # trial residual at all: without this refresh `F` would still hold
-                    # F(z) from *before* the step, and `kkt_error` — together with the
-                    # `:solved`/`:failed` verdict and the loop's stopping test — would
-                    # describe a point the solver does not return. That lag is not
-                    # cosmetic: a step taken from an already-converged iterate can land
-                    # somewhere far worse, and the solve would still report the old,
-                    # small residual (observed: reported 7.16e-9 against an actual
-                    # 7.13e-5 at the returned `z`). #TODO: 이거 더 이쁘지 만들 수 있을 듯
                     if is_fraction_to_boundary_linesearch
                         @timeit TO "residual evaluation" mcp.F!(F, z; θ, ϵ, η = 0.0)
+                    else
+                        F .= F_trial # backtracking linesearch already evaluated the accepted point so reuse
                     end
 
                     kkt_error = norm(F, 2)
@@ -865,6 +885,10 @@ function solve(
             end
         end
 
+        if status === :merit_stationarity
+            break
+        end
+
         if linesearch == :fraction_to_boundary
             if kkt_error <= ϵ <= tol
                 break
@@ -880,16 +904,48 @@ function solve(
         outer_iters += 1
     end
 
-    # Evaluate final convergence unconditionally — the outer_iters == max_outer_iters
-    # check was unreachable when max_outer_iters=1 because the loop increments
-    # outer_iters to 2 before the check.
-    status = (kkt_error <= tol) ? :solved : :failed
+    # Evaluate stopping criterion/convergence at the returned iterate.
+    @timeit TO "residual evaluation" mcp.F!(F, z; θ, ϵ, η = 0.0)
+    kkt_error = norm(F, 2)
     final_μ = use_feasibility_merit ? μ : 0.0
-    feasibility_error = if use_feasibility_merit
-        mcp.innermost_preference!(feasibility_cache.c, z; θ, ϵ, η = 0.0)
-        _violation_norm_inf(feasibility_cache.c)
+    if use_feasibility_merit
+        @timeit TO "Jacobian evaluation" mcp.∇F_z!(∇F, z; θ, ϵ, η = 0.0)
+        @timeit TO "innermost preference evaluation" begin
+            mcp.innermost_preference!(feasibility_cache.c, z; θ, ϵ, η = 0.0)
+            mcp.∇innermost_preference_z!(
+                preference_jacobian,
+                z;
+                θ,
+                ϵ,
+                η = 0.0,
+            )
+            _constraint_violation!(feasibility_cache.bar_c, feasibility_cache.c)
+        end
+        @timeit TO "KKT system assembly" _update_feasibility_augmentation!(
+            feasibility_cache,
+            ∇F,
+            preference_jacobian,
+            F,
+            μ,
+        )
+        mul!(
+            merit_gradient,
+            transpose(feasibility_cache.J_aug),
+            feasibility_cache.F_aug,
+        )
+        merit_stationarity = norm(merit_gradient, Inf)
+        feasibility_error = _violation_norm_inf(feasibility_cache.c)
+        stopping_criterion =
+            merit_stationarity <= tol && feasibility_error <= feasibility_tol
     else
-        NaN
+        merit_stationarity = NaN
+        feasibility_error = NaN
+        stopping_criterion = kkt_error <= tol
+    end
+    status = if use_feasibility_merit
+        stopping_criterion ? :merit_stationarity : :failed
+    else
+        kkt_error <= tol ? :solved : :failed
     end
 
     result = (;

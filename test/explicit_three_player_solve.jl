@@ -5,9 +5,8 @@
 #
 #     julia --project=experiments test/explicit_three_player_solve.jl
 #
-# The experiments environment supplies CairoMakie for the step-history PDF.
-# Running with `--project=.` still performs the solves and tests, but skips the
-# PDF with a warning because CairoMakie is intentionally not a root dependency.
+# The experiments environment supplies CairoMakie for the history PDFs and
+# NonlinearSolve for the full hard-KKT warm-start comparison.
 #
 # Edit `build_explicit_three_player_problem` below and rerun; every number in
 # the report is recomputed from the problem definition, so nothing has to be
@@ -20,8 +19,10 @@
 using Printf: @printf, @sprintf, Format, format
 
 using BlockArrays: Block, BlockArray
-using LinearAlgebra: norm
+using LinearAlgebra: ColumnNorm, norm
+using NonlinearSolve
 using ReducedGOOP
+using SparseArrays: nonzeros, nzrange, rowvals
 
 const CAIRO_MAKIE_AVAILABLE = !isnothing(Base.find_package("CairoMakie"))
 if CAIRO_MAKIE_AVAILABLE
@@ -36,10 +37,9 @@ end
 # only imports the helper instead of running a second suite.
 if !@isdefined(innermost_preference_inequality_goop)
     const RUN_QUASI_VS_REDUCED_TESTSET = false
-    include(joinpath(@__DIR__, "quasi_vs_reduced_preference_inequality.jl"))
+    includet(joinpath(@__DIR__, "quasi_vs_reduced_preference_inequality.jl"))
 end
 
-"Human-readable name for each preference level, outermost first."
 const LEVEL_NAMES = ("outermost", "middle", "innermost")
 
 #=
@@ -416,6 +416,212 @@ function compare_formulations(results)
     return nothing
 end
 
+"""
+    solve_hard_kkt_with_nonlinear_solve(hard_result, preference_result)
+
+Solve the complete hard-inequality KKT system with `NonlinearSolve`, using only
+the feasibility-augmented preference primal as a warm start. All hard-system
+primal, slack, and dual coordinates remain free. The hard-only coordinates use
+the same neutral initialization as the interior-point solver: positive slack
+and inequality-dual blocks start at one, while unrestricted duals start at zero.
+
+The solve uses the same positive `epsilon` as the interior-point reference.
+Nonnegative KKT coordinates are parameterized as `z_i = u_i^2`. The positive
+perturbed-complementarity target keeps the converged slacks and inequality
+multipliers strictly positive without the poor near-zero scaling of `exp(u_i)`.
+"""
+function solve_hard_kkt_with_nonlinear_solve(
+    hard_result,
+    preference_result;
+    epsilon = hard_result.output.ϵ,
+    abstol = 1e-8,
+    reltol = 1e-8,
+    maxiters = 2000,
+)
+    hard_kkt = hard_result.kkt
+    problem = hard_result.case.problem
+    epsilon > 0 || throw(ArgumentError("epsilon must be positive for a strictly interior hard-KKT solve."))
+
+    z = zeros(hard_kkt.variable_dimension)
+    z[hard_kkt.primal_dims] .= preference_result.primals
+    z[hard_kkt.preference_slack_dims] .= 1.0
+    z[hard_kkt.interior_point_slack_dims] .= 1.0
+    z[hard_kkt.inequality_constraint_dual_dims] .= 1.0
+
+    positive_coordinate = falses(hard_kkt.variable_dimension)
+    positive_coordinate[hard_kkt.preference_slack_dims] .= true
+    positive_coordinate[hard_kkt.interior_point_slack_dims] .= true
+    positive_coordinate[hard_kkt.inequality_constraint_dual_dims] .= true
+
+    u0 = copy(z)
+    for index in eachindex(u0)
+        if positive_coordinate[index]
+            u0[index] = sqrt(z[index])
+        end
+    end
+
+    theta = zeros(sum(problem.parameter_dims))
+    residual = zeros(hard_kkt.kkt_dimension)
+    initial_residual = similar(residual)
+    full_jacobian = copy(hard_kkt.∇F_z!.result_buffer)
+    transformed_jacobian = zeros(hard_kkt.kkt_dimension, hard_kkt.variable_dimension)
+    full_rows = rowvals(full_jacobian)
+    full_values = nonzeros(full_jacobian)
+
+    function unpack!(u)
+        for index in eachindex(z, u)
+            z[index] = positive_coordinate[index] ? u[index]^2 : u[index]
+        end
+        return nothing
+    end
+
+    function hard_residual!(result, u, _)
+        unpack!(u)
+        hard_kkt.F!(result, z; θ = theta, ϵ = epsilon, η = 0.0)
+        return nothing
+    end
+
+    function hard_jacobian!(result, u, _)
+        unpack!(u)
+        hard_kkt.∇F_z!(full_jacobian, z; θ = theta, ϵ = epsilon, η = 0.0)
+        fill!(result, 0.0)
+        for column in 1:hard_kkt.variable_dimension
+            chain_scale = positive_coordinate[column] ? 2.0 * u[column] : 1.0
+            for stored_index in nzrange(full_jacobian, column)
+                result[full_rows[stored_index], column] =
+                    chain_scale * full_values[stored_index]
+            end
+        end
+        return nothing
+    end
+
+    hard_residual!(initial_residual, u0, nothing)
+    nonlinear_function = NonlinearFunction(
+        hard_residual!;
+        jac = hard_jacobian!,
+        jac_prototype = transformed_jacobian,
+        resid_prototype = residual,
+    )
+    least_squares_problem = NonlinearLeastSquaresProblem(nonlinear_function, u0)
+    local solution
+    elapsed_time = @elapsed solution = solve(
+        least_squares_problem,
+        LevenbergMarquardt(
+            disable_geodesic = true,
+            linsolve = NonlinearSolve.LinearSolve.QRFactorization(ColumnNorm()),
+        );
+        abstol,
+        reltol,
+        maxiters,
+    )
+
+    unpack!(solution.u)
+    hard_kkt.F!(residual, z; θ = theta, ϵ = epsilon, η = 0.0)
+    hard_jacobian!(transformed_jacobian, solution.u, nothing)
+    least_squares_gradient = transpose(transformed_jacobian) * residual
+
+    primals = copy(z[hard_kkt.primal_dims])
+    x_blocks = BlockArray(primals, hard_result.case.primal_dims)
+    theta_blocks = BlockArray(theta, problem.parameter_dims)
+    constraints = [
+        problem.inequality_constraints[player](x_blocks, theta_blocks) for
+        player in 1:problem.num_players
+    ]
+    minimum_constraint = minimum(
+        value for player_constraints in constraints for value in player_constraints
+    )
+    maximum_violation = maximum(
+        max(-value, 0.0) for player_constraints in constraints for value in player_constraints
+    )
+    sigma = @view z[hard_kkt.interior_point_slack_dims]
+    gamma = @view z[hard_kkt.inequality_constraint_dual_dims]
+    complementarity_error = maximum(
+        abs(sigma[index] * gamma[index] - epsilon) for index in eachindex(sigma, gamma)
+    )
+
+    return (;
+        solution,
+        z,
+        primals,
+        constraints,
+        residual,
+        epsilon,
+        elapsed_time,
+        initial_kkt_error = norm(initial_residual, 2),
+        kkt_error = norm(residual, 2),
+        residual_inf = norm(residual, Inf),
+        least_squares_gradient_inf = norm(least_squares_gradient, Inf),
+        minimum_constraint,
+        maximum_violation,
+        minimum_sigma = minimum(sigma),
+        minimum_gamma = minimum(gamma),
+        complementarity_error,
+    )
+end
+
+"Compare the full hard-KKT NonlinearSolve result with the interior-point solve."
+function report_hard_kkt_nonlinear_comparison(hard_result, preference_result, nonlinear_result)
+    hard_kkt = hard_result.kkt
+    warmstart_movement = norm(nonlinear_result.primals .- preference_result.primals, Inf)
+    interior_point_distance = norm(nonlinear_result.primals .- hard_result.primals, Inf)
+    full_kkt_variable_distance = norm(nonlinear_result.z .- hard_result.output.z, Inf)
+    sigma_distance = norm(
+        nonlinear_result.z[hard_kkt.interior_point_slack_dims] .-
+        hard_result.output.z[hard_kkt.interior_point_slack_dims],
+        Inf,
+    )
+    gamma_distance = norm(
+        nonlinear_result.z[hard_kkt.inequality_constraint_dual_dims] .-
+        hard_result.output.z[hard_kkt.inequality_constraint_dual_dims],
+        Inf,
+    )
+
+    println("\n", "=" ^ 72)
+    println("Full hard-KKT solve warm-started from preference + feasibility primals")
+    println("=" ^ 72)
+    @printf(
+        "  hard system                    %d equations, %d variables\n",
+        hard_kkt.kkt_dimension,
+        hard_kkt.variable_dimension,
+    )
+    @printf("  warm-start max violation       %.6e\n", preference_result.max_violation)
+    @printf("  hard-KKT epsilon               %.6e\n", nonlinear_result.epsilon)
+    @printf("  NonlinearSolve retcode         %s\n", nonlinear_result.solution.retcode)
+    @printf("  NonlinearSolve iterations      %d\n", nonlinear_result.solution.stats.nsteps)
+    @printf("  NonlinearSolve time (s)        %.6f\n", nonlinear_result.elapsed_time)
+
+    println("\n  NonlinearSolve hard-KKT result")
+    println("    primal soln from NonlinearSolve  ", nonlinear_result.primals)
+    @printf("    initial KKT residual         %.6e\n", nonlinear_result.initial_kkt_error)
+    @printf(
+        "    final KKT residual           %.6e  (∞-norm %.6e)\n",
+        nonlinear_result.kkt_error,
+        nonlinear_result.residual_inf,
+    )
+    @printf("    ‖J_u' F‖∞                   %.6e\n", nonlinear_result.least_squares_gradient_inf)
+    @printf("    minimum original constraint  %.6e\n", nonlinear_result.minimum_constraint)
+    @printf("    maximum original violation   %.6e\n", nonlinear_result.maximum_violation)
+    @printf("    minimum sigma                %.6e\n", nonlinear_result.minimum_sigma)
+    @printf("    minimum gamma                %.6e\n", nonlinear_result.minimum_gamma)
+    @printf("    max |sigma_i gamma_i-epsilon| %.6e\n", nonlinear_result.complementarity_error)
+
+    println("\n  Comparison with the interior-point hard solve")
+    @printf("    interior-point status        %s\n", hard_result.output.status)
+    @printf("    interior-point KKT residual  %.6e\n", hard_result.residual_norm)
+    @printf("    interior-point iterations    %d\n", hard_result.output.total_iters)
+    @printf("    interior-point time (s)      %.6f\n", hard_result.elapsed_solve_time)
+    @printf("    ‖x_NLS-x_warm‖∞             %.6e\n", warmstart_movement)
+    @printf("    ‖x_NLS-x_IP‖∞               %.6e\n", interior_point_distance)
+    @printf("    ‖sigma_NLS-sigma_IP‖∞       %.6e\n", sigma_distance)
+    @printf("    ‖gamma_NLS-gamma_IP‖∞       %.6e\n", gamma_distance)
+    @printf("    ‖z_NLS-z_IP‖∞               %.6e\n", full_kkt_variable_distance)
+    @printf(
+        "    NLS primal strictly feasible %s\n",
+        nonlinear_result.minimum_constraint > 0.0 ? "yes" : "no",
+    )
+    println("=" ^ 72)
+    return nothing
+end
 "Map positive history values to base-10 logarithms, leaving invalid values as gaps."
 _positive_log10(values) = [
     isfinite(value) && value > 0 ? log10(value) : NaN for value in values
@@ -624,6 +830,16 @@ end
 
 compare_formulations(results)
 
+hard_kkt_nonlinear_result = solve_hard_kkt_with_nonlinear_solve(
+    results[:hard_inequality],
+    results[:innermost_preference_augmented],
+)
+report_hard_kkt_nonlinear_comparison(
+    results[:hard_inequality],
+    results[:innermost_preference_augmented],
+    hard_kkt_nonlinear_result,
+)
+
 step_history_pdf = save_step_history_comparison(results)
 !isnothing(step_history_pdf) && println("\nStep-history PDF written to $step_history_pdf")
 kkt_error_history_pdf = save_kkt_error_history_comparison(results)
@@ -638,3 +854,18 @@ for result in values(results)
           length(result.output.alpha_history)
     @test length(result.output.kkt_error_history) == length(result.output.alpha_history)
 end
+@test all(
+    >(0.0),
+    hard_kkt_nonlinear_result.z[results[:hard_inequality].kkt.interior_point_slack_dims],
+)
+@test all(
+    >(0.0),
+    hard_kkt_nonlinear_result.z[results[:hard_inequality].kkt.inequality_constraint_dual_dims],
+)
+@test hard_kkt_nonlinear_result.epsilon == results[:hard_inequality].output.ϵ
+@test hard_kkt_nonlinear_result.kkt_error <= hard_kkt_nonlinear_result.initial_kkt_error
+@test hard_kkt_nonlinear_result.maximum_violation == 0.0
+@test hard_kkt_nonlinear_result.minimum_constraint > 0.0
+@test hard_kkt_nonlinear_result.complementarity_error <= 1e-8
+@test hard_kkt_nonlinear_result.least_squares_gradient_inf <= 1e-8
+@test isfinite(hard_kkt_nonlinear_result.kkt_error)
