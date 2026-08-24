@@ -37,7 +37,11 @@ end
 # only imports the helper instead of running a second suite.
 if !@isdefined(innermost_preference_inequality_goop)
     const RUN_QUASI_VS_REDUCED_TESTSET = false
-    includet(joinpath(@__DIR__, "quasi_vs_reduced_preference_inequality.jl"))
+    # `includet` keeps Revise tracking in a REPL session; plain `include` covers
+    # the documented standalone invocation, where Revise is not loaded.
+    (@isdefined(includet) ? includet : include)(
+        joinpath(@__DIR__, "quasi_vs_reduced_preference_inequality.jl"),
+    )
 end
 
 const LEVEL_NAMES = ("outermost", "middle", "innermost")
@@ -725,7 +729,11 @@ end
 
 Write one PDF comparing the KKT residual norm at every accepted iteration for
 the same three solves and with the same color assignment as the step-history
-figure.
+figure. Three further panels track the feasibility-merit solve alone: the merit
+value ‖F_aug(zₖ)‖, the merit-gradient norm ‖J_augᵀF_aug‖∞ (evaluated at the
+start of each iteration, so it lags the accepted iterate by one step), and the
+penalty weight μₖ. Those histories are NaN for the other two solves, so only
+the augmented curve appears there.
 """
 function save_kkt_error_history_comparison(
     results;
@@ -759,25 +767,41 @@ function save_kkt_error_history_comparison(
     )
 
     figure = CairoMakie.Figure(
-        size = (1050, 520),
+        size = (1050, 1180),
         fonts = (;
             regular = "TeX Gyre Termes Makie",
             bold = "TeX Gyre Termes Makie",
         ),
     )
-    axis = CairoMakie.Axis(
+    kkt_axis = CairoMakie.Axis(
         figure[1, 1];
-        title = "Explicit three-player solve: KKT residual histories",
-        xlabel = "accepted Newton iteration (log scale)",
+        title = "Explicit three-player solve: KKT residual and merit histories",
         ylabel = "log₁₀ ‖F(zₖ)‖₂",
+        xscale = log10,
+    )
+    merit_axis = CairoMakie.Axis(
+        figure[2, 1];
+        ylabel = "log₁₀ ‖F_aug(zₖ)‖₂ (merit)",
+        xscale = log10,
+    )
+    merit_gradient_axis = CairoMakie.Axis(
+        figure[3, 1];
+        ylabel = "log₁₀ ‖J_augᵀF_aug‖∞",
+        xscale = log10,
+    )
+    mu_axis = CairoMakie.Axis(
+        figure[4, 1];
+        xlabel = "accepted Newton iteration (log scale)",
+        ylabel = "log₁₀ μₖ",
         xscale = log10,
     )
 
     for key in order
-        errors = results[key].output.kkt_error_history
+        output = results[key].output
+        errors = output.kkt_error_history
         iterations = collect(1:length(errors))
         CairoMakie.lines!(
-            axis,
+            kkt_axis,
             iterations,
             _positive_log10(errors);
             color = colors[key],
@@ -785,9 +809,32 @@ function save_kkt_error_history_comparison(
             label = labels[key],
             rasterize = 2,
         )
+        # The merit histories are NaN except for the feasibility-merit solve, so
+        # these calls draw nothing for the other two formulations.
+        merit_panels = (
+            (merit_axis, output.merit_history),
+            (merit_gradient_axis, output.merit_stationarity_history),
+            (mu_axis, output.mu_history),
+        )
+        for (axis, history) in merit_panels
+            any(isfinite, history) || continue
+            CairoMakie.lines!(
+                axis,
+                collect(1:length(history)),
+                _positive_log10(history);
+                color = colors[key],
+                linewidth = 2,
+                rasterize = 2,
+            )
+        end
     end
 
-    CairoMakie.axislegend(axis; position = :lb, framevisible = false)
+    CairoMakie.axislegend(kkt_axis; position = :lb, framevisible = false)
+    CairoMakie.linkxaxes!(kkt_axis, merit_axis, merit_gradient_axis, mu_axis)
+    for axis in (kkt_axis, merit_axis, merit_gradient_axis)
+        CairoMakie.hidexdecorations!(axis; grid = false)
+    end
+    CairoMakie.rowgap!(figure.layout, 14)
     mkpath(dirname(path))
     CairoMakie.save(path, figure)
     return abspath(path)
@@ -853,7 +900,15 @@ for result in values(results)
     @test length(result.output.delta_z_norm_history) ==
           length(result.output.alpha_history)
     @test length(result.output.kkt_error_history) == length(result.output.alpha_history)
+    @test length(result.output.merit_history) == length(result.output.alpha_history)
+    @test length(result.output.merit_stationarity_history) ==
+          length(result.output.alpha_history)
+    @test length(result.output.mu_history) == length(result.output.alpha_history)
 end
+@test any(isfinite, results[:innermost_preference_augmented].output.merit_history)
+@test any(isfinite, results[:innermost_preference_augmented].output.mu_history)
+@test all(isnan, results[:hard_inequality].output.merit_history)
+@test all(isnan, results[:hard_inequality].output.mu_history)
 @test all(
     >(0.0),
     hard_kkt_nonlinear_result.z[results[:hard_inequality].kkt.interior_point_slack_dims],

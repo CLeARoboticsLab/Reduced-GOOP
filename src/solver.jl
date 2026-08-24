@@ -66,9 +66,10 @@ Selected `InteriorPointOptions` fields:
     - `feasibility_tol::Float64 = 1e-3`: maximum innermost-preference constraint
       violation accepted by feasibility-merit convergence.
     - `record_convergence`: record KKT-error, η, raw direction norm, accepted
-      step-size, and gain-ratio histories.
+      step-size, and gain-ratio histories, plus merit-value, merit-stationarity,
+      and μ histories (NaN outside the feasibility-merit path).
     - `record_condition_number`: record dense-SVD condition-number history.
-    - `linear_solver::Symbol = :svd`: `:svd` (dense SVD with Tikhonov filter) or `:klu`
+    - `linear_solver::Symbol = :klu`: `:svd` (dense SVD with Tikhonov filter) or `:klu`
       (sparse KLU on the balanced augmented system `[√ηI J; Jᵀ -√ηI]`, with one
       symbolic analysis followed by numeric refactorizations). `:klu` does not support
       `record_condition_number`, `tsvd_threshold > 0`, or `use_marquardt_scaling`.
@@ -304,6 +305,9 @@ function solve(
         alpha_history = Float64[]
         delta_z_norm_history = Float64[]
         rho_history = Float64[]
+        merit_history = Float64[]
+        merit_stationarity_history = Float64[]
+        mu_history = Float64[]
         klu_singular_retries = Ref(0)
         svd_fallback_count = Ref(0)
     end
@@ -329,6 +333,9 @@ function solve(
                 # Gain ratio of the accepted step; stays NaN on paths that do not
                 # compute it (fraction-to-boundary linesearch).
                 ρ = NaN
+                # Merit value at the accepted iterate; stays NaN outside the
+                # feasibility-merit path.
+                merit_value = NaN
 
                 if linesearch == :fraction_to_boundary
                     @timeit TO "Jacobian evaluation" mcp.∇F_z!(∇F, z; θ, ϵ, η = 0.0)
@@ -442,48 +449,24 @@ function solve(
                                 η = 0.0,
                             )
                             if use_feasibility_merit
-                                @timeit TO "innermost preference evaluation" begin
-                                    mcp.innermost_preference!(
-                                        feasibility_cache.c,
-                                        z;
-                                        θ,
-                                        ϵ,
-                                        η = 0.0,
-                                    )
-                                    mcp.∇innermost_preference_z!(
-                                        preference_jacobian,
-                                        z;
-                                        θ,
-                                        ϵ,
-                                        η = 0.0,
-                                    )
-                                    _constraint_violation!(
-                                        feasibility_cache.bar_c,
-                                        feasibility_cache.c,
-                                    )
-                                end
-                                @timeit TO "KKT system assembly" begin
-                                    _update_feasibility_augmentation!(
+                                merit_stationarity, feasibility_error =
+                                    _evaluate_feasibility_merit!(
+                                        merit_gradient,
                                         feasibility_cache,
-                                        ∇F,
+                                        mcp,
                                         preference_jacobian,
+                                        ∇F,
                                         F,
+                                        z,
+                                        θ,
+                                        ϵ,
                                         μ,
                                     )
-                                    _update_augmented_kkt!(
-                                        aug_cache,
-                                        feasibility_cache.J_aug,
-                                        η,
-                                    )
-                                end
-                                mul!(
-                                    merit_gradient,
-                                    transpose(feasibility_cache.J_aug),
-                                    feasibility_cache.F_aug,
+                                @timeit TO "KKT system assembly" _update_augmented_kkt!(
+                                    aug_cache,
+                                    feasibility_cache.J_aug,
+                                    η,
                                 )
-                                merit_stationarity = norm(merit_gradient, Inf)
-                                feasibility_error =
-                                    _violation_norm_inf(feasibility_cache.c)
                                 stopping_criterion =
                                     merit_stationarity <= tol &&
                                     feasibility_error <= feasibility_tol
@@ -792,9 +775,11 @@ function solve(
 
                     # Update μ for feasibility merit if constraint violation is not decreasing sufficiently.
                     if use_feasibility_merit
+                        merit_value = sqrt(trial_merit2)
                         old_violation = _norm2(feasibility_cache.bar_c)
                         new_violation = _norm2(feasibility_cache.bar_c_trial)
-                        if old_violation > tol && new_violation >= 0.99 * old_violation
+                        if old_violation > feasibility_tol &&
+                           new_violation >= 0.99 * old_violation
                             μ = min(mu_growth * μ, μ_max)
                         end
                     end
@@ -873,6 +858,15 @@ function solve(
                         push!(alpha_history, min(α_σ, α_γ))
                         push!(delta_z_norm_history, norm(δz, 2))
                         push!(rho_history, ρ)
+                        # `merit_stationarity` was evaluated where the Jacobian was
+                        # assembled (start of this iteration), so it lags the
+                        # accepted iterate by one step; μ is the post-growth value.
+                        push!(merit_history, merit_value)
+                        push!(
+                            merit_stationarity_history,
+                            use_feasibility_merit ? merit_stationarity : NaN,
+                        )
+                        push!(mu_history, use_feasibility_merit ? μ : NaN)
                     end
                     if record_condition_number
                         push!(condition_number_history, condition_number)
@@ -885,7 +879,7 @@ function solve(
             end
         end
 
-        if status === :merit_stationarity
+        if status === :merit_stationarity || status === :solved
             break
         end
 
@@ -910,31 +904,18 @@ function solve(
     final_μ = use_feasibility_merit ? μ : 0.0
     if use_feasibility_merit
         @timeit TO "Jacobian evaluation" mcp.∇F_z!(∇F, z; θ, ϵ, η = 0.0)
-        @timeit TO "innermost preference evaluation" begin
-            mcp.innermost_preference!(feasibility_cache.c, z; θ, ϵ, η = 0.0)
-            mcp.∇innermost_preference_z!(
-                preference_jacobian,
-                z;
-                θ,
-                ϵ,
-                η = 0.0,
-            )
-            _constraint_violation!(feasibility_cache.bar_c, feasibility_cache.c)
-        end
-        @timeit TO "KKT system assembly" _update_feasibility_augmentation!(
+        merit_stationarity, feasibility_error = _evaluate_feasibility_merit!(
+            merit_gradient,
             feasibility_cache,
-            ∇F,
+            mcp,
             preference_jacobian,
+            ∇F,
             F,
+            z,
+            θ,
+            ϵ,
             μ,
         )
-        mul!(
-            merit_gradient,
-            transpose(feasibility_cache.J_aug),
-            feasibility_cache.F_aug,
-        )
-        merit_stationarity = norm(merit_gradient, Inf)
-        feasibility_error = _violation_norm_inf(feasibility_cache.c)
         stopping_criterion =
             merit_stationarity <= tol && feasibility_error <= feasibility_tol
     else
@@ -973,6 +954,9 @@ function solve(
             alpha_history,
             delta_z_norm_history,
             rho_history,
+            merit_history,
+            merit_stationarity_history,
+            mu_history,
         )
     end
     result
@@ -1181,6 +1165,41 @@ function _update_feasibility_augmentation!(
         cache.F_aug[offset + i] = sqrt_mu * cache.bar_c[i]
     end
     cache
+end
+
+"Refresh the feasibility-merit residual and Jacobian, then return stationarity and violation errors."
+function _evaluate_feasibility_merit!(
+    merit_gradient,
+    cache::FeasibilityAugmentationCache,
+    mcp,
+    preference_jacobian,
+    J,
+    F,
+    z,
+    θ,
+    ϵ,
+    μ,
+)
+    @timeit TO "innermost preference evaluation" begin
+        mcp.innermost_preference!(cache.c, z; θ, ϵ, η = 0.0)
+        mcp.∇innermost_preference_z!(
+            preference_jacobian,
+            z;
+            θ,
+            ϵ,
+            η = 0.0,
+        )
+        _constraint_violation!(cache.bar_c, cache.c)
+    end
+    @timeit TO "KKT system assembly" _update_feasibility_augmentation!(
+        cache,
+        J,
+        preference_jacobian,
+        F,
+        μ,
+    )
+    mul!(merit_gradient, transpose(cache.J_aug), cache.F_aug)
+    norm(merit_gradient, Inf), _violation_norm_inf(cache.c)
 end
 
 "Allocation-free Euclidean norm."
