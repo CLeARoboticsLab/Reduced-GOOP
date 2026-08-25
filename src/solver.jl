@@ -64,10 +64,12 @@ Keyword arguments:
 
 Selected `InteriorPointOptions` fields:
     - `feasibility_tol::Float64 = 1e-3`: maximum innermost-preference constraint
-      violation accepted by feasibility-merit convergence.
+      violation and complementarity error accepted by augmented-Lagrangian
+      convergence when `use_feasibility_merit = true`.
     - `record_convergence`: record KKT-error, η, raw direction norm, accepted
       step-size, and gain-ratio histories, plus merit-value, merit-stationarity,
-      and μ histories (NaN outside the feasibility-merit path).
+      constrained-stationarity, λ_f-norm, and μ histories (NaN outside the
+      feasibility-merit path).
     - `record_condition_number`: record dense-SVD condition-number history.
     - `linear_solver::Symbol = :klu`: `:svd` (dense SVD with Tikhonov filter) or `:klu`
       (sparse KLU on the balanced augmented system `[√ηI J; Jᵀ -√ηI]`, with one
@@ -281,9 +283,17 @@ function solve(
             ϵ = ϵ₀
         end
 
-        # Initialize regularization parameter.
+        # Initialize regularization and augmented-Lagrangian penalty parameters.
         η = η₀
         μ = μ₀
+        previous_major_violation = Inf
+        complementarity_error = Inf
+        al_multiplier_updates = 0
+        # The inner AL subproblem only needs an approximate solve before a
+        # multiplier update. A modest relaxation avoids requiring the
+        # ill-conditioned rectangular system to meet the final KKT tolerance
+        # before the AL mechanism can make any progress.
+        al_inner_tolerance = max(tol, sqrt(feasibility_tol))
 
         status = :solved
         linesearch ∈ (:backtracking, :fraction_to_boundary) || throw(
@@ -307,13 +317,15 @@ function solve(
         rho_history = Float64[]
         merit_history = Float64[]
         merit_stationarity_history = Float64[]
+        constrained_stationarity_history = Float64[]
+        lambda_f_norm_history = Float64[]
         mu_history = Float64[]
         klu_singular_retries = Ref(0)
         svd_fallback_count = Ref(0)
     end
     while outer_iters < max_outer_iters || iszero(total_iters)
         inner_iters = 1
-        status = :solved
+        status = use_feasibility_merit ? :running : :solved
 
         verbose && @info "Outer iteration $(outer_iters): ϵ = $ϵ, kkt_error = $kkt_error"
 
@@ -462,18 +474,51 @@ function solve(
                                         ϵ,
                                         μ,
                                     )
+                                # The inner merit is stationary for the current
+                                # fixed (λ_f, μ): perform one PHR multiplier-major
+                                # update. Since h = [λ_f - μc]_+, setting λ_f <- h
+                                # makes the just-computed inner gradient equal to
+                                # J'F - C'λ_f, the constrained least-squares
+                                # stationarity residual at this same iterate.
+                                if merit_stationarity <= al_inner_tolerance
+                                    major_violation = _violation_norm2(feasibility_cache.c)
+                                    _update_feasibility_multiplier!(
+                                        feasibility_cache.lambda_f,
+                                        feasibility_cache.bar_c,
+                                        μ,
+                                    )
+                                    al_multiplier_updates += 1
+                                    complementarity_error = _complementarity_error(
+                                        feasibility_cache.c,
+                                        feasibility_cache.lambda_f,
+                                    )
+                                    stopping_criterion =
+                                        merit_stationarity <= tol &&
+                                        feasibility_error <= feasibility_tol &&
+                                        complementarity_error <= feasibility_tol
+                                    if stopping_criterion
+                                        status = :merit_stationarity
+                                        break
+                                    end
+
+                                    old_μ = μ
+                                    if isfinite(previous_major_violation) &&
+                                       major_violation > feasibility_tol &&
+                                       major_violation >= 0.99 * previous_major_violation
+                                        μ = min(mu_growth * μ, μ_max)
+                                    end
+                                    previous_major_violation = major_violation
+                                    verbose && println(
+                                        "Augmented-Lagrangian multiplier update $al_multiplier_updates: feasibility = $feasibility_error, complementarity = $complementarity_error, μ = $old_μ -> $μ",
+                                    )
+                                    inner_iters += 1
+                                    continue
+                                end
                                 @timeit TO "KKT system assembly" _update_augmented_kkt!(
                                     aug_cache,
                                     feasibility_cache.J_aug,
                                     η,
                                 )
-                                stopping_criterion =
-                                    merit_stationarity <= tol &&
-                                    feasibility_error <= feasibility_tol
-                                if stopping_criterion
-                                    status = :merit_stationarity
-                                    break
-                                end
                             else
                                 @timeit TO "KKT system assembly" _update_augmented_kkt!(
                                     aug_cache,
@@ -612,7 +657,7 @@ function solve(
                             end
                             if use_feasibility_merit && armijo_slope >= 0.0
                                 verbose && printstyled(
-                                    "Feasibility-augmented direction is not a descent direction (slope = $armijo_slope). Retrying with larger η.\n";
+                                    "Augmented-Lagrangian direction is not a descent direction (slope = $armijo_slope). Retrying with larger η.\n";
                                     color = :yellow,
                                 )
                                 α = 0.0
@@ -638,9 +683,11 @@ function solve(
                                             ϵ,
                                             η = 0.0,
                                         )
-                                        _constraint_violation!(
+                                        _scaled_shifted_multiplier!(
                                             feasibility_cache.bar_c_trial,
                                             feasibility_cache.c_trial,
+                                            feasibility_cache.lambda_f,
+                                            μ,
                                         )
                                     end
                                     trial_merit2 =
@@ -685,9 +732,11 @@ function solve(
                                                 ϵ,
                                                 η = 0.0,
                                             )
-                                            _constraint_violation!(
+                                            _scaled_shifted_multiplier!(
                                                 feasibility_cache.bar_c_trial,
                                                 feasibility_cache.c_trial,
+                                                feasibility_cache.lambda_f,
+                                                μ,
                                             )
                                         end
                                         trial_merit2 =
@@ -773,15 +822,8 @@ function solve(
                         break
                     end
 
-                    # Update μ for feasibility merit if constraint violation is not decreasing sufficiently.
                     if use_feasibility_merit
                         merit_value = sqrt(trial_merit2)
-                        old_violation = _norm2(feasibility_cache.bar_c)
-                        new_violation = _norm2(feasibility_cache.bar_c_trial)
-                        if old_violation > feasibility_tol &&
-                           new_violation >= 0.99 * old_violation
-                            μ = min(mu_growth * μ, μ_max)
-                        end
                     end
 
                     # Levenberg-Marquardt gain-ratio update for the next Newton iteration's η.
@@ -853,6 +895,32 @@ function solve(
 
                 @timeit TO "iterate update and bookkeeping" begin
                     if record_convergence
+                        constrained_stationarity_value = NaN
+                        if use_feasibility_merit
+                            # Record the exact constrained least-squares
+                            # stationarity residual at the accepted iterate. This
+                            # is the stationarity condition used by the outer AL
+                            # termination test, rather than the inner-merit
+                            # gradient evaluated before the step.
+                            @timeit TO "convergence history stationarity" begin
+                                mcp.∇F_z!(∇F, z; θ, ϵ, η = 0.0)
+                                mcp.∇innermost_preference_z!(
+                                    preference_jacobian,
+                                    z;
+                                    θ,
+                                    ϵ,
+                                    η = 0.0,
+                                )
+                                constrained_stationarity_value =
+                                    _constrained_stationarity!(
+                                        merit_gradient,
+                                        ∇F,
+                                        F,
+                                        preference_jacobian,
+                                        feasibility_cache.lambda_f,
+                                    )
+                            end
+                        end
                         push!(kkt_error_history, kkt_error)
                         push!(eta_history, η)
                         push!(alpha_history, min(α_σ, α_γ))
@@ -860,11 +928,21 @@ function solve(
                         push!(rho_history, ρ)
                         # `merit_stationarity` was evaluated where the Jacobian was
                         # assembled (start of this iteration), so it lags the
-                        # accepted iterate by one step; μ is the post-growth value.
+                        # accepted iterate by one step. The AL penalty changes only
+                        # at a multiplier-major update, never after an accepted step.
                         push!(merit_history, merit_value)
                         push!(
                             merit_stationarity_history,
                             use_feasibility_merit ? merit_stationarity : NaN,
+                        )
+                        push!(
+                            constrained_stationarity_history,
+                            constrained_stationarity_value,
+                        )
+                        push!(
+                            lambda_f_norm_history,
+                            use_feasibility_merit ?
+                            norm(feasibility_cache.lambda_f, Inf) : NaN,
                         )
                         push!(mu_history, use_feasibility_merit ? μ : NaN)
                     end
@@ -879,7 +957,15 @@ function solve(
             end
         end
 
-        if status === :merit_stationarity || status === :solved
+        if use_feasibility_merit
+            # Multiplier-major updates share the existing inner-iteration budget;
+            # no additional public outer-loop option is introduced for this
+            # focused prototype.
+            if status !== :merit_stationarity
+                status = :failed
+            end
+            break
+        elseif status === :solved
             break
         end
 
@@ -904,7 +990,7 @@ function solve(
     final_μ = use_feasibility_merit ? μ : 0.0
     if use_feasibility_merit
         @timeit TO "Jacobian evaluation" mcp.∇F_z!(∇F, z; θ, ϵ, η = 0.0)
-        merit_stationarity, feasibility_error = _evaluate_feasibility_merit!(
+        _evaluate_feasibility_merit!(
             merit_gradient,
             feasibility_cache,
             mcp,
@@ -916,11 +1002,34 @@ function solve(
             ϵ,
             μ,
         )
+        merit_stationarity = _constrained_stationarity!(
+            merit_gradient,
+            ∇F,
+            F,
+            preference_jacobian,
+            feasibility_cache.lambda_f,
+        )
+        complementarity_error = _complementarity_error(
+            feasibility_cache.c,
+            feasibility_cache.lambda_f,
+        )
+        feasibility_error = _violation_norm_inf(feasibility_cache.c)
         stopping_criterion =
-            merit_stationarity <= tol && feasibility_error <= feasibility_tol
+            merit_stationarity <= tol &&
+            feasibility_error <= feasibility_tol &&
+            complementarity_error <= feasibility_tol
+        if record_convergence && !isempty(constrained_stationarity_history)
+            # A final multiplier-only AL update does not accept a Newton step.
+            # Keep the last plotted point synchronized with the multiplier and
+            # stationarity values on which the returned status is based.
+            constrained_stationarity_history[end] = merit_stationarity
+            lambda_f_norm_history[end] = norm(feasibility_cache.lambda_f, Inf)
+            mu_history[end] = μ
+        end
     else
         merit_stationarity = NaN
         feasibility_error = NaN
+        complementarity_error = NaN
         stopping_criterion = kkt_error <= tol
     end
     status = if use_feasibility_merit
@@ -941,7 +1050,11 @@ function solve(
         outer_iters,
         total_iters,
         μ = final_μ,
+        lambda_f = use_feasibility_merit ? feasibility_cache.lambda_f : nothing,
+        merit_stationarity,
         feasibility_error,
+        complementarity_error,
+        al_multiplier_updates,
         klu_singular_retries = klu_singular_retries[],
         svd_fallback_count = svd_fallback_count[],
     )
@@ -956,6 +1069,8 @@ function solve(
             rho_history,
             merit_history,
             merit_stationarity_history,
+            constrained_stationarity_history,
+            lambda_f_norm_history,
             mu_history,
         )
     end
@@ -1064,6 +1179,7 @@ struct FeasibilityAugmentationCache
     c_trial::Vector{Float64}
     bar_c::Vector{Float64}
     bar_c_trial::Vector{Float64}
+    lambda_f::Vector{Float64}
 end
 
 function _build_feasibility_augmentation_cache(
@@ -1126,15 +1242,32 @@ function _build_feasibility_augmentation_cache(
         zeros(q),
         zeros(q),
         zeros(q),
+        zeros(q),
     )
 end
 
-"Compute `[-c]_+` in place."
+"Compute the scaled PHR residual `[λ_f / μ - c]_+` in place."
+function _scaled_shifted_multiplier!(bar_c, c, lambda_f, μ)
+    @inbounds for i in eachindex(bar_c, c, lambda_f)
+        bar_c[i] = max(lambda_f[i] / μ - c[i], 0.0)
+    end
+    bar_c
+end
+
+"Compute `[-c]_+` in place (the zero-multiplier special case)."
 function _constraint_violation!(bar_c, c)
     @inbounds for i in eachindex(bar_c, c)
         bar_c[i] = max(-c[i], 0.0)
     end
     bar_c
+end
+
+"Apply the PHR multiplier update `λ_f <- [λ_f - μc]_+ = μ [λ_f/μ-c]_+`."
+function _update_feasibility_multiplier!(lambda_f, bar_c, μ)
+    @inbounds for i in eachindex(lambda_f, bar_c)
+        lambda_f[i] = μ * bar_c[i]
+    end
+    lambda_f
 end
 
 "Scatter the current numerical values into the fixed-pattern stacked system."
@@ -1155,7 +1288,7 @@ function _update_feasibility_augmentation!(
     @inbounds for k in eachindex(C_values)
         row = cache.C_rows[k]
         augmented_values[cache.C_positions[k]] =
-            cache.c[row] < 0 ? -sqrt_mu * C_values[k] : 0.0
+            cache.bar_c[row] > 0 ? -sqrt_mu * C_values[k] : 0.0
     end
     @inbounds for i in eachindex(F)
         cache.F_aug[i] = F[i]
@@ -1167,7 +1300,7 @@ function _update_feasibility_augmentation!(
     cache
 end
 
-"Refresh the feasibility-merit residual and Jacobian, then return stationarity and violation errors."
+"Refresh the PHR inner-merit residual and frozen-active Jacobian."
 function _evaluate_feasibility_merit!(
     merit_gradient,
     cache::FeasibilityAugmentationCache,
@@ -1189,7 +1322,7 @@ function _evaluate_feasibility_merit!(
             ϵ,
             η = 0.0,
         )
-        _constraint_violation!(cache.bar_c, cache.c)
+        _scaled_shifted_multiplier!(cache.bar_c, cache.c, cache.lambda_f, μ)
     end
     @timeit TO "KKT system assembly" _update_feasibility_augmentation!(
         cache,
@@ -1202,13 +1335,30 @@ function _evaluate_feasibility_merit!(
     norm(merit_gradient, Inf), _violation_norm_inf(cache.c)
 end
 
-"Allocation-free Euclidean norm."
-function _norm2(values)
-    accumulator = zero(eltype(values))
-    @inbounds for value in values
-        accumulator += value * value
+"Compute `‖J'F - C'λ_f‖∞` into the existing gradient workspace."
+function _constrained_stationarity!(gradient, J, F, C, lambda_f)
+    mul!(gradient, transpose(J), F)
+    mul!(gradient, transpose(C), lambda_f, -1.0, 1.0)
+    norm(gradient, Inf)
+end
+
+"Allocation-free Euclidean norm of the inequality violation `[-c]_+`."
+function _violation_norm2(c)
+    accumulator = zero(eltype(c))
+    @inbounds for value in c
+        violation = max(-value, 0.0)
+        accumulator += violation * violation
     end
     sqrt(accumulator)
+end
+
+"Allocation-free infinity norm of the complementarity products `λ_f .* c`."
+function _complementarity_error(c, lambda_f)
+    result = zero(promote_type(eltype(c), eltype(lambda_f)))
+    @inbounds for i in eachindex(c, lambda_f)
+        result = max(result, abs(lambda_f[i] * c[i]))
+    end
+    result
 end
 
 "Allocation-free infinity norm of `[-c]_+`."
