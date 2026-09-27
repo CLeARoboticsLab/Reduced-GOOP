@@ -16,4 +16,8 @@ include("goop.jl")
 include("solver.jl")
 include("parametric_optimization_problem.jl")
 
+# Scholtes relaxation (opt-in via `complementarity = :scholtes`), ported from
+# ScholtesReducedGOOP.jl by Jingqi Li.
+include("scholtes_kkt.jl")
+
 end # module ReducedGOOP

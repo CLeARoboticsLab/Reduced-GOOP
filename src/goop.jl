@@ -137,15 +137,44 @@ function smooth_piecewise_preference_objective(
     (0.5 * (violation + abs(violation)))^(level + 2)
 end
 
-"Construct the Reduced KKT system corresponding to a ParametricGOOP."
+"""
+Construct the Reduced KKT system corresponding to a ParametricGOOP.
+
+`complementarity = :interior_point` (default) builds the interior-point system
+(`σ ∘ γ = ϵ`) and returns a `GOOPKKTSystem` for `InteriorPoint`. `complementarity =
+:scholtes` builds the Scholtes-form system (explicit φ ≥ 0, relaxed `s ∘ γ + u = ρ`)
+and returns a `ScholtesKKTSystem` for `Scholtes`; it is opt-in, supports only
+`phi = true`, and generates code with FastDifferentiation unless `codegen` says
+otherwise. See src/scholtes_kkt.jl.
+"""
 function generate_slacked_reduced_kkt_system(
     goop::ParametricGOOP;
     backend = SymbolicTracingUtils.SymbolicsBackend(),
     drop_higher_order_terms = false,
     backend_options = (;),
-    codegen = :native,
+    codegen = nothing,
     fd_codegen_chunk_size = nothing,
+    complementarity::Symbol = :interior_point,
+    phi::Bool = true,
+    quasi_order::Int = 2,
 )
+    complementarity in (:interior_point, :scholtes) || throw(
+        ArgumentError(
+            "complementarity must be :interior_point or :scholtes, got $complementarity",
+        ),
+    )
+    if complementarity === :scholtes
+        return generate_scholtes_reduced_kkt_system(
+            goop;
+            quasi = drop_higher_order_terms,
+            quasi_order,
+            phi,
+            codegen = something(codegen, :fast_differentiation),
+            fd_codegen_chunk_size,
+            backend_options,
+        )
+    end
+    codegen = something(codegen, :native)
     if drop_higher_order_terms &&
        backend isa SymbolicTracingUtils.FastDifferentiationBackend
         error(
@@ -617,8 +646,11 @@ function generate_slacked_quasi_kkt_system(
     goop::ParametricGOOP;
     backend = SymbolicTracingUtils.SymbolicsBackend(),
     backend_options = (;),
-    codegen = :native,
+    codegen = nothing,
     fd_codegen_chunk_size = nothing,
+    complementarity::Symbol = :interior_point,
+    phi::Bool = true,
+    quasi_order::Int = 2,
 )
     generate_slacked_reduced_kkt_system(
         goop;
@@ -627,6 +659,9 @@ function generate_slacked_quasi_kkt_system(
         backend_options,
         codegen,
         fd_codegen_chunk_size,
+        complementarity,
+        phi,
+        quasi_order,
     )
 end
 
