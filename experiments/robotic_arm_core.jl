@@ -330,17 +330,15 @@ function get_setup(scenario_config::ScenarioConfig)
     inequality_constraints = [robot_inequality, child_ground_speed_inequality]
 
     # ── 1. GOOP formulation ──────────────────────────────────────────────────────────────────────────────
-    # Preference hierarchy: [lowest priority, ..., highest priority].
-    robot_preferences = Function[
-        control_objective(; player = 1),
-        goal_objective,
-        load_balance_objective,
-        robot_inequality,
-    ]
-    robot_is_prioritized_constraint = [false, false, false, true]
+    # Preference hierarchy: [lowest priority, ..., highest priority]. Safety and
+    # the speed limits are real inequality constraints (`inequality_constraints`),
+    # satisfied exactly, not a prioritized preference level.
+    robot_preferences =
+        Function[control_objective(; player = 1), goal_objective, load_balance_objective]
+    robot_is_prioritized_constraint = [false, false, false]
 
-    child_preferences = Function[pot_approach_objective, child_ground_speed_inequality]
-    child_is_prioritized_constraint = [false, true]
+    child_preferences = Function[pot_approach_objective]
+    child_is_prioritized_constraint = [false]
 
     goop_preferences = [robot_preferences, child_preferences]
     goop_is_prioritized_constraint =
@@ -353,7 +351,7 @@ function get_setup(scenario_config::ScenarioConfig)
             preferences = goop_preferences,
             is_prioritized_constraint = goop_is_prioritized_constraint,
             equality_constraints,
-            inequality_constraints = [nothing, nothing],
+            inequality_constraints,
         )
     end
 
@@ -410,7 +408,7 @@ function get_setup(scenario_config::ScenarioConfig)
             preferences = scalarized_preferences,
             is_prioritized_constraint = scalarized_is_prioritized_constraint,
             equality_constraints,
-            inequality_constraints = [nothing, nothing],
+            inequality_constraints,
         )
     end
 

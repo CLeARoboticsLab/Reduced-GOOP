@@ -569,3 +569,56 @@ end
 		options,
 	)
 end
+
+@testset "Scholtes mode accepts prioritized-constraint levels (smoke)" begin
+	# Build and run only: the Scholtes relaxation is not judged on
+	# prioritized-constraint levels, which enter as a smooth violation penalty.
+	num_players = 3
+	primal_dims = fill(PRIMAL_DIM, num_players)
+	x_template = BlockArray(zeros(sum(primal_dims)), primal_dims)
+	θ_template = BlockArray(zeros(num_players), fill(1, num_players))
+	expected_blocks = [multiplayer_expected_block(player) for player in 1:num_players]
+	raw_targets = [multiplayer_raw_target(player) for player in 1:num_players]
+	groups = preference_coordinate_groups(2)
+	preferences = [
+		Function[
+			objective_from_target(:quadratic, player, groups[1], raw_targets[player]),
+			objective_from_target(:quadratic, player, groups[2], raw_targets[player]),
+			multiplayer_constraint(:quadratic, player, expected_blocks),
+		] for player in 1:num_players
+	]
+	problem = ReducedGOOP.ParametricGOOP(
+		x_template,
+		θ_template;
+		preferences,
+		is_prioritized_constraint = [[false, false, true] for _ in 1:num_players],
+		equality_constraints = fill(nothing, num_players),
+		inequality_constraints = fill(nothing, num_players),
+	)
+	kkt = ReducedGOOP.generate_slacked_reduced_kkt_system(problem; complementarity = :scholtes)
+	@test kkt isa ReducedGOOP.ScholtesKKTSystem
+	θ = zeros(num_players)
+	output = ReducedGOOP.solve(
+		ReducedGOOP.Scholtes(),
+		kkt,
+		θ;
+		z₀ = reduce(vcat, expected_blocks),
+		options = ReducedGOOP.ScholtesOptions(max_inner = 50),
+	)
+	@test all(isfinite, output.z)
+	@test isfinite(output.residual)
+
+	@test_throws ArgumentError ReducedGOOP.generate_slacked_reduced_kkt_system(
+		problem;
+		complementarity = :scholtes,
+		phi = false,
+	)
+	for bad in ((; projected_step = false), (; reuse_factorization_iters = 1))
+		@test_throws ArgumentError ReducedGOOP.solve(
+			ReducedGOOP.Scholtes(),
+			kkt,
+			θ;
+			options = ReducedGOOP.ScholtesOptions(; bad...),
+		)
+	end
+end

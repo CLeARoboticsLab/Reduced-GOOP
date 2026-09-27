@@ -123,37 +123,14 @@ function get_setup(
         end
     end
 
+    # Real inequality constraints (satisfied exactly, not as a preference level):
+    # each player's speed limit along its trajectory and the pairwise collision
+    # avoidance, which both players carry with their own duals.
     inequality_constraints = [
-        function (z, θ)
-            (; lb, ub) = control_bounds
-            lb_mask = findall(!isinf, lb)
-            ub_mask = findall(!isinf, ub)
-            (; xs, us) = trajectory(z; player = 1)
-            vcat(
-                # mapreduce(vcat, us) do u
-                # 	vcat(u[lb_mask] - lb[lb_mask], ub[ub_mask] - u[ub_mask])
-                # end,
-                # mapreduce(vcat, 1:length(xs)) do t
-                # 	lane_bounds(xs[t]; player = 1)
-                # end,
-                shared_collision_avoidance(z, θ),
-            )
-        end,
-        function (z, θ)
-            (; lb, ub) = control_bounds
-            lb_mask = findall(!isinf, lb)
-            ub_mask = findall(!isinf, ub)
-            (; xs, us) = trajectory(z; player = 2)
-            vcat(
-                # mapreduce(vcat, us) do u
-                # 	vcat(u[lb_mask] - lb[lb_mask], ub[ub_mask] - u[ub_mask])
-                # end,
-                # mapreduce(vcat, 1:length(xs)) do t
-                # 	lane_bounds(xs[t]; player = 2)
-                # end,
-                shared_collision_avoidance(z, θ),
-            )
-        end,
+        (z, θ) -> vcat(
+            speed_limit_preference(; player = i)(z, θ),
+            shared_collision_avoidance(z, θ),
+        ) for i in 1:num_players
     ]
 
     player_equality_constraints = [
@@ -198,24 +175,12 @@ function get_setup(
         end for i in 1:num_players
     ]
 
-    collision_equality_constraint = function (z, θ)
-        squared_violation.(shared_collision_avoidance(z, θ))
-    end
-
-    equality_constraints = [
-        (z, θ) -> vcat(
-            player_equality_constraints[i](z, θ),
-            collision_equality_constraint(z, θ),
-        ) for i in 1:num_players
-    ]
+    equality_constraints = player_equality_constraints
 
     preferences = [
         [
-            # Minimize control effort 
+            # Minimize control effort
             control_objective(; player = 1),
-
-            # # Drive under speed limit
-            speed_limit_preference(; player = 1),
 
             # Reach the goal (highest priority for P1)
             goal_objective(; player = 1),
@@ -227,11 +192,8 @@ function get_setup(
             # Minimize control effort
             control_objective(; player = 2),
 
-            # Reach the goal
+            # Reach the goal (highest priority for P2)
             goal_objective(; player = 2),
-
-            # Drive under speed limit (highest priority for P2)
-            speed_limit_preference(; player = 2),
 
             # Lane bounds + collision avoidance (constraint, both players)
             # inequality_constraints[2],
@@ -239,7 +201,7 @@ function get_setup(
     ]
 
     # Preference hierarchy: [lowest priority, ..., highest priority]
-    is_prioritized_constraint = [[false, true, false], [false, false, true]]
+    is_prioritized_constraint = [[false, false], [false, false]]
 
     function build_goop_problem()
         @timeit TO "ParametricGOOP construction" begin
@@ -252,7 +214,7 @@ function get_setup(
                                             scalarized_is_prioritized_constraint :
                                             is_prioritized_constraint,
                 equality_constraints,
-                inequality_constraints = [nothing, nothing],
+                inequality_constraints,
             )
         end
     end
@@ -298,16 +260,18 @@ function get_setup(
         accumulated_objective
     end
     equality_constraint = function (z, θ)
+        mapreduce(f -> f(z, θ), vcat, player_equality_constraints)
+    end
+    inequality_constraint = function (z, θ)
         vcat(
-            mapreduce(f -> f(z, θ), vcat, player_equality_constraints),
-            collision_equality_constraint(z, θ),
+            mapreduce(i -> speed_limit_preference(; player = i)(z, θ), vcat, 1:num_players),
+            shared_collision_avoidance(z, θ),
         )
     end
-    inequality_constraint = nothing
     primal_dimension = sum(primal_dimensions)
     parameter_dimension = sum(parameter_dimensions)
     equality_dimension = length(equality_constraint(dummy_primals, dummy_parameters))
-    inequality_dimension = 0
+    inequality_dimension = length(inequality_constraint(dummy_primals, dummy_parameters))
 
     function build_social_problem()
         @timeit TO "ParametricOptimizationProblem construction" begin
@@ -362,6 +326,11 @@ function demo(;
     num_players = 2
     planning_horizon = 12
     collision_avoidance = 1.5
+    # NOTE: with the speed limit a hard inequality, this scenario is infeasible as
+    # set: player 1 starts at speed 3.0 (base_initial_state1 below) and x₁ is pinned
+    # to the initial state, so the t = 1 row reads 2² − 3² = −5. Pick one: apply the
+    # limit from t = 2, start player 1 at speed ≤ 2, or raise this to ≥ 3
+    # (_port_logs/step4/intersection_*.log).
     speed_limit = 2.0
     num_instances = 1
     perturbation_scale = 0.3

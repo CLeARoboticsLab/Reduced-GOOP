@@ -43,6 +43,9 @@ except `linear_solver`, which defaults to `:normal` (the robotic-arm setting).
     after each line search from the gain ratio (`gain_low = 0.25`, `gain_high = 0.75`,
     factors `1 ± exp(−rate)` with `tightening_rate = 1.2`, `loosening_rate = 3.0`,
     clamped to `[eta_min, eta_max] = [1e-8, 1e2]`).
+  - `reuse_factorization_iters = 0`: must stay 0. The projected step's column mask changes
+    between Newton steps, so a factorization cannot be reused (see
+    _port_logs/reuse_study.md: reuse does not speed up the interior-point path either).
 """
 Base.@kwdef struct ScholtesOptions
     rho_init::Float64 = 1.0
@@ -65,6 +68,7 @@ Base.@kwdef struct ScholtesOptions
     gain_high::Float64 = 0.75
     tightening_rate::Float64 = 1.2
     loosening_rate::Float64 = 3.0
+    reuse_factorization_iters::Int = 0
     verbose::Bool = false
 end
 
@@ -195,6 +199,11 @@ function solve(
     options.projected_step || throw(
         ArgumentError(
             "phi = true requires projected_step = true (exact φ/σ rows); set projected_step = true.",
+        ),
+    )
+    options.reuse_factorization_iters == 0 || throw(
+        ArgumentError(
+            "reuse_factorization_iters > 0 is not supported with complementarity = :scholtes: the projected step's column mask changes between Newton steps, so the factorization cannot be reused.",
         ),
     )
     nonmonotone >= 1 || throw(ArgumentError("nonmonotone must be >= 1, got $nonmonotone"))
