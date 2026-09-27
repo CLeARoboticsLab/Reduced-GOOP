@@ -5,7 +5,6 @@ struct InteriorPoint <: SolverType end
 
 Base.@kwdef struct InteriorPointOptions
     tol::Float64
-    feasibility_tol::Float64 = 1e-3
     η₀::Float64
     ϵ₀::Union{Float64,Symbol}
     max_inner_iters::Int
@@ -33,10 +32,6 @@ Base.@kwdef struct InteriorPointOptions
     klu_singularity_max_retries::Int = 3
     reuse_factorization_iters::Int = 0
     reuse_quality_threshold::Float64 = 0.9
-    use_feasibility_merit::Bool = false
-    μ₀::Float64 = 1.0
-    μ_max::Float64 = 1e4
-    mu_growth::Float64 = 10.0
     verbose::Bool
 end
 
@@ -63,13 +58,8 @@ Keyword arguments:
     - `options::InteriorPointOptions`: solver and diagnostic settings.
 
 Selected `InteriorPointOptions` fields:
-    - `feasibility_tol::Float64 = 1e-3`: maximum innermost-preference constraint
-      violation and complementarity error accepted by augmented-Lagrangian
-      convergence when `use_feasibility_merit = true`.
     - `record_convergence`: record KKT-error, η, raw direction norm, accepted
-      step-size, and gain-ratio histories, plus merit-value, merit-stationarity,
-      constrained-stationarity, λ_f-norm, and μ histories (NaN outside the
-      feasibility-merit path).
+      step-size, and gain-ratio histories.
     - `record_condition_number`: record dense-SVD condition-number history.
     - `linear_solver::Symbol = :klu`: `:svd` (dense SVD with Tikhonov filter) or `:klu`
       (sparse KLU on the balanced augmented system `[√ηI J; Jᵀ -√ηI]`, with one
@@ -100,7 +90,6 @@ function solve(
     options::InteriorPointOptions,
 )
     tol = options.tol
-    feasibility_tol = options.feasibility_tol
     η₀ = options.η₀
     ϵ₀ = options.ϵ₀
     max_inner_iters = options.max_inner_iters
@@ -126,10 +115,6 @@ function solve(
     klu_singularity_max_retries = options.klu_singularity_max_retries
     reuse_factorization_iters = options.reuse_factorization_iters
     reuse_quality_threshold = options.reuse_quality_threshold
-    use_feasibility_merit = options.use_feasibility_merit
-    μ₀ = options.μ₀
-    μ_max = options.μ_max
-    mu_growth = options.mu_growth
 
     linear_solver ∈ (:svd, :klu) || throw(
         ArgumentError("Unsupported linear_solver $(linear_solver). Use :svd or :klu."),
@@ -143,27 +128,6 @@ function solve(
         throw(
             ArgumentError(
                 "linear_solver = :klu supports neither record_condition_number, tsvd_threshold > 0, nor use_marquardt_scaling; use :svd for these features.",
-            ),
-        )
-    end
-    # merit function prototype currently does not support dense :svd, fraction-to-boundary linesearch, factorization reuse, complete KKT system, or zero innermost-preference dimension.
-    if use_feasibility_merit
-        feasibility_tol > 0 || throw(ArgumentError("feasibility_tol must be positive."))
-        μ₀ > 0 || throw(ArgumentError("μ₀ must be positive."))
-        μ_max >= μ₀ || throw(ArgumentError("μ_max must be at least μ₀."))
-        mu_growth >= 1 || throw(ArgumentError("mu_growth must be at least 1."))
-        linear_solver === :klu || throw(
-            ArgumentError("use_feasibility_merit requires linear_solver = :klu."),
-        )
-        linesearch === :backtracking || throw(
-            ArgumentError("use_feasibility_merit requires linesearch = :backtracking."),
-        )
-        reuse_factorization_iters == 0 || throw(
-            ArgumentError("use_feasibility_merit requires reuse_factorization_iters = 0."),
-        )
-        mcp.innermost_preference_dimension > 0 || throw(
-            ArgumentError(
-                "use_feasibility_merit requires at least one innermost prioritized-preference inequality.",
             ),
         )
     end
@@ -215,7 +179,6 @@ function solve(
         Jδz = zeros(mcp.kkt_dimension)
         z_trial = similar(z)
         δz = zeros(mcp.variable_dimension)
-        merit_gradient = use_feasibility_merit ? similar(δz) : nothing
         δx = @view δz[x_dims]
         δs = @view δz[mcp.preference_slack_dims]
         δσ = @view δz[mcp.interior_point_slack_dims]
@@ -230,30 +193,9 @@ function solve(
         # fallback allocates its own dense copy on the spot).
         Jdense = use_klu ? zeros(0, 0) : zeros(mcp.kkt_dimension, mcp.variable_dimension)
         jacobian_scatter_indices = use_klu ? Int[] : _dense_scatter_indices(∇F)
-        preference_jacobian =
-            use_feasibility_merit ? mcp.∇innermost_preference_z!.result_buffer : nothing
-        feasibility_cache =
-            use_feasibility_merit ?
-            _build_feasibility_augmentation_cache(
-                ∇F,
-                preference_jacobian,
-                mcp.kkt_dimension,
-                mcp.innermost_preference_dimension,
-                mcp.variable_dimension,
-            ) : nothing
-        step_jacobian = use_feasibility_merit ? feasibility_cache.J_aug : ∇F
-        step_residual = use_feasibility_merit ? feasibility_cache.F_aug : F
-        step_product = use_feasibility_merit ? feasibility_cache.J_aug_δz : Jδz
-        step_dimension =
-            use_feasibility_merit ?
-            mcp.kkt_dimension + mcp.innermost_preference_dimension : mcp.kkt_dimension
         aug_cache =
             use_klu ?
-            _build_augmented_kkt_cache(
-                step_jacobian,
-                step_dimension,
-                mcp.variable_dimension,
-            ) :
+            _build_augmented_kkt_cache(∇F, mcp.kkt_dimension, mcp.variable_dimension) :
             nothing
         # Modified-Newton (factorization reuse) state; only active on the :klu
         # path of the backtracking branch when reuse_factorization_iters > 0.
@@ -283,17 +225,8 @@ function solve(
             ϵ = ϵ₀
         end
 
-        # Initialize regularization and augmented-Lagrangian penalty parameters.
+        # Initialize regularization parameter.
         η = η₀
-        μ = μ₀
-        previous_major_violation = Inf
-        complementarity_error = Inf
-        al_multiplier_updates = 0
-        # The inner AL subproblem only needs an approximate solve before a
-        # multiplier update. A modest relaxation avoids requiring the
-        # ill-conditioned rectangular system to meet the final KKT tolerance
-        # before the AL mechanism can make any progress.
-        al_inner_tolerance = max(tol, sqrt(feasibility_tol))
 
         status = :solved
         linesearch ∈ (:backtracking, :fraction_to_boundary) || throw(
@@ -305,8 +238,6 @@ function solve(
         inner_iters = 1
         outer_iters = 1
         kkt_error = Inf
-        merit_stationarity = Inf
-        feasibility_error = Inf
         stopping_criterion = false
         is_fraction_to_boundary_linesearch = (linesearch == :fraction_to_boundary)
         kkt_error_history = Float64[]
@@ -315,39 +246,29 @@ function solve(
         alpha_history = Float64[]
         delta_z_norm_history = Float64[]
         rho_history = Float64[]
-        merit_history = Float64[]
-        merit_stationarity_history = Float64[]
-        constrained_stationarity_history = Float64[]
-        lambda_f_norm_history = Float64[]
-        mu_history = Float64[]
         klu_singular_retries = Ref(0)
         svd_fallback_count = Ref(0)
     end
     while outer_iters < max_outer_iters || iszero(total_iters)
         inner_iters = 1
-        status = use_feasibility_merit ? :running : :solved
+        status = :solved
 
         verbose && @info "Outer iteration $(outer_iters): ϵ = $ϵ, kkt_error = $kkt_error"
 
-        while inner_iters < max_inner_iters && (use_feasibility_merit || kkt_error > tol)
+        while inner_iters < max_inner_iters && kkt_error > tol
             @timeit TO "inner iteration loop" begin
                 total_iters += 1
                 # Compute the residual at the current iterate
                 @timeit TO "residual evaluation" mcp.F!(F, z; θ, ϵ, η = 0.0)
                 kkt_error = norm(F, 2)
-                if !use_feasibility_merit
-                    stopping_criterion = kkt_error <= tol
-                    stopping_criterion && break
-                end
+                stopping_criterion = kkt_error <= tol
+                stopping_criterion && break
                 # @assert all(.!isnan.(F)) "Found NaN in F - aborting!"
                 verbose && println("inner iter $inner_iters")
                 condition_number = NaN
                 # Gain ratio of the accepted step; stays NaN on paths that do not
                 # compute it (fraction-to-boundary linesearch).
                 ρ = NaN
-                # Merit value at the accepted iterate; stays NaN outside the
-                # feasibility-merit path.
-                merit_value = NaN
 
                 if linesearch == :fraction_to_boundary
                     @timeit TO "Jacobian evaluation" mcp.∇F_z!(∇F, z; θ, ϵ, η = 0.0)
@@ -460,72 +381,11 @@ function solve(
                                 ϵ,
                                 η = 0.0,
                             )
-                            if use_feasibility_merit
-                                merit_stationarity, feasibility_error =
-                                    _evaluate_feasibility_merit!(
-                                        merit_gradient,
-                                        feasibility_cache,
-                                        mcp,
-                                        preference_jacobian,
-                                        ∇F,
-                                        F,
-                                        z,
-                                        θ,
-                                        ϵ,
-                                        μ,
-                                    )
-                                # The inner merit is stationary for the current
-                                # fixed (λ_f, μ): perform one PHR multiplier-major
-                                # update. Since h = [λ_f - μc]_+, setting λ_f <- h
-                                # makes the just-computed inner gradient equal to
-                                # J'F - C'λ_f, the constrained least-squares
-                                # stationarity residual at this same iterate.
-                                if merit_stationarity <= al_inner_tolerance
-                                    major_violation = _violation_norm2(feasibility_cache.c)
-                                    _update_feasibility_multiplier!(
-                                        feasibility_cache.lambda_f,
-                                        feasibility_cache.bar_c,
-                                        μ,
-                                    )
-                                    al_multiplier_updates += 1
-                                    complementarity_error = _complementarity_error(
-                                        feasibility_cache.c,
-                                        feasibility_cache.lambda_f,
-                                    )
-                                    stopping_criterion =
-                                        merit_stationarity <= tol &&
-                                        feasibility_error <= feasibility_tol &&
-                                        complementarity_error <= feasibility_tol
-                                    if stopping_criterion
-                                        status = :merit_stationarity
-                                        break
-                                    end
-
-                                    old_μ = μ
-                                    if isfinite(previous_major_violation) &&
-                                       major_violation > feasibility_tol &&
-                                       major_violation >= 0.99 * previous_major_violation
-                                        μ = min(mu_growth * μ, μ_max)
-                                    end
-                                    previous_major_violation = major_violation
-                                    verbose && println(
-                                        "Augmented-Lagrangian multiplier update $al_multiplier_updates: feasibility = $feasibility_error, complementarity = $complementarity_error, μ = $old_μ -> $μ",
-                                    )
-                                    inner_iters += 1
-                                    continue
-                                end
-                                @timeit TO "KKT system assembly" _update_augmented_kkt!(
-                                    aug_cache,
-                                    feasibility_cache.J_aug,
-                                    η,
-                                )
-                            else
-                                @timeit TO "KKT system assembly" _update_augmented_kkt!(
-                                    aug_cache,
-                                    ∇F,
-                                    η,
-                                )
-                            end
+                            @timeit TO "KKT system assembly" _update_augmented_kkt!(
+                                aug_cache,
+                                ∇F,
+                                η,
+                            )
                             η_in_K = η
                             iters_since_jacobian = 0
                         elseif η != η_in_K
@@ -606,8 +466,7 @@ function solve(
                         end
                     end
 
-                    current_merit2 =
-                        use_feasibility_merit ? dot(step_residual, step_residual) : F_z^2
+                    current_merit2 = F_z^2
                     local α, pred_reduction, actual_reduction, F_z_next, trial_merit2
                     while true
                         @timeit TO "Newton step / linear solve" begin
@@ -615,8 +474,8 @@ function solve(
                                 η_used = _klu_step_with_fallback!(
                                     δz,
                                     aug_cache,
-                                    step_jacobian,
-                                    step_residual,
+                                    ∇F,
+                                    F,
                                     η,
                                     η_max,
                                     verbose;
@@ -649,22 +508,29 @@ function solve(
                         end
 
                         @timeit TO "line search" begin
-                            mul!(step_product, step_jacobian, δz)
-                            armijo_slope = if use_feasibility_merit
-                                dot(step_residual, step_product) # feasibility_cache.F_aug' * feasibility_cache.J_aug_δz < 0 
-                            else
-                                min(dot(F, Jδz), 0.0)
-                            end
-                            if use_feasibility_merit && armijo_slope >= 0.0
-                                verbose && printstyled(
-                                    "Augmented-Lagrangian direction is not a descent direction (slope = $armijo_slope). Retrying with larger η.\n";
-                                    color = :yellow,
-                                )
-                                α = 0.0
-                                F_z_next = F_z
-                                trial_merit2 = current_merit2
-                            else
-                                α = 1.0
+                            mul!(Jδz, ∇F, δz)
+                            armijo_slope = min(dot(F, Jδz), 0.0)
+                            α = 1.0
+                            @. z_trial = z + α * δz
+                            @timeit TO "residual evaluation" mcp.F!(
+                                F_trial,
+                                z_trial;
+                                θ,
+                                ϵ,
+                                η = 0.0,
+                            )
+                            F_z_next = norm(F_trial, 2)
+                            trial_merit2 = F_z_next^2
+                            armijo_failed =
+                                F_z_next^2 >= F_z^2 + 2.0 * armijo_constant * α * armijo_slope
+                            while armijo_failed ||
+                                      _nonnegativity_violated(σ, δσ, α) ||
+                                      _nonnegativity_violated(γ, δγ, α)
+                                if α < min_stepsize
+                                    break # exhausted at this η — escalate below
+                                end
+
+                                α *= 0.5
                                 @. z_trial = z + α * δz
                                 @timeit TO "residual evaluation" mcp.F!(
                                     F_trial,
@@ -674,97 +540,17 @@ function solve(
                                     η = 0.0,
                                 )
                                 F_z_next = norm(F_trial, 2)
-                                if use_feasibility_merit
-                                    @timeit TO "innermost preference evaluation" begin
-                                        mcp.innermost_preference!(
-                                            feasibility_cache.c_trial,
-                                            z_trial;
-                                            θ,
-                                            ϵ,
-                                            η = 0.0,
-                                        )
-                                        _scaled_shifted_multiplier!(
-                                            feasibility_cache.bar_c_trial,
-                                            feasibility_cache.c_trial,
-                                            feasibility_cache.lambda_f,
-                                            μ,
-                                        )
-                                    end
-                                    trial_merit2 =
-                                        F_z_next^2 +
-                                        μ * dot(
-                                            feasibility_cache.bar_c_trial,
-                                            feasibility_cache.bar_c_trial,
-                                        )
-                                else
-                                    trial_merit2 = F_z_next^2
-                                end
+                                trial_merit2 = F_z_next^2
                                 armijo_failed =
-                                    use_feasibility_merit ?
-                                    trial_merit2 >
-                                    current_merit2 +
-                                    2.0 * armijo_constant * α * armijo_slope :
                                     F_z_next^2 >=
                                     F_z^2 + 2.0 * armijo_constant * α * armijo_slope
-                                while armijo_failed ||
-                                          _nonnegativity_violated(σ, δσ, α) ||
-                                          _nonnegativity_violated(γ, δγ, α)
-                                    if α < min_stepsize
-                                        break # exhausted at this η — escalate below
-                                    end
-
-                                    α *= 0.5
-                                    @. z_trial = z + α * δz
-                                    @timeit TO "residual evaluation" mcp.F!(
-                                        F_trial,
-                                        z_trial;
-                                        θ,
-                                        ϵ,
-                                        η = 0.0,
-                                    )
-                                    F_z_next = norm(F_trial, 2)
-                                    if use_feasibility_merit
-                                        @timeit TO "innermost preference evaluation" begin
-                                            mcp.innermost_preference!(
-                                                feasibility_cache.c_trial,
-                                                z_trial;
-                                                θ,
-                                                ϵ,
-                                                η = 0.0,
-                                            )
-                                            _scaled_shifted_multiplier!(
-                                                feasibility_cache.bar_c_trial,
-                                                feasibility_cache.c_trial,
-                                                feasibility_cache.lambda_f,
-                                                μ,
-                                            )
-                                        end
-                                        trial_merit2 =
-                                            F_z_next^2 +
-                                            μ * dot(
-                                                feasibility_cache.bar_c_trial,
-                                                feasibility_cache.bar_c_trial,
-                                            )
-                                    else
-                                        trial_merit2 = F_z_next^2
-                                    end
-                                    armijo_failed =
-                                        use_feasibility_merit ?
-                                        trial_merit2 >
-                                        current_merit2 +
-                                        2.0 * armijo_constant * α * armijo_slope :
-                                        F_z_next^2 >=
-                                        F_z^2 +
-                                        2.0 * armijo_constant * α * armijo_slope
-                                end
                             end
                         end
 
                         if α >= min_stepsize
                             @timeit TO "line search" begin
                                 pred_reduction =
-                                    current_merit2 -
-                                    _shifted_norm2(step_residual, α, step_product)
+                                    current_merit2 - _shifted_norm2(F, α, Jδz)
                                 actual_reduction = current_merit2 - trial_merit2
                             end
                             break
@@ -822,10 +608,6 @@ function solve(
                         break
                     end
 
-                    if use_feasibility_merit
-                        merit_value = sqrt(trial_merit2)
-                    end
-
                     # Levenberg-Marquardt gain-ratio update for the next Newton iteration's η.
                     # https://www.cs.cornell.edu/courses/cs4220/2023sp/lec/2023-04-19.pdf
                     if use_klu && reused_jacobian
@@ -862,11 +644,7 @@ function solve(
                     end
                     if use_klu
                         last_alpha = α
-                        last_step_quality = if use_feasibility_merit
-                            current_merit2 > 0 ? sqrt(trial_merit2 / current_merit2) : 0.0
-                        else
-                            F_z_next / F_z
-                        end
+                        last_step_quality = F_z_next / F_z
                         if reused_jacobian
                             iters_since_jacobian += 1
                         end
@@ -895,56 +673,11 @@ function solve(
 
                 @timeit TO "iterate update and bookkeeping" begin
                     if record_convergence
-                        constrained_stationarity_value = NaN
-                        if use_feasibility_merit
-                            # Record the exact constrained least-squares
-                            # stationarity residual at the accepted iterate. This
-                            # is the stationarity condition used by the outer AL
-                            # termination test, rather than the inner-merit
-                            # gradient evaluated before the step.
-                            @timeit TO "convergence history stationarity" begin
-                                mcp.∇F_z!(∇F, z; θ, ϵ, η = 0.0)
-                                mcp.∇innermost_preference_z!(
-                                    preference_jacobian,
-                                    z;
-                                    θ,
-                                    ϵ,
-                                    η = 0.0,
-                                )
-                                constrained_stationarity_value =
-                                    _constrained_stationarity!(
-                                        merit_gradient,
-                                        ∇F,
-                                        F,
-                                        preference_jacobian,
-                                        feasibility_cache.lambda_f,
-                                    )
-                            end
-                        end
                         push!(kkt_error_history, kkt_error)
                         push!(eta_history, η)
                         push!(alpha_history, min(α_σ, α_γ))
                         push!(delta_z_norm_history, norm(δz, 2))
                         push!(rho_history, ρ)
-                        # `merit_stationarity` was evaluated where the Jacobian was
-                        # assembled (start of this iteration), so it lags the
-                        # accepted iterate by one step. The AL penalty changes only
-                        # at a multiplier-major update, never after an accepted step.
-                        push!(merit_history, merit_value)
-                        push!(
-                            merit_stationarity_history,
-                            use_feasibility_merit ? merit_stationarity : NaN,
-                        )
-                        push!(
-                            constrained_stationarity_history,
-                            constrained_stationarity_value,
-                        )
-                        push!(
-                            lambda_f_norm_history,
-                            use_feasibility_merit ?
-                            norm(feasibility_cache.lambda_f, Inf) : NaN,
-                        )
-                        push!(mu_history, use_feasibility_merit ? μ : NaN)
                     end
                     if record_condition_number
                         push!(condition_number_history, condition_number)
@@ -957,15 +690,7 @@ function solve(
             end
         end
 
-        if use_feasibility_merit
-            # Multiplier-major updates share the existing inner-iteration budget;
-            # no additional public outer-loop option is introduced for this
-            # focused prototype.
-            if status !== :merit_stationarity
-                status = :failed
-            end
-            break
-        elseif status === :solved
+        if status === :solved
             break
         end
 
@@ -987,56 +712,7 @@ function solve(
     # Evaluate stopping criterion/convergence at the returned iterate.
     @timeit TO "residual evaluation" mcp.F!(F, z; θ, ϵ, η = 0.0)
     kkt_error = norm(F, 2)
-    final_μ = use_feasibility_merit ? μ : 0.0
-    if use_feasibility_merit
-        @timeit TO "Jacobian evaluation" mcp.∇F_z!(∇F, z; θ, ϵ, η = 0.0)
-        _evaluate_feasibility_merit!(
-            merit_gradient,
-            feasibility_cache,
-            mcp,
-            preference_jacobian,
-            ∇F,
-            F,
-            z,
-            θ,
-            ϵ,
-            μ,
-        )
-        merit_stationarity = _constrained_stationarity!(
-            merit_gradient,
-            ∇F,
-            F,
-            preference_jacobian,
-            feasibility_cache.lambda_f,
-        )
-        complementarity_error = _complementarity_error(
-            feasibility_cache.c,
-            feasibility_cache.lambda_f,
-        )
-        feasibility_error = _violation_norm_inf(feasibility_cache.c)
-        stopping_criterion =
-            merit_stationarity <= tol &&
-            feasibility_error <= feasibility_tol &&
-            complementarity_error <= feasibility_tol
-        if record_convergence && !isempty(constrained_stationarity_history)
-            # A final multiplier-only AL update does not accept a Newton step.
-            # Keep the last plotted point synchronized with the multiplier and
-            # stationarity values on which the returned status is based.
-            constrained_stationarity_history[end] = merit_stationarity
-            lambda_f_norm_history[end] = norm(feasibility_cache.lambda_f, Inf)
-            mu_history[end] = μ
-        end
-    else
-        merit_stationarity = NaN
-        feasibility_error = NaN
-        complementarity_error = NaN
-        stopping_criterion = kkt_error <= tol
-    end
-    status = if use_feasibility_merit
-        stopping_criterion ? :merit_stationarity : :failed
-    else
-        kkt_error <= tol ? :solved : :failed
-    end
+    status = kkt_error <= tol ? :solved : :failed
 
     result = (;
         status,
@@ -1049,12 +725,6 @@ function solve(
         ϵ,
         outer_iters,
         total_iters,
-        μ = final_μ,
-        lambda_f = use_feasibility_merit ? feasibility_cache.lambda_f : nothing,
-        merit_stationarity,
-        feasibility_error,
-        complementarity_error,
-        al_multiplier_updates,
         klu_singular_retries = klu_singular_retries[],
         svd_fallback_count = svd_fallback_count[],
     )
@@ -1067,11 +737,6 @@ function solve(
             alpha_history,
             delta_z_norm_history,
             rho_history,
-            merit_history,
-            merit_stationarity_history,
-            constrained_stationarity_history,
-            lambda_f_norm_history,
-            mu_history,
         )
     end
     result
@@ -1161,213 +826,6 @@ function _safeguard_warmstart!(z, mcp, options)
             clamp.(z[mcp.inequality_constraint_dual_dims], κ_dual_lo, κ_dual_hi)
     end
     z
-end
-
-"""
-Fixed-pattern workspace for stacking the KKT Jacobian with the frozen-active-set
-innermost-preference Jacobian. All sparse construction and pattern lookup happen
-once during solver initialization.
-"""
-struct FeasibilityAugmentationCache
-    J_aug::SparseArrays.SparseMatrixCSC{Float64,Int}
-    J_positions::Vector{Int}
-    C_positions::Vector{Int}
-    C_rows::Vector{Int}
-    F_aug::Vector{Float64}
-    J_aug_δz::Vector{Float64}
-    c::Vector{Float64}
-    c_trial::Vector{Float64}
-    bar_c::Vector{Float64}
-    bar_c_trial::Vector{Float64}
-    lambda_f::Vector{Float64}
-end
-
-function _build_feasibility_augmentation_cache(
-    J::SparseArrays.SparseMatrixCSC,
-    C::SparseArrays.SparseMatrixCSC,
-    m::Integer,
-    q::Integer,
-    n::Integer,
-)
-    nnzJ = SparseArrays.nnz(J)
-    nnzC = SparseArrays.nnz(C)
-    Is = Vector{Int}(undef, nnzJ + nnzC)
-    Js = similar(Is)
-    J_rows = SparseArrays.rowvals(J)
-    C_rows_sparse = SparseArrays.rowvals(C)
-    C_rows = Vector{Int}(undef, nnzC)
-
-    @inbounds for col in axes(J, 2)
-        for k in SparseArrays.nzrange(J, col)
-            Is[k] = J_rows[k]
-            Js[k] = col
-        end
-    end
-    @inbounds for col in axes(C, 2)
-        for k in SparseArrays.nzrange(C, col)
-            row = C_rows_sparse[k]
-            Is[nnzJ + k] = m + row
-            Js[nnzJ + k] = col
-            C_rows[k] = row
-        end
-    end
-
-    J_aug = SparseArrays.sparse(Is, Js, ones(length(Is)), m + q, n)
-    augmented_rows = SparseArrays.rowvals(J_aug)
-    locate = (row, col) -> begin
-        range = SparseArrays.nzrange(J_aug, col)
-        range[searchsortedfirst(view(augmented_rows, range), row)]
-    end
-    J_positions = Vector{Int}(undef, nnzJ)
-    C_positions = Vector{Int}(undef, nnzC)
-    @inbounds for col in axes(J, 2)
-        for k in SparseArrays.nzrange(J, col)
-            J_positions[k] = locate(J_rows[k], col)
-        end
-    end
-    @inbounds for col in axes(C, 2)
-        for k in SparseArrays.nzrange(C, col)
-            C_positions[k] = locate(m + C_rows[k], col)
-        end
-    end
-
-    FeasibilityAugmentationCache(
-        J_aug,
-        J_positions,
-        C_positions,
-        C_rows,
-        zeros(m + q),
-        zeros(m + q),
-        zeros(q),
-        zeros(q),
-        zeros(q),
-        zeros(q),
-        zeros(q),
-    )
-end
-
-"Compute the scaled PHR residual `[λ_f / μ - c]_+` in place."
-function _scaled_shifted_multiplier!(bar_c, c, lambda_f, μ)
-    @inbounds for i in eachindex(bar_c, c, lambda_f)
-        bar_c[i] = max(lambda_f[i] / μ - c[i], 0.0)
-    end
-    bar_c
-end
-
-"Compute `[-c]_+` in place (the zero-multiplier special case)."
-function _constraint_violation!(bar_c, c)
-    @inbounds for i in eachindex(bar_c, c)
-        bar_c[i] = max(-c[i], 0.0)
-    end
-    bar_c
-end
-
-"Apply the PHR multiplier update `λ_f <- [λ_f - μc]_+ = μ [λ_f/μ-c]_+`."
-function _update_feasibility_multiplier!(lambda_f, bar_c, μ)
-    @inbounds for i in eachindex(lambda_f, bar_c)
-        lambda_f[i] = μ * bar_c[i]
-    end
-    lambda_f
-end
-
-"Scatter the current numerical values into the fixed-pattern stacked system."
-function _update_feasibility_augmentation!(
-    cache::FeasibilityAugmentationCache,
-    J,
-    C,
-    F,
-    μ,
-)
-    sqrt_mu = sqrt(μ)
-    augmented_values = SparseArrays.nonzeros(cache.J_aug)
-    J_values = SparseArrays.nonzeros(J)
-    C_values = SparseArrays.nonzeros(C)
-    @inbounds for k in eachindex(J_values)
-        augmented_values[cache.J_positions[k]] = J_values[k]
-    end
-    @inbounds for k in eachindex(C_values)
-        row = cache.C_rows[k]
-        augmented_values[cache.C_positions[k]] =
-            cache.bar_c[row] > 0 ? -sqrt_mu * C_values[k] : 0.0
-    end
-    @inbounds for i in eachindex(F)
-        cache.F_aug[i] = F[i]
-    end
-    offset = length(F)
-    @inbounds for i in eachindex(cache.bar_c)
-        cache.F_aug[offset + i] = sqrt_mu * cache.bar_c[i]
-    end
-    cache
-end
-
-"Refresh the PHR inner-merit residual and frozen-active Jacobian."
-function _evaluate_feasibility_merit!(
-    merit_gradient,
-    cache::FeasibilityAugmentationCache,
-    mcp,
-    preference_jacobian,
-    J,
-    F,
-    z,
-    θ,
-    ϵ,
-    μ,
-)
-    @timeit TO "innermost preference evaluation" begin
-        mcp.innermost_preference!(cache.c, z; θ, ϵ, η = 0.0)
-        mcp.∇innermost_preference_z!(
-            preference_jacobian,
-            z;
-            θ,
-            ϵ,
-            η = 0.0,
-        )
-        _scaled_shifted_multiplier!(cache.bar_c, cache.c, cache.lambda_f, μ)
-    end
-    @timeit TO "KKT system assembly" _update_feasibility_augmentation!(
-        cache,
-        J,
-        preference_jacobian,
-        F,
-        μ,
-    )
-    mul!(merit_gradient, transpose(cache.J_aug), cache.F_aug)
-    norm(merit_gradient, Inf), _violation_norm_inf(cache.c)
-end
-
-"Compute `‖J'F - C'λ_f‖∞` into the existing gradient workspace."
-function _constrained_stationarity!(gradient, J, F, C, lambda_f)
-    mul!(gradient, transpose(J), F)
-    mul!(gradient, transpose(C), lambda_f, -1.0, 1.0)
-    norm(gradient, Inf)
-end
-
-"Allocation-free Euclidean norm of the inequality violation `[-c]_+`."
-function _violation_norm2(c)
-    accumulator = zero(eltype(c))
-    @inbounds for value in c
-        violation = max(-value, 0.0)
-        accumulator += violation * violation
-    end
-    sqrt(accumulator)
-end
-
-"Allocation-free infinity norm of the complementarity products `λ_f .* c`."
-function _complementarity_error(c, lambda_f)
-    result = zero(promote_type(eltype(c), eltype(lambda_f)))
-    @inbounds for i in eachindex(c, lambda_f)
-        result = max(result, abs(lambda_f[i] * c[i]))
-    end
-    result
-end
-
-"Allocation-free infinity norm of `[-c]_+`."
-function _violation_norm_inf(c)
-    result = zero(eltype(c))
-    @inbounds for value in c
-        result = max(result, max(-value, 0.0))
-    end
-    result
 end
 
 """

@@ -48,10 +48,6 @@ set as g(x) >= 0 because exp(r) - 1 = 0 iff r = 0, and exp(r) - 1 > 0 iff r > 0.
 function default_interior_point_options(;
     verbose = false,
     η₀ = 0.0,
-    use_feasibility_merit = false,
-    μ₀ = 1.0,
-    μ_max = 1e4,
-    mu_growth = 10.0,
     record_convergence = false,
 )
     return ReducedGOOP.InteriorPointOptions(;
@@ -65,10 +61,6 @@ function default_interior_point_options(;
         min_stepsize = 1e-20,
         linesearch = :backtracking,
         linear_solver = :klu,
-        use_feasibility_merit,
-        μ₀,
-        μ_max,
-        mu_growth,
         record_convergence,
         verbose,
     )

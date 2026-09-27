@@ -83,10 +83,6 @@ function comparison_solver_options(;
         linesearch = :backtracking,
         linear_solver = :klu,
         record_convergence,
-        use_feasibility_merit = true,
-        μ₀ = 1.0,
-        μ_max = 1e4,
-        mu_growth = 10.0,
         verbose,
     )
 end
