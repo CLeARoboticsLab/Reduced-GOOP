@@ -288,8 +288,6 @@ function build_benchmark_problem(; num_players::Int, levels::Int, kind::Symbol)
         is_prioritized_constraint = [fill(false, levels) for _ in 1:num_players],
         equality_constraints = fill(nothing, num_players),
         inequality_constraints,
-        shared_equality_constraint = nothing,
-        shared_inequality_constraint = nothing,
     )
 
     active_indices = num_players == 1 ? [1, PRIMAL_DIM + 3] : [1, 3]
@@ -339,8 +337,6 @@ function build_unconstrained_quadratic_problem()
         is_prioritized_constraint = [[false]],
         equality_constraints = [nothing],
         inequality_constraints = [nothing],
-        shared_equality_constraint = nothing,
-        shared_inequality_constraint = nothing,
     )
 
     return (; problem, expected, z₀ = zeros(n))

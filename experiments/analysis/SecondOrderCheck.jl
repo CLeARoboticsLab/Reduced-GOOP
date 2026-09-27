@@ -58,7 +58,7 @@ SecondOrderCheck.check_solution(problem, solution_dict["z"], θ)
   * The candidate `z` uses the variable layout of
 	`generate_slacked_reduced_kkt_system` / `generate_slacked_quasi_kkt_system`
 	(z = [x; Λ; Ψ]); solutions of the `complete` formulation are not supported.
-  * Purely equality-constrained: no private or shared inequality constraints
+  * Purely equality-constrained: no inequality constraints
 	(prioritized-constraint preference levels entering as smooth penalties are
 	fine — they are part of the objectives). With no inequalities the critical
 	cone is the tangent space null(∂c/∂w).
@@ -175,9 +175,6 @@ function build_checker(
         "SecondOrderCheck supports purely equality-constrained GOOPs; found private inequality constraints. " *
         "Inequalities introduce interior-point slacks/duals (σ, γ) whose layout and active-set handling are not implemented.",
     )
-    problem.shared_equality_dims == 0 && problem.shared_inequality_dims == 0 || error(
-        "SecondOrderCheck supports purely equality-constrained GOOPs; found shared constraints.",
-    )
 
     x_blocked =
         STU.make_variables(backend, :x, sum(problem.primal_dims)) |>
@@ -193,7 +190,7 @@ function build_checker(
     ]
 
     # Variable layout of generate_slacked_reduced_kkt_system with no slack /
-    # inequality-dual / shared blocks: z = [x; Λ; Ψ], Λ grouped per player with
+    # inequality-dual blocks: z = [x; Λ; Ψ], Λ grouped per player with
     # levels ascending, Ψ grouped per player with levels descending (creation order).
     z_symbolic = vcat(
         collect(x_blocked),

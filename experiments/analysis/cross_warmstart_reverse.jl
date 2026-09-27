@@ -71,8 +71,6 @@ problem4 = ReducedGOOP.ParametricGOOP(
     is_prioritized_constraint = is_constraint4,
     equality_constraints = problem.equality_constraints,
     inequality_constraints = [nothing, nothing],
-    shared_equality_constraint = nothing,
-    shared_inequality_constraint = nothing,
 )
 
 instance_states = (;

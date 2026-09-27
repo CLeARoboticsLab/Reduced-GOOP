@@ -89,7 +89,7 @@ dual solution independently with `NonlinearSolve`.
 
 | Symbol | Role |
 | --- | --- |
-| `ParametricGOOP` | Stores player preferences, prioritized-constraint flags, player-wise equality and inequality constraints, optional shared constraints, dimensions, and number of players. |
+| `ParametricGOOP` | Stores player preferences, prioritized-constraint flags, player-wise equality and inequality constraints, dimensions, and number of players. |
 | `ParametricGOOP(x, theta; ...)` | Convenience constructor that infers primal, parameter, equality, and inequality dimensions from template block vectors. |
 | `QuasiLagrangianTerm` and helpers | Internal machinery for the quasi formulation; it builds gradients while dropping higher-order derivative terms after a bounded order. |
 

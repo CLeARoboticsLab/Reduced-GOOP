@@ -354,8 +354,6 @@ function get_setup(scenario_config::ScenarioConfig)
             is_prioritized_constraint = goop_is_prioritized_constraint,
             equality_constraints,
             inequality_constraints = [nothing, nothing],
-            shared_equality_constraint = nothing,
-            shared_inequality_constraint = nothing,
         )
     end
 
@@ -413,8 +411,6 @@ function get_setup(scenario_config::ScenarioConfig)
             is_prioritized_constraint = scalarized_is_prioritized_constraint,
             equality_constraints,
             inequality_constraints = [nothing, nothing],
-            shared_equality_constraint = nothing,
-            shared_inequality_constraint = nothing,
         )
     end
 

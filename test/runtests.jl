@@ -257,8 +257,6 @@ end
 		is_prioritized_constraint = [[false, false]],
 		equality_constraints = [(x, θ) -> [x[Block(1)][1]]],
 		inequality_constraints = [(x, θ) -> [x[Block(1)][2]]],
-		shared_equality_constraint = nothing,
-		shared_inequality_constraint = nothing,
 	)
 	kkt = reduced_kkt_system(problem)
 
@@ -327,8 +325,6 @@ end
 		is_prioritized_constraint = [[false, false, true] for _ in 1:num_players],
 		equality_constraints = fill(nothing, num_players),
 		inequality_constraints = fill(nothing, num_players),
-		shared_equality_constraint = nothing,
-		shared_inequality_constraint = nothing,
 	)
 
 	native = ReducedGOOP.generate_slacked_reduced_kkt_system(problem)

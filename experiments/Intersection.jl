@@ -198,14 +198,14 @@ function get_setup(
         end for i in 1:num_players
     ]
 
-    shared_equality_constraint = function (z, θ)
+    collision_equality_constraint = function (z, θ)
         squared_violation.(shared_collision_avoidance(z, θ))
     end
 
     equality_constraints = [
         (z, θ) -> vcat(
             player_equality_constraints[i](z, θ),
-            shared_equality_constraint(z, θ),
+            collision_equality_constraint(z, θ),
         ) for i in 1:num_players
     ]
 
@@ -253,8 +253,6 @@ function get_setup(
                                             is_prioritized_constraint,
                 equality_constraints,
                 inequality_constraints = [nothing, nothing],
-                shared_equality_constraint = nothing,
-                shared_inequality_constraint = nothing,
             )
         end
     end
@@ -302,7 +300,7 @@ function get_setup(
     equality_constraint = function (z, θ)
         vcat(
             mapreduce(f -> f(z, θ), vcat, player_equality_constraints),
-            shared_equality_constraint(z, θ),
+            collision_equality_constraint(z, θ),
         )
     end
     inequality_constraint = nothing
