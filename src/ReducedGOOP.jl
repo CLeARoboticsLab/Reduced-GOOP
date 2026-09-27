@@ -17,8 +17,13 @@ include("solver.jl")
 include("parametric_optimization_problem.jl")
 
 # Scholtes relaxation (opt-in via `complementarity = :scholtes`), ported from
-# ScholtesReducedGOOP.jl by Jingqi Li.
+# ScholtesReducedGOOP.jl by Jingqi Li: the KKT blocks, the residual and sign box,
+# the linear algebra, the projected bound rule, the ρ-homotopy solver, and the
+# certificate and multistart layers.
 include("scholtes_kkt.jl")
 include("scholtes_residual.jl")
+include("scholtes_linsolve.jl")
+include("scholtes_step.jl")
+include("scholtes_solver.jl")
 
 end # module ReducedGOOP

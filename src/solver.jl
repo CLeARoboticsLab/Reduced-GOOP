@@ -61,10 +61,13 @@ Selected `InteriorPointOptions` fields:
     - `record_convergence`: record KKT-error, η, raw direction norm, accepted
       step-size, and gain-ratio histories.
     - `record_condition_number`: record dense-SVD condition-number history.
-    - `linear_solver::Symbol = :klu`: `:svd` (dense SVD with Tikhonov filter) or `:klu`
+    - `linear_solver::Symbol = :klu`: `:svd` (dense SVD with Tikhonov filter), `:klu`
       (sparse KLU on the balanced augmented system `[√ηI J; Jᵀ -√ηI]`, with one
-      symbolic analysis followed by numeric refactorizations). `:klu` does not support
-      `record_condition_number`, `tsvd_threshold > 0`, or `use_marquardt_scaling`.
+      symbolic analysis followed by numeric refactorizations; η is the Tikhonov
+      shift), its explicit alias `:klu_sqrt_eta`, or `:klu_eta` (the same KLU path
+      on `[ηI J; Jᵀ -ηI]`, so the shift is η², the convention of the Scholtes
+      `:normal` backend). The KLU variants do not support `record_condition_number`,
+      `tsvd_threshold > 0`, or `use_marquardt_scaling`.
     - `armijo_constant::Float64 = 1e-4`: sufficient-decrease constant `c` of the
       backtracking Armijo condition on φ(z) = ‖F‖²/2; `0.0` recovers the plain
       decrease test.
@@ -116,14 +119,16 @@ function solve(
     reuse_factorization_iters = options.reuse_factorization_iters
     reuse_quality_threshold = options.reuse_quality_threshold
 
-    linear_solver ∈ (:svd, :klu) || throw(
-        ArgumentError("Unsupported linear_solver $(linear_solver). Use :svd or :klu."),
+    linear_solver ∈ (:svd, :klu, :klu_sqrt_eta, :klu_eta) || throw(
+        ArgumentError(
+            "Unsupported linear_solver $(linear_solver). Use :svd, :klu, :klu_sqrt_eta or :klu_eta.",
+        ),
     )
     klu_singularity_eta_growth >= 1 ||
         throw(ArgumentError("klu_singularity_eta_growth must be at least 1."))
     klu_singularity_max_retries >= 0 ||
         throw(ArgumentError("klu_singularity_max_retries must be nonnegative."))
-    use_klu = linear_solver === :klu
+    use_klu = linear_solver !== :svd
     if use_klu && (record_condition_number || tsvd_threshold > 0 || use_marquardt_scaling)
         throw(
             ArgumentError(
@@ -195,8 +200,12 @@ function solve(
         jacobian_scatter_indices = use_klu ? Int[] : _dense_scatter_indices(∇F)
         aug_cache =
             use_klu ?
-            _build_augmented_kkt_cache(∇F, mcp.kkt_dimension, mcp.variable_dimension) :
-            nothing
+            _build_augmented_kkt_cache(
+                ∇F,
+                mcp.kkt_dimension,
+                mcp.variable_dimension;
+                sqrt_eta = linear_solver !== :klu_eta,
+            ) : nothing
         # Modified-Newton (factorization reuse) state; only active on the :klu
         # path of the backtracking branch when reuse_factorization_iters > 0.
         iters_since_jacobian = typemax(Int)  # force a fresh Jacobian on the first iteration
@@ -850,6 +859,11 @@ symbolic analysis is computed once and only numeric refactorizations happen
 per iteration. `J_positions`/`Jt_positions` map `nonzeros(J)` (CSC order) into
 `nonzeros(K)` for the two off-diagonal blocks; `identity_positions` and
 `eta_positions` address the two η-dependent diagonal blocks.
+
+`sqrt_eta` selects what η means. `true` (`:klu`, `:klu_sqrt_eta`): the diagonals are
+`±√η`, so η is the Tikhonov shift, `δz = -(JᵀJ + ηI)⁻¹JᵀF`. `false` (`:klu_eta`):
+the diagonals are `±η`, so the shift is η², `δz = -(JᵀJ + η²I)⁻¹JᵀF`, the convention
+of the `:normal` Scholtes backend and of ScholtesReducedGOOP.jl's `:klu`.
 """
 struct AugmentedKKTCache
     K::SparseArrays.SparseMatrixCSC{Float64,Int}
@@ -862,13 +876,15 @@ struct AugmentedKKTCache
     sol::Vector{Float64}
     m::Int
     n::Int
+    sqrt_eta::Bool
 end
 
 "Build the augmented-system cache once from the fixed sparsity pattern of `∇F`."
 function _build_augmented_kkt_cache(
     ∇F::SparseArrays.SparseMatrixCSC,
     m::Integer,
-    n::Integer,
+    n::Integer;
+    sqrt_eta::Bool = true,
 )
     rows, cols, _ = SparseArrays.findnz(∇F)
     nnzJ = length(rows)
@@ -920,6 +936,7 @@ function _build_augmented_kkt_cache(
         zeros(m + n),
         m,
         n,
+        sqrt_eta,
     )
 end
 
@@ -938,9 +955,9 @@ end
 "Rewrite only the η-dependent diagonals (used by the η-retry loop, where J is unchanged)."
 function _update_augmented_eta!(cache::AugmentedKKTCache, η)
     K_nonzeros = SparseArrays.nonzeros(cache.K)
-    # Balanced scaling γ = √η with a floor keeping both diagonal blocks
-    # strictly definite even if η underflows to 0.
-    γ = sqrt(max(η, 1e-12))
+    # Balanced scaling γ = √η (or γ = η, see `sqrt_eta`) with a floor keeping both
+    # diagonal blocks strictly definite even if η underflows to 0.
+    γ = cache.sqrt_eta ? sqrt(max(η, 1e-12)) : max(η, 1e-12)
     @inbounds for position in cache.identity_positions
         K_nonzeros[position] = γ
     end
@@ -1018,7 +1035,10 @@ function _klu_step_with_fallback!(
     verbose &&
         @warn "KLU factorization singular after η escalation; falling back to a dense SVD step for this iteration."
     !isnothing(svd_fallback_counter) && (svd_fallback_counter[] += 1)
-    _svd_fallback_step!(δz, ∇F, F, max(η_used, 1e-12))
+    # The dense step uses the same effective Tikhonov shift as the factorization it
+    # replaces: η for `sqrt_eta = true`, η² for `sqrt_eta = false`.
+    shift = cache.sqrt_eta ? max(η_used, 1e-12) : max(η_used, 1e-12)^2
+    _svd_fallback_step!(δz, ∇F, F, shift)
     η_used
 end
 
