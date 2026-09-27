@@ -25,7 +25,8 @@ include(joinpath(@__DIR__, "robotic_arm_visualization.jl"))
 
 Build the scenario (keyword overrides of `ScenarioConfig` in `scenario_kwargs`), run the ρ
 sweep (a cold row per ρ, then the warm-z+eq chain), print one line per row, pick the
-converged row with the smallest ‖K₀‖/√m (as the planner does), and save the rows, the
+converged row with the smallest goal error (as the source's `demo()` does; the MPC
+planner in Robotic_arm_receding.jl ranks by ‖K₀‖/√m, as the source's planner does), and save the rows, the
 chosen plan and its metrics to `data/robotic_arm_scholtes/<run_id>/`.
 """
 function demo(; scenario_kwargs::NamedTuple = (;), linear_solver::Symbol = LINEAR_SOLVER,
@@ -52,10 +53,13 @@ function demo(; scenario_kwargs::NamedTuple = (;), linear_solver::Symbol = LINEA
             push!(rows, (; tag, rho = ρ, result = r, time = t, metrics = m))
         end)
 
+    # As the source's demo() ranks: converged rows by goal error; if none converged, the
+    # cold RHO_REF row (or, when the sweep has no such row, the smallest residual).
     converged = filter(row -> row.result.residual / scale < Core_.TOL, rows)
-    best = isempty(converged) ? argmin(row -> row.result.residual, rows) :
-           argmin(row -> row.result.residual, converged)
-    isempty(converged) && @warn "no row met ||K_0||/sqrt(m) < $(Core_.TOL); reporting the smallest residual"
+    ref_rows = filter(row -> row.tag == "cold" && row.rho == Core_.RHO_REF, rows)
+    best = !isempty(converged) ? argmin(row -> row.metrics.goal_error, converged) :
+           !isempty(ref_rows) ? first(ref_rows) : argmin(row -> row.result.residual, rows)
+    isempty(converged) && @warn "no row met ||K_0||/sqrt(m) < $(Core_.TOL); the reported plan need not be feasible"
     m = best.metrics
     @printf("\nplan: rho = %.0e (%s), goal error %.4f, min gap %.3f (d_min %.2f), max tilt %.3f, handle drift %.1e, worst g %.1e\n",
             best.rho, best.tag, m.goal_error, m.min_gap, sc.d_min, m.max_tilt, m.max_handle_drift,
