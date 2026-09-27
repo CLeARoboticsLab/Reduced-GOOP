@@ -7,8 +7,35 @@ constraints that are not explicitly included in the KKT system.
 The KKT system is parameterized by a vector θ and a scalar ϵ > 0 which
 controls the complementarity relaxation of the interior point scheme.
 
-TODO (@Jingqi/@DongHo): Please flesh this comment out with more of the math,
-or with a pointer to a LaTeX derivation somewhere in this repository.
+# The reduced system (`generate_slacked_reduced_kkt_system`)
+
+Player i has levels k = 1 (outermost) … Kⁱ (innermost) with objectives hₖ, its own
+equalities f(x, θ) = 0 and inequalities g(x, θ) ≥ 0. A level whose
+`is_prioritized_constraint` flag is set uses `smooth_piecewise_preference_objective`
+(max(−hₖ, 0)^(k+2)) in place of hₖ. Each level k carries its own copies λₖ, γₖ, σₖ
+and has the Lagrangian
+
+    Lₖ = hₖ − λₖᵀf − γₖᵀg − ψₖᵀπₖ₊₁ − Σ_{m>k} φₖ,ₘᵀ(g ⊙ γₘ),
+
+where πₖ₊₁ = [∇ₓLₖ₊₁; πₖ₊₂; …] stacks the stationarity residuals of every level below
+k (the lower levels' policy, enforced through the multipliers ψₖ), and ∇ₓ is the gradient
+w.r.t. player i's own xⁱ only. The last two terms are absent at the innermost level.
+F stacks, for every player and level,
+
+    ∇ₓLₖ + η xⁱ = 0                     stationarity (η: Newton regularization)
+    f = 0                               innermost level only
+    g − σₖ = 0                          interior-point slack
+    σₖ ⊙ γₖ − ϵ𝟙 = 0                    relaxed complementarity
+
+over z = [x; s; σ; λ; γ; ψ; φ]. The solver keeps σ, γ (and s) positive, drives ϵ → 0,
+and recovers x from the primal block. φ enters only through the stationarity rows. The
+reduced path creates no preference slacks s; the complete formulation
+(`generate_slacked_complete_kkt_system`) uses them, with the nested KKT conditions
+written out explicitly. With `drop_higher_order_terms = true` (quasi), every term of
+∇ₓLₖ that would be differentiated more than twice is set to zero.
+
+For the Scholtes form of the same hierarchy (exact φ rows, ρ homotopy) see
+`ScholtesKKTSystem` in src/scholtes_kkt.jl.
 """
 
 struct GOOPKKTSystem{T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11}

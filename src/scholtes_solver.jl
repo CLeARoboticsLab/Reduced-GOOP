@@ -18,6 +18,14 @@
 # `P` is the projected rule's arc and the merit is ∞ outside the sign box, so
 # positivity is a property of the direction, never a test on the step length.
 
+"""
+    Scholtes()
+
+Solver tag for the Scholtes-relaxation ρ homotopy on a `ScholtesKKTSystem`
+(`generate_slacked_reduced_kkt_system(goop; complementarity = :scholtes)`), used as
+`solve(Scholtes(), kkt, θ; options = ScholtesOptions(...))`. Scheme by Jingqi Li
+(ScholtesReducedGOOP.jl).
+"""
 struct Scholtes <: SolverType end
 
 """
