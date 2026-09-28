@@ -42,7 +42,8 @@ end
          run_id = nothing, plot = ENV["GOOP_PLOT"] != "0")
 
 Run `num_steps` closed-loop MPC steps and save the executed trajectory, per-step solve
-data and figures to `data/robotic_arm_scholtes_mpc/<run_id>/`.
+data and figures to `data/robotic_arm_scholtes_mpc/<run_id>/` (`mpc.jld2`). Returns
+`nothing`.
 """
 function demo(; num_steps::Integer = 20, scenario_kwargs::NamedTuple = (;),
               linear_solver::Symbol = LINEAR_SOLVER, run_id = nothing,
@@ -119,7 +120,7 @@ function demo(; num_steps::Integer = 20, scenario_kwargs::NamedTuple = (;),
     jldsave(joinpath(run_dir, "mpc.jld2"); scenario = sc, executed, steps, build_time = ctx.build_time)
     plot && save_plan_figure(sc, steps[1].z, joinpath(run_dir, "first_plan.pdf"); title = "MPC step 1 plan")
     println("wrote ", normpath(run_dir))
-    return (; ctx, executed, steps)
+    return nothing
 end
 
 end # module Robotic_arm_mpc

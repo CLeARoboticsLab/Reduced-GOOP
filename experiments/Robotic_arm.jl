@@ -27,7 +27,8 @@ Build the scenario (keyword overrides of `ScenarioConfig` in `scenario_kwargs`),
 sweep (a cold row per ρ, then the warm-z+eq chain), print one line per row, pick the
 converged row with the smallest goal error (as the source's `demo()` does; the MPC
 planner in Robotic_arm_receding.jl ranks by ‖K₀‖/√m, as the source's planner does), and save the rows, the
-chosen plan and its metrics to `data/robotic_arm_scholtes/<run_id>/`.
+chosen plan and its metrics to `data/robotic_arm_scholtes/<run_id>/` (`sweep.jld2`).
+Returns `nothing`, as the source's `demo()` does.
 """
 function demo(; scenario_kwargs::NamedTuple = (;), linear_solver::Symbol = LINEAR_SOLVER,
               stop_at_tol::Bool = false, run_id = nothing,
@@ -79,7 +80,7 @@ function demo(; scenario_kwargs::NamedTuple = (;), linear_solver::Symbol = LINEA
                                 joinpath(run_dir, "convergence.pdf"))
     end
     println("wrote ", normpath(run_dir))
-    return (; ctx, rows, best)
+    return nothing
 end
 
 end # module Robotic_arm
