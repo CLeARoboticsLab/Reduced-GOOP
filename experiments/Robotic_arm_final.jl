@@ -55,6 +55,30 @@ function shift_plan(sc, z)
 end
 
 """
+    warm_step(ctx, θ, z0, previous, coarser_rhos; eq_cols, linear_solver, max_inner)
+
+One closed-loop warm start: warm-z+eq from `previous` shifted one knot, at `previous.rho`
+and then each of `coarser_rhos`, stopping at the first converged solve. Returns
+`(; label, result, attempts, shifted_z)`, `result === nothing` if none converged.
+`demo`'s warm-up calls it too, so step 1 compiles exactly the code the MPC steps run.
+"""
+function warm_step(ctx, θ, z0, previous, coarser_rhos; eq_cols, linear_solver,
+                   max_inner = Core_.MAX_INNER)
+    shifted_z = shift_plan(ctx.scenario, previous.z)
+    attempts = Any[]
+    for ρ in unique((previous.rho, coarser_rhos...))
+        w₀ = ReducedGOOP.scholtes_warm_start(ctx.kkt, θ, shifted_z, ρ;
+                                              eq_cols, eq = previous.w[eq_cols])
+        r = ReducedGOOP.solve(ReducedGOOP.Scholtes(), ctx.kkt, θ; z₀ = z0, w₀,
+            options = Core_.solver_options(ctx, ρ; linear_solver, max_inner))
+        push!(attempts, r)
+        r.residual / sqrt(ctx.m) < Core_.TOL &&
+            return (; label = @sprintf("warm (rho %.0e)", ρ), result = r, attempts, shifted_z)
+    end
+    return (; label = "", result = nothing, attempts, shifted_z)
+end
+
+"""
     interior_start(problem, z, θ, anchor; λs = (0.01, 0.02, 0.05, 0.1, 0.2, 0.5)) -> z′ or nothing
 
 A cold start sets its slacks to s = g(z₀) and needs them STRICTLY positive, but a converged
@@ -135,9 +159,15 @@ function demo(; receding_horizon::Integer = 1, plot_fig::Bool = true, output_dir
     @printf("KKT build + codegen %.1f s; linear_solver = %s, projected step\n\n",
             ctx.build_time, linear_solver)
     @info "Starting demo with initial (T = 1) scenario parameters"
-    tj = @elapsed ReducedGOOP.solve(ReducedGOOP.Scholtes(), ctx.kkt, θ;
-        z₀ = Core_.zero_control_guess(sc, sc.x_init),
-        options = Core_.solver_options(ctx, Core_.RHO_SWEEP[1]; linear_solver, max_inner = 2))
+    # The closed-loop warm step too (`warm_step`, the very function steps 2…N call): the
+    # sweep only runs a warm start when its best cold row is not the finest ρ, so otherwise
+    # the first closed-loop step would pay its compilation (~0.2 s against ~0.03 s solves).
+    tj = @elapsed let z = Core_.zero_control_guess(sc, sc.x_init)
+        r = ReducedGOOP.solve(ReducedGOOP.Scholtes(), ctx.kkt, θ; z₀ = z,
+            options = Core_.solver_options(ctx, Core_.RHO_SWEEP[1]; linear_solver, max_inner = 2))
+        warm_step(ctx, θ, z, r, coarser_rhos; eq_cols = Core_.eq_columns(ctx.kkt), linear_solver,
+                  max_inner = 2)
+    end
     @printf("solver specialization compiled in %.1fs (once per session)\n\n", tj)
 
     @printf("%-22s %-6s %-7s %-16s %-9s %-8s %-8s\n", "", "iters", "time_s", "||K_0||/sqrt(m)",
@@ -186,20 +216,13 @@ function demo(; receding_horizon::Integer = 1, plot_fig::Bool = true, output_dir
             θk = Core_.scenario_parameters(x)
             z0 = Core_.zero_control_guess(sc, x)
             mode, result, attempts = "", nothing, Any[]
-            t = @elapsed begin
-                # warm-z+eq from the shifted plan, at the previous ρ and then coarser ρ 
-                shifted_z = shift_plan(sc, previous.z)
-                for ρ in unique((previous.rho, coarser_rhos...))
-                    w₀ = ReducedGOOP.scholtes_warm_start(ctx.kkt, θk, shifted_z, ρ;
-                                                          eq_cols, eq = previous.w[eq_cols])
-                    r = ReducedGOOP.solve(ReducedGOOP.Scholtes(), ctx.kkt, θk; z₀ = z0, w₀,
-                        options = Core_.solver_options(ctx, ρ; linear_solver))
-                    push!(attempts, r)
-                    if k0(r) < Core_.TOL
-                        mode, result = @sprintf("warm (rho %.0e)", ρ), r
-                        break
-                    end
-                end
+            st = @timed begin
+                # warm-z+eq from the shifted plan, at the previous ρ and then coarser ρ
+                ws = warm_step(ctx, θk, z0, previous, coarser_rhos; eq_cols, linear_solver,
+                               max_inner = Core_.MAX_INNER)  # the warm-up's keyword set
+                shifted_z = ws.shifted_z
+                append!(attempts, ws.attempts)
+                ws.result === nothing || ((mode, result) = (ws.label, ws.result))
                 # Fallback mechanism: Cold sweep from the shifted plan, nudged into the strict interior
                 # (`interior_start`), or from the zero-control guess if no nudge works. A
                 # cold start sets s = g(z₀) and γ = 0.1ρ/s, so it needs g(z₀) > 0 STRICTLY:
@@ -227,8 +250,10 @@ function demo(; receding_horizon::Integer = 1, plot_fig::Bool = true, output_dir
                 end
             end
             mk = Core_.plan_metrics(sc, result.z, θk)
-            @printf("step %2d  %-22s rho %.0e  %4d iters  %.3f s  ||K_0||/sqrt(m) %.2e  gap %.3f  goal %.4f\n",
-                    k, mode, result.rho, result.iters, t, k0(result), mk.min_gap, mk.goal_error)
+            t = st.time
+            @printf("step %2d  %-22s rho %.0e  %4d iters  %.3f s (JIT %.3f, GC %.3f)  ||K_0||/sqrt(m) %.2e  gap %.3f  goal %.4f\n",
+                    k, mode, result.rho, result.iters, t, st.compile_time, st.gctime, k0(result),
+                    mk.min_gap, mk.goal_error)
             push!(steps, (; k, mode, result, time = t))
             execute!(result.z)
         end

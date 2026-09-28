@@ -200,6 +200,22 @@ function solve(
     trace = nothing,
     step_trace = nothing,
 )
+    # One concrete type for the starts (empty = not given), so cold and warm calls share
+    # one compiled `_solve` instead of specializing it on `Nothing` vs a vector.
+    @nospecialize z₀ w₀
+    as_start(v) = isnothing(v) ? Float64[] : Vector{Float64}(v)
+    return _solve(kkt, θ, as_start(z₀), as_start(w₀); options, trace, step_trace)
+end
+
+function _solve(
+    kkt::ScholtesKKTSystem,
+    θ::AbstractVector{<:Real},
+    z₀::Vector{Float64},
+    w₀::Vector{Float64};
+    options::ScholtesOptions,
+    trace,
+    step_trace,
+)
     (; rho_init, rho_min, rho_schedule, max_inner, tol, tol_inner, tau, proj_eps) = options
     (; nonmonotone, linear_solver, refine, eta_init, eta_schedule, eta_min, eta_max) = options
     (; gain_low, gain_high, tightening_rate, loosening_rate, verbose) = options
@@ -254,10 +270,10 @@ function solve(
     )
     rule = _ProjectedRule(ctx.nw; tau, eps = proj_eps)
 
-    w = if isnothing(w₀)
-        _initial_w(kkt, isnothing(z₀) ? zeros(n_total) : z₀, schedule[1]; gamma_cols)
+    w = if isempty(w₀)
+        _initial_w(kkt, isempty(z₀) ? zeros(n_total) : z₀, schedule[1]; gamma_cols)
     else
-        collect(float.(w₀))
+        copy(w₀)
     end
     length(w) == _n_w(res) ||
         throw(ArgumentError("w₀ has length $(length(w)), expected $(_n_w(res))"))
