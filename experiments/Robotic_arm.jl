@@ -17,22 +17,29 @@ const ROBOTIC_ARM_CORE_PATH = joinpath(@__DIR__, "robotic_arm_core.jl")
 isdefined(Main, :RoboticArmCore) || Base.include(Main, ROBOTIC_ARM_CORE_PATH)
 using Main.RoboticArmCore
 const Core_ = Main.RoboticArmCore
-include(joinpath(@__DIR__, "robotic_arm_visualization.jl"))
+# CairoMakie is loaded only when a figure is drawn, after every solve: loaded up front
+# it invalidates precompiled Symbolics/ReducedGOOP code and adds ~15 s to the KKT build.
+const VISUALIZATION_PATH = joinpath(@__DIR__, "robotic_arm_visualization.jl")
+_load_visualization() =
+    isdefined(@__MODULE__, :save_plan_figure) || Base.include(@__MODULE__, VISUALIZATION_PATH)
+# A function defined by that include, looked up in the latest world.
+_visualization(name::Symbol) = Base.invokelatest(getglobal, @__MODULE__, name)
 
 """
     demo(; scenario_kwargs = (;), linear_solver = LINEAR_SOLVER, stop_at_tol = false,
-         run_id = nothing, plot = ENV["GOOP_PLOT"] != "0")
+         run_id = nothing, save = true, plot = save && ENV["GOOP_PLOT"] != "0")
 
 Build the scenario (keyword overrides of `ScenarioConfig` in `scenario_kwargs`), run the ρ
 sweep (a cold row per ρ, then the warm-z+eq chain), print one line per row, pick the
 converged row with the smallest goal error (as the source's `demo()` does; the MPC
 planner in Robotic_arm_receding.jl ranks by ‖K₀‖/√m, as the source's planner does), and save the rows, the
 chosen plan and its metrics to `data/robotic_arm_scholtes/<run_id>/` (`sweep.jld2`).
-Returns `nothing`, as the source's `demo()` does.
+Returns `nothing`, as the source's `demo()` does. `save = false` writes nothing (no
+.jld2, no figures), as the source's `demo()` writes nothing without its plotting environment.
 """
 function demo(; scenario_kwargs::NamedTuple = (;), linear_solver::Symbol = LINEAR_SOLVER,
-              stop_at_tol::Bool = false, run_id = nothing,
-              plot::Bool = get(ENV, "GOOP_PLOT", "1") != "0")
+              stop_at_tol::Bool = false, run_id = nothing, save::Bool = true,
+              plot::Bool = save && get(ENV, "GOOP_PLOT", "1") != "0")
     sc = Core_.ScenarioConfig(; scenario_kwargs...)
     run_id = something(run_id, Dates.format(Dates.now(), "yyyymmdd_HHMMSS"))
     run_dir = joinpath(@__DIR__, "..", "data", "robotic_arm_scholtes", run_id)
@@ -43,6 +50,12 @@ function demo(; scenario_kwargs::NamedTuple = (;), linear_solver::Symbol = LINEA
     @printf("\n%d primal variables, residual rows m = %d (n_nc = %d, n_c = %d), sqrt(m) = %.3f\n",
             length(ctx.kkt.primal_dims), ctx.m, ctx.kkt.n_nc, ctx.kkt.n_comp, scale)
     @printf("KKT build + codegen %.1f s; linear_solver = %s, projected step\n\n", ctx.build_time, linear_solver)
+    # As the source's demo(): compile the solver for this system with a 2-step solve, so
+    # the table's times are solve times.
+    tj = @elapsed ReducedGOOP.solve(ReducedGOOP.Scholtes(), ctx.kkt, θ;
+        z₀ = Core_.zero_control_guess(sc, sc.x_init),
+        options = Core_.solver_options(ctx, Core_.RHO_SWEEP[1]; linear_solver, max_inner = 2))
+    @printf("solver specialization compiled in %.1fs (once per session)\n\n", tj)
     @printf("%-22s %-6s %-7s %-16s %-9s %-8s %-8s\n", "", "iters", "time_s", "||K_0||/sqrt(m)",
             "goal_err", "min_gap", "tilt")
     rows = Any[]
@@ -66,6 +79,7 @@ function demo(; scenario_kwargs::NamedTuple = (;), linear_solver::Symbol = LINEA
             best.rho, best.tag, m.goal_error, m.min_gap, sc.d_min, m.max_tilt, m.max_handle_drift,
             min(m.min_safety, m.min_arm_speed, m.min_child_speed, m.min_child_reach))
 
+    save || return nothing
     mkpath(run_dir)
     jldsave(joinpath(run_dir, "sweep.jld2");
             scenario = sc, rows = [(; row.tag, row.rho, row.time, row.metrics, z = row.result.z,
@@ -74,10 +88,12 @@ function demo(; scenario_kwargs::NamedTuple = (;), linear_solver::Symbol = LINEA
                                    for row in rows],
             chosen = (; best.tag, best.rho, z = best.result.z), build_time = ctx.build_time)
     if plot
-        save_plan_figure(sc, best.result.z, joinpath(run_dir, "plan.pdf");
-                         title = @sprintf("rho = %.0e (%s)", best.rho, best.tag))
-        save_convergence_figure([(@sprintf("%.0e %s", row.rho, row.tag), row.result) for row in rows],
-                                joinpath(run_dir, "convergence.pdf"))
+        _load_visualization()
+        Base.invokelatest(_visualization(:save_plan_figure), sc, best.result.z, joinpath(run_dir, "plan.pdf");
+                          title = @sprintf("rho = %.0e (%s)", best.rho, best.tag))
+        Base.invokelatest(_visualization(:save_convergence_figure),
+                          [(@sprintf("%.0e %s", row.rho, row.tag), row.result) for row in rows],
+                          joinpath(run_dir, "convergence.pdf"))
     end
     println("wrote ", normpath(run_dir))
     return nothing

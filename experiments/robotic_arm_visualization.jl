@@ -1,5 +1,6 @@
 # Figures for the robotic-arm pot carry (experiments/robotic_arm_core.jl). Included by
-# Robotic_arm.jl and Robotic_arm_mpc.jl; needs the `experiments` environment (CairoMakie).
+# Robotic_arm.jl and Robotic_arm_mpc.jl (lazily, when a figure is drawn); needs the
+# `experiments` environment (CairoMakie).
 
 using CairoMakie: CairoMakie
 using LinearAlgebra: norm

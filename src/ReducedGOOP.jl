@@ -9,6 +9,7 @@ using LinearAlgebra: LinearAlgebra, norm, ldiv!
 using KLU: KLU
 using Random: Random
 using TimerOutputs: TimerOutput, @timeit
+using PrecompileTools: @setup_workload, @compile_workload
 
 const TO = TimerOutput()
 
@@ -28,5 +29,7 @@ include("scholtes_step.jl")
 include("scholtes_solver.jl")
 include("scholtes_certify.jl")
 include("scholtes_multistart.jl")
+
+include("precompile.jl")
 
 end # module ReducedGOOP

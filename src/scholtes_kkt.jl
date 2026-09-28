@@ -302,8 +302,17 @@ function _compile_scholtes_block(exprs, y, θ, ρ, η; codegen, fd_codegen_chunk
 end
 
 """
+Default `fd_codegen_chunk_size` of the Scholtes path. The FastDifferentiation code generator
+otherwise emits each block as one function, whose compile time grows faster than linearly
+with its size (robotic arm: first solve 44 s unchunked, about 18 s at 32; see
+_port_logs/step7/startup_time.md). `nothing` restores a single function per block.
+"""
+const SCHOLTES_FD_CHUNK_SIZE = 32
+
+"""
     generate_scholtes_reduced_kkt_system(goop; quasi = false, quasi_order = 2, phi = true,
-        codegen = :fast_differentiation, fd_codegen_chunk_size = nothing, backend_options = (;))
+        codegen = :fast_differentiation, fd_codegen_chunk_size = SCHOLTES_FD_CHUNK_SIZE,
+        backend_options = (;))
 
 Build and compile the reduced KKT system of `goop` in Scholtes form (see the top of
 src/scholtes_kkt.jl). `quasi = true` drops derivative terms of order above `quasi_order`
@@ -315,7 +324,7 @@ function generate_scholtes_reduced_kkt_system(
     quasi_order::Int = 2,
     phi::Bool = true,
     codegen = :fast_differentiation,
-    fd_codegen_chunk_size = nothing,
+    fd_codegen_chunk_size = SCHOLTES_FD_CHUNK_SIZE,
     backend_options = (;),
 )
     phi || throw(

@@ -145,7 +145,9 @@ Construct the Reduced KKT system corresponding to a ParametricGOOP.
 :scholtes` builds the Scholtes-form system (explicit φ ≥ 0, relaxed `s ∘ γ + u = ρ`)
 and returns a `ScholtesKKTSystem` for `Scholtes`; it is opt-in, supports only
 `phi = true`, and generates code with FastDifferentiation unless `codegen` says
-otherwise. See src/scholtes_kkt.jl.
+otherwise, split into functions of `fd_codegen_chunk_size` expressions (default
+`SCHOLTES_FD_CHUNK_SIZE`; pass `typemax(Int)` for one function per block). See
+src/scholtes_kkt.jl.
 """
 function generate_slacked_reduced_kkt_system(
     goop::ParametricGOOP;
@@ -170,7 +172,7 @@ function generate_slacked_reduced_kkt_system(
             quasi_order,
             phi,
             codegen = something(codegen, :fast_differentiation),
-            fd_codegen_chunk_size,
+            fd_codegen_chunk_size = something(fd_codegen_chunk_size, SCHOLTES_FD_CHUNK_SIZE),
             backend_options,
         )
     end
