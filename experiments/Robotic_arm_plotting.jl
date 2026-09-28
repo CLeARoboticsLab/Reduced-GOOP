@@ -4,14 +4,15 @@
 # `stop_reason` and `write_robotic_arm_plots` from `examples/robotic_arm.jl`. The drawing
 # code below the adapter is the source's VERBATIM, on the same Plots / GR versions, so a
 # run draws the same figures as the source's `demo()`: `robotic_arm_guess_<name>.{pdf,html}`
-# for the two initial guesses, `robotic_arm_rho<ρ>.{pdf,html}` for every cold row and
-# `robotic_arm_rho<ρ>_warm-z-eq.{pdf,html}` for every warm row. The only changes: this is a
-# module over `experiments/robotic_arm_core.jl` (the adapter below binds a
-# `ScenarioConfig` to the source's global names), `mkpath` makes the file's own directory
-# instead of the source's fixed `examples/figures/robot_arm`, and `new_traces` comes
-# from the core, where the sweep collects the traces.
+# for the two initial guesses, `robotic_arm_rho<ρ>.{pdf,html}` for every cold row,
+# `robotic_arm_rho<ρ>_warm-z-eq.{pdf,html}` for every warm row, and
+# `robotic_arm_convergence.pdf` with every row's residual on one axis (added to both repos,
+# identically). The only changes: this is a module over `experiments/robotic_arm_core.jl`
+# (the adapter below binds a `ScenarioConfig` to the source's global names), `mkpath`
+# makes the file's own directory instead of the source's fixed `examples/figures/robot_arm`,
+# and `new_traces` comes from the core, where the sweep collects the traces.
 #
-# Loaded by Robotic_arm.jl only when figures are drawn, after the solves.
+# Loaded by the robotic-arm scripts only when figures are drawn, after the solves.
 module RoboticArmPlotting
 
 using Plots
@@ -1029,6 +1030,38 @@ function plot_robotic_arm_interactive(z; rho,
 end
 
 # ---------------------------------------------------------------------------
+# All rows' homotopy residuals on one axis: log10 ‖R(w; ρ)‖ per Newton iteration, one
+# line per solve, labelled "<ρ> <tag>". Kept identical in ScholtesReducedGOOP.jl's
+# examples/robotic_arm_plot.jl so both repos draw the same file.
+# ---------------------------------------------------------------------------
+# Makie's default (Wong) palette, which this figure was first drawn with.
+const CONVERGENCE_PALETTE = ["#0072B2", "#E69F00", "#009E73", "#CC79A7", "#56B4E9",
+                             "#D55E00", "#F0E442"]
+
+"""
+    plot_convergence_summary(rows; path, title = "Scholtes residual per iteration") -> path
+
+`rows` is a list of `label => history` (`history` = the result's per-iteration ‖R‖).
+"""
+function plot_convergence_summary(rows; path = joinpath(OUT, "robotic_arm_convergence.pdf"),
+                                  title = "Scholtes residual per iteration")
+    gr()
+    fig = plot(; size = (800, 450), title, titlefontsize = 11, xlabel = "iteration",
+                 ylabel = "log₁₀ ‖R(w; ρ)‖", legend = :topright, legendfontsize = 7,
+                 grid = true, gridalpha = 0.15, framestyle = :box,
+                 background_color = :white, left_margin = 4Plots.mm,
+                 bottom_margin = 4Plots.mm)
+    for (i, (label, history)) in enumerate(rows)
+        plot!(fig, 1:length(history), log10.(max.(history, 1e-300)); label,
+              color = CONVERGENCE_PALETTE[mod1(i, length(CONVERGENCE_PALETTE))],
+              linewidth = 1.2)
+    end
+    mkpath(dirname(path))
+    savefig(fig, path)
+    return path
+end
+
+# ---------------------------------------------------------------------------
 # From the source's examples/robotic_arm.jl: the stopping rule named in panel (g), and
 # the loop that writes one PDF and one HTML per guess and per solve.
 # ---------------------------------------------------------------------------
@@ -1054,7 +1087,8 @@ end
 The source's `write_robotic_arm_plots`: a PDF and an HTML for every initial guess in
 `guesses` (`name => z`), every cold row in `solutions` (`ρ => result`, traces in
 `cold_traces[ρ]`) and every warm row in `warm_solutions` (`(tag, ρ, result, trace)`).
-Returns the number of files written, as the source does.
+Also writes `robotic_arm_convergence.pdf`: every row's ‖R‖ history on one axis.
+Returns the number of files written.
 """
 function write_robotic_arm_plots(sc, solutions, warm_solutions, cold_traces;
                                  max_inner = Core_.MAX_INNER, tol = Core_.TOL,
@@ -1089,7 +1123,11 @@ function write_robotic_arm_plots(sc, solutions, warm_solutions, cold_traces;
         plot_robotic_arm_interactive(rr.z; rho,
                          path = joinpath(plot_dir, stem * ".html"))
     end
-    return 2 * (length(solutions) + length(warm_solutions) + length(guesses))
+    plot_convergence_summary(
+        vcat([(@sprintf("%.0e cold", rho) => rr.history) for (rho, rr) in solutions],
+             [(@sprintf("%.0e %s", rho, tag) => rr.history) for (tag, rho, rr, _) in warm_solutions]);
+        path = joinpath(plot_dir, "robotic_arm_convergence.pdf"))
+    return 2 * (length(solutions) + length(warm_solutions) + length(guesses)) + 1
 end
 
 default(show = false)
