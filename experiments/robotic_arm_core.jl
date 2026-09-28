@@ -28,7 +28,7 @@ export ScenarioConfig, default_scenario_config, RoboticArmContext, build_context
        scenario_parameters, zero_control_guess, direct_path_guess, solve_rho_sweep,
        solver_options, plan_metrics, trajectories, state, control, gripper, pot_centre,
        child, pot_tilt, safety, arm_speed, arm_reach, child_speed, child_reach,
-       handle_grasp, child_ground, dynamics_residual, load_balance, pot_goal, chase,
+       handle_grasp, dynamics_residual, load_balance, pot_goal, chase,
        effort, eq_columns, RHO_SWEEP, LINEAR_SOLVER, MAX_INNER, TOL, PROJ_EPS,
        ETA_OPTIONS, CONTINUE_ETA, RHO_REF, NX, NU, TO
 
@@ -51,12 +51,12 @@ const DEFAULT_BASES = [
     [-0.75, -0.12664, 1.3137499999999998],
 ]
 const DEFAULT_GOAL_OFFSET = [0.0, -0.2, 0.5]
-const DEFAULT_D_MIN = 0.3
+const DEFAULT_D_MIN = 0.4
 const DEFAULT_V_ARM = 0.6
 const DEFAULT_V_CHILD = 0.3
 const DEFAULT_BALANCE = 0.05
 const DEFAULT_REACH_MAX = 0.8
-const DEFAULT_CHILD_REACH_MAX = 0.4
+const DEFAULT_CHILD_REACH_MAX = 0.45
 
 """
 The scenario's geometry and limits. `x_init` is the nominal initial state (the θ a
@@ -97,7 +97,7 @@ child(sc, z, t) = state(sc, z, 2, t)
 
 x0_of(θ, i) = i == 1 ? θ[1:NX[1]] : θ[(NX[1] + 1):(NX[1] + NX[2])]
 
-# ── 3. Equalities: dynamics (x₀ = θ is data), rigid handle, child on the ground ───
+# ── 3. Equalities: dynamics (x₀ = θ is data), rigid handle ─────────────────────────
 f(sc, x, u) = x .+ sc.dt .* u
 
 function dynamics_residual(sc, z, θ, i)
@@ -122,11 +122,10 @@ function handle_grasp(sc, z)
     rows
 end
 
-child_ground(sc, z) = [control(sc, z, 2, t)[3] for t in 1:(sc.horizon)]
-
 # ── 4. Inequalities, g(z) ≥ 0 ─────────────────────────────────────────────────────
 # Safety is HORIZONTAL: the child's reach is a cylinder, so lifting the pot buys no
-# clearance and the robot has to go around.
+# clearance and the robot has to go around -- never over the child's hand, which now
+# moves in z.
 function safety(sc, z)
     rows = eltype(z)[]
     for t in 1:(sc.horizon)
@@ -157,11 +156,12 @@ function arm_reach(sc, z)
     rows
 end
 
+# 3D: the child's height is free (no ground pin), so its vertical speed is bounded too.
 function child_speed(sc, z)
     rows = eltype(z)[]
     for t in 1:(sc.horizon)
         u = control(sc, z, 2, t)
-        push!(rows, sc.v_child^2 - sum(abs2, u[1:2]))
+        push!(rows, sc.v_child^2 - sum(abs2, u))
     end
     rows
 end
@@ -234,7 +234,7 @@ function build_problem(sc::ScenarioConfig)
         is_prioritized_constraint = [[false, false, false], [false, false]],
         equality_constraints = [
             (x, θ) -> vcat(dynamics_residual(sc, flat(x), flatθ(θ), 1), handle_grasp(sc, flat(x))),
-            (x, θ) -> vcat(dynamics_residual(sc, flat(x), flatθ(θ), 2), child_ground(sc, flat(x))),
+            (x, θ) -> dynamics_residual(sc, flat(x), flatθ(θ), 2),
         ],
         inequality_constraints = [
             (x, θ) -> robot_inequality(sc, flat(x)),
@@ -298,7 +298,7 @@ end
 # ── 7. The compiled context and the ρ sweep ───────────────────────────────────────
 # Solver settings, as the source sets them (examples/robotic_arm.jl L202-245).
 const RHO_SWEEP = [1e-5, 1e-6, 1e-7, 1e-8, 1e-9, 1e-10]
-const LINEAR_SOLVER = :normal
+const LINEAR_SOLVER = :normal # :normal, :klu
 const RHO_REF = 1e-4
 const MAX_INNER = 500
 const TOL = 1e-5
@@ -461,7 +461,6 @@ function plan_metrics(sc::ScenarioConfig, z, θ = scenario_parameters(sc.x_init)
        min_child_speed = minimum(child_speed(sc, z)), min_child_reach = minimum(child_reach(sc, z)),
        min_arm_reach_inactive = minimum(arm_reach(sc, z)),
        max_handle_drift = maximum(abs, handle_grasp(sc, z)),
-       max_child_ground = maximum(abs, child_ground(sc, z)),
        max_dynamics = max(maximum(abs, dynamics_residual(sc, z, θ, 1)),
                           maximum(abs, dynamics_residual(sc, z, θ, 2))),
        effort1 = effort(sc, z, 1), pot_goal = pot_goal(sc, z), load_balance = load_balance(sc, z),

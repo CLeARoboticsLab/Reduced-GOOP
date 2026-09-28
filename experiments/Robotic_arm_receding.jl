@@ -55,7 +55,7 @@ end
     build_mpc_context(obs; planning_horizon = 30, bases = nothing,
                       use_nominal_initial_state = false, rho_schedule = RHO_SWEEP, tol = TOL,
                       max_inner = MAX_INNER, linear_solver = LINEAR_SOLVER, proj_eps = PROJ_EPS,
-                      child_reach_max = 0.4, output_dir)
+                      child_reach_max = DEFAULT_CHILD_REACH_MAX, output_dir)
 
 Configure the scenario from `obs`'s end-effector positions (`robot0_eef_pos`,
 `robot1_eef_pos`, `robot2_eef_pos`), or from the nominal robosuite state when
@@ -73,7 +73,7 @@ function build_mpc_context(
     max_inner::Integer = MAX_INNER,
     linear_solver::Symbol = LINEAR_SOLVER,
     proj_eps::Float64 = PROJ_EPS,
-    child_reach_max::Real = 0.4,
+    child_reach_max::Real = Core_.DEFAULT_CHILD_REACH_MAX,
     output_dir::AbstractString = joinpath(@__DIR__, "..", "data", "robotic_arm_scholtes", "robot_arm_robosuite"),
 )
     nominal = Core_.default_scenario_config()

@@ -311,9 +311,8 @@ function trajectory3d_panel(z)
     y0, y1 = minimum(ys) - pad, maximum(ys) + pad
 
     # THE REFERENCE PLANE IS THE FLOOR OF THE FRAME, NOT z = 0, and at this
-    # scale it is not the child's height either: `child_ground` pins the child's
-    # vertical CONTROL to zero, so it holds whatever height it started at
-    # (1.10 m on the robosuite table) -- which is ABOVE where the grippers begin
+    # scale it is not the child's height either: the child starts at 1.10 m on
+    # the robosuite table and rises from there -- ABOVE where the grippers begin
     # (0.96 m). Anchoring at zero put a metre of empty air under everything and
     # pushed the scene into the top of the panel. The safety spheres still show
     # where the child actually is.
