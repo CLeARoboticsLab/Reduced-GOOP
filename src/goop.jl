@@ -572,28 +572,19 @@ function generate_slacked_reduced_kkt_system(
     end
 
     # Recursively generate the rest of the KKT conditions for each player.
-    F_π_pair = @timeit TO "symbolic expression construction" mapreduce(
-        vcat,
-        1:(goop.num_players),
-    ) do player
+    # One result per player, always a vector: `mapreduce(vcat, …)` over a single player
+    # returns the bare NamedTuple on Julia ≤ 1.12 but a 1-element vector on 1.13.
+    F_π_pair = @timeit TO "symbolic expression construction" [
         construct_player_kkt_conditions(
             goop.preferences[player],
             goop.is_prioritized_constraint[player];
             player,
-        )
-    end
+        ) for player in 1:(goop.num_players)
+    ]
 
     # Flatten the F and π vectors for all players.
     @timeit TO "symbolic KKT vector assembly" begin
-        flattened_F = begin
-            if length(goop.primal_dims) > 1
-                mapreduce(vcat, F_π_pair) do pair
-                    pair.F
-                end
-            else
-                F_π_pair.F
-            end
-        end
+        flattened_F = reduce(vcat, (pair.F for pair in F_π_pair))
 
         # Filter out zeros.
         F = Vector{symbolic_type}(
@@ -1046,24 +1037,17 @@ function generate_slacked_complete_kkt_system(
     end
 
     # Recursively generate the rest of the KKT conditions for each player.
-    F_G_pair = mapreduce(vcat, 1:(goop.num_players)) do player
+    # One result per player, always a vector (see the reduced generator above).
+    F_G_pair = [
         construct_player_kkt_conditions(
             goop.preferences[player],
             goop.is_prioritized_constraint[player];
             player,
-        )
-    end
+        ) for player in 1:(goop.num_players)
+    ]
 
     # Flatten the F vectors for all players.
-    flattened_F = begin
-        if length(goop.primal_dims) > 1
-            mapreduce(vcat, F_G_pair) do pair
-                pair.F
-            end
-        else
-            F_G_pair.F
-        end
-    end
+    flattened_F = reduce(vcat, (pair.F for pair in F_G_pair))
 
     # Filter out zeros.
     F = Vector{symbolic_type}(filter!(!isnothing, vcat(filter!(!iszero, flattened_F))))
