@@ -175,7 +175,7 @@ function child_reach(sc, z)
     rows
 end
 
-robot_inequality(sc, z) = vcat(safety(sc, z), arm_speed(sc, z))
+robot_inequality(sc, z) = vcat(safety(sc, z), arm_speed(sc, z)) # arm_reach(sc, z)
 child_inequality(sc, z) = vcat(child_speed(sc, z), child_reach(sc, z))
 
 # ── 5. The preference hierarchy [lowest, …, highest priority] ─────────────────────
@@ -226,7 +226,10 @@ function build_problem(sc::ScenarioConfig)
                 (x, θ) -> pot_goal(sc, flat(x)),
                 (x, θ) -> load_balance(sc, flat(x)),
             ],
-            Function[(x, θ) -> effort(sc, flat(x), 2), (x, θ) -> chase(sc, flat(x))],
+            Function[
+                (x, θ) -> effort(sc, flat(x), 2), 
+                (x, θ) -> chase(sc, flat(x))
+            ],
         ],
         is_prioritized_constraint = [[false, false, false], [false, false]],
         equality_constraints = [
@@ -322,7 +325,9 @@ struct RoboticArmContext{P,K}
 end
 
 function build_context(sc::ScenarioConfig = ScenarioConfig(); codegen = :fast_differentiation)
+    @info "build_context: building the ParametricGOOP problem (horizon = $(sc.horizon))"
     problem = build_problem(sc)
+    @info "build_context: generating and compiling the KKT system"
     t = @elapsed kkt = ReducedGOOP.generate_slacked_reduced_kkt_system(
         problem;
         complementarity = :scholtes,

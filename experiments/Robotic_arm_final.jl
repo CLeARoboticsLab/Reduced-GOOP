@@ -13,7 +13,8 @@ module Robotic_arm_final
 # first knot of the current plan is executed (a perfect plant model), and the same
 # compiled system (x₀ is the parameter θ) is re-solved from the executed state,
 # warm-started from the previous plan shifted by one knot (warm-z+eq at the previous ρ,
-# then coarser ρ), with a cold sweep as the fallback.
+# then coarser ρ), with a cold sweep as the fallback: from the shifted plan nudged into the
+# strict interior (`interior_start`), or from the zero-control guess.
 #
 # Figures (`plot_fig`): the source's set for the step-1 sweep (a PDF and an HTML per
 # initial guess and per row, plus robotic_arm_convergence.pdf), and for a receding run
@@ -54,6 +55,26 @@ function shift_plan(sc, z)
 end
 
 """
+    interior_start(problem, z, θ, anchor; λs = (0.01, 0.02, 0.05, 0.1, 0.2, 0.5)) -> z′ or nothing
+
+A cold start sets its slacks to s = g(z₀) and needs them STRICTLY positive, but a converged
+plan sits on its active constraints (g ≈ 0 to solver tolerance), so its shift is rejected as
+it stands. To make the shifted plan actually usable, pull `z` a little toward `anchor` 
+(the zero-control guess: the executed state held at rest, zero speeds) and returns the first 
+blend (1 − λ)·z + λ·anchor with every g > 0, for λ in `λs`, so the start stays mostly `z`. 
+Returns `z` itself if it is already strictly feasible, and `nothing` if no blend is.
+"""
+function interior_start(problem, z, θ, anchor; λs = (0.01, 0.02, 0.05, 0.1, 0.2, 0.5))
+    strictly_feasible(v) = ReducedGOOP.is_feasible(problem, v, θ).worst > 0
+    strictly_feasible(z) && return z
+    for λ in λs
+        blend = (1 - λ) .* z .+ λ .* anchor
+        strictly_feasible(blend) && return blend
+    end
+    return nothing
+end
+
+"""
     closed_loop_trajectory(sc, executed, applied) -> (sc_exec, z_exec)
 
 The executed run as a plan of its own: a scenario with `horizon = length(applied)` and the
@@ -77,7 +98,7 @@ end
 """
     demo(; receding_horizon = 1, plot_fig = true, output_dir = nothing,
          scenario_kwargs = (;), linear_solver = LINEAR_SOLVER, stop_at_tol = false,
-         select = :goal_error, warm_rhos = (1e-7, 1e-5))
+         select = :goal_error, coarser_rhos = (1e-7, 1e-5))
 
 - `receding_horizon`: `1` solves open loop; `N > 1` runs `N` closed-loop steps (step 1
   is the open-loop solve, and its plan's first knot is the first executed step).
@@ -86,17 +107,17 @@ end
 - `scenario_kwargs`: keyword overrides of `ScenarioConfig` (horizon, x_init, d_min, …).
 - `stop_at_tol`: step 1's sweep stops at the first converged row (fine → coarse)
   instead of running every row.
-- `select`: how step 1 picks its plan among converged rows: `:goal_error` (the source's
-  `demo()`) or `:residual` (smallest ‖K₀‖/√m, the source's MPC planner).
-- `warm_rhos`: the coarser ρ tried, after the previous plan's ρ, when a closed-loop warm
-  start does not converge; then a cold sweep.
+- `select`: how step 1 picks its plan among converged rows: `:goal_error` (closest to the goal) or
+    `:residual` (smallest ‖K₀‖/√m, the source's MPC planner).
+- `coarser_rhos`: the coarser ρ tried, after the previous (T-1) plan's ρ, when a closed-loop warm
+  start does not converge; then a cold sweep following the default RHO_SWEEP.
 
 Returns `nothing`.
 """
 function demo(; receding_horizon::Integer = 1, plot_fig::Bool = true, output_dir = nothing,
               scenario_kwargs::NamedTuple = (;), linear_solver::Symbol = Core_.LINEAR_SOLVER,
               stop_at_tol::Bool = false, select::Symbol = :goal_error,
-              warm_rhos = (1e-7, 1e-5))
+              coarser_rhos = (1e-7, 1e-5))
     receding_horizon >= 1 || throw(ArgumentError("receding_horizon must be >= 1"))
     select in (:goal_error, :residual) ||
         throw(ArgumentError("select must be :goal_error or :residual, got $select"))
@@ -113,6 +134,7 @@ function demo(; receding_horizon::Integer = 1, plot_fig::Bool = true, output_dir
             length(ctx.kkt.primal_dims), ctx.m, ctx.kkt.n_nc, ctx.kkt.n_comp, scale)
     @printf("KKT build + codegen %.1f s; linear_solver = %s, projected step\n\n",
             ctx.build_time, linear_solver)
+    @info "Starting demo with initial (T = 1) scenario parameters"
     tj = @elapsed ReducedGOOP.solve(ReducedGOOP.Scholtes(), ctx.kkt, θ;
         z₀ = Core_.zero_control_guess(sc, sc.x_init),
         options = Core_.solver_options(ctx, Core_.RHO_SWEEP[1]; linear_solver, max_inner = 2))
@@ -165,12 +187,10 @@ function demo(; receding_horizon::Integer = 1, plot_fig::Bool = true, output_dir
             z0 = Core_.zero_control_guess(sc, x)
             mode, result, attempts = "", nothing, Any[]
             t = @elapsed begin
-                # warm-z+eq from the shifted plan, at the previous ρ and then coarser ρ (a
-                # coarser ρ buys basin); the warm start floors the slacks, so it needs no
-                # strictly feasible point
-                shifted = shift_plan(sc, previous.z)
-                for ρ in unique((previous.rho, warm_rhos...))
-                    w₀ = ReducedGOOP.scholtes_warm_start(ctx.kkt, θk, shifted, ρ;
+                # warm-z+eq from the shifted plan, at the previous ρ and then coarser ρ 
+                shifted_z = shift_plan(sc, previous.z)
+                for ρ in unique((previous.rho, coarser_rhos...))
+                    w₀ = ReducedGOOP.scholtes_warm_start(ctx.kkt, θk, shifted_z, ρ;
                                                           eq_cols, eq = previous.w[eq_cols])
                     r = ReducedGOOP.solve(ReducedGOOP.Scholtes(), ctx.kkt, θk; z₀ = z0, w₀,
                         options = Core_.solver_options(ctx, ρ; linear_solver))
@@ -180,14 +200,26 @@ function demo(; receding_horizon::Integer = 1, plot_fig::Bool = true, output_dir
                         break
                     end
                 end
-                # cold sweep, only from a strictly feasible zero-control guess (a state
-                # executed ON an active constraint makes it infeasible)
-                if result === nothing && ReducedGOOP.is_feasible(ctx.problem, z0, θk).worst > 0
-                    c, w = Core_.solve_rho_sweep(ctx, θk; z0, linear_solver, stop_at_tol = true)
+                # Fallback mechanism: Cold sweep from the shifted plan, nudged into the strict interior
+                # (`interior_start`), or from the zero-control guess if no nudge works. A
+                # cold start sets s = g(z₀) and γ = 0.1ρ/s, so it needs g(z₀) > 0 STRICTLY:
+                # a start on an active state constraint (g = 0, e.g. the child on its reach
+                # bound, which zero control holds at every knot) is rejected. If neither
+                # start is strictly feasible, the sweep is skipped.
+                cold_start = nothing
+                if result === nothing
+                    cold_start = something(interior_start(ctx.problem, shifted_z, θk, z0),
+                                           ReducedGOOP.is_feasible(ctx.problem, z0, θk).worst > 0 ? z0 : Some(nothing))
+                end
+                # Re-solve the problem at the executed state θk from cold_start.
+                if cold_start !== nothing
+                    c, w = Core_.solve_rho_sweep(ctx, θk; z0 = cold_start, linear_solver,
+                                                 stop_at_tol = true)
                     append!(attempts, vcat([r for (_, r) in c], [r for (_, _, r, _) in w]))
                     r = argmin(k0, attempts)
                     if k0(r) < Core_.TOL
-                        mode, result = "sweep", r
+                        mode = cold_start === z0 ? "sweep (zero control)" : "sweep (shifted plan)"
+                        result = r
                     end
                 end
                 if result === nothing
@@ -210,6 +242,7 @@ function demo(; receding_horizon::Integer = 1, plot_fig::Bool = true, output_dir
     end
 
     # ── figures ─────────────────────────────────────────────────────────────────────────
+    # These plots come only from the first MPC step's ρ sweep. 
     if plot_fig
         guesses = ("zero_control" => Core_.zero_control_guess(sc),
                    "direct_path" => Core_.direct_path_guess(sc))
