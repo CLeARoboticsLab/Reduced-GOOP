@@ -14,7 +14,7 @@ struct PlanarDoubleIntegrator <: DynamicsModel end
 struct Unicycle <: DynamicsModel end
 struct Bicycle <: DynamicsModel end
 
-include(joinpath(@__DIR__, "plotting.jl"))
+include(joinpath(@__DIR__, "Intersection_plotting.jl"))
 include(joinpath(@__DIR__, "dynamics.jl"))
 
 # ── Problem definition ─────────────────────────────────────────────────────────

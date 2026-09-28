@@ -21,13 +21,15 @@ const ROBOTIC_ARM_CORE_PATH = joinpath(@__DIR__, "robotic_arm_core.jl")
 isdefined(Main, :RoboticArmCore) || Base.include(Main, ROBOTIC_ARM_CORE_PATH)
 using Main.RoboticArmCore
 const Core_ = Main.RoboticArmCore
-# CairoMakie is loaded only when a figure is drawn, after every solve: loaded up front
-# it invalidates precompiled Symbolics/ReducedGOOP code and adds ~15 s to the KKT build.
-const VISUALIZATION_PATH = joinpath(@__DIR__, "robotic_arm_visualization.jl")
-_load_visualization() =
-    isdefined(@__MODULE__, :save_plan_figure) || Base.include(@__MODULE__, VISUALIZATION_PATH)
-# A function defined by that include, looked up in the latest world.
-_visualization(name::Symbol) = Base.invokelatest(getglobal, @__MODULE__, name)
+# The plotting stack is loaded only when a figure is drawn, after every solve: loaded up
+# front it invalidates precompiled Symbolics/ReducedGOOP code (see Robotic_arm.jl).
+const PLOTTING_PATH = joinpath(@__DIR__, "Robotic_arm_plotting.jl")
+"A function of `RoboticArmPlotting` (included on first use), looked up in the latest world."
+function plotting(name::Symbol)
+    isdefined(Main, :RoboticArmPlotting) || Base.include(Main, PLOTTING_PATH)
+    P = Base.invokelatest(getglobal, Main, :RoboticArmPlotting)
+    return Base.invokelatest(getglobal, P, name)
+end
 
 "The previous plan advanced one knot: x_{t+1} → x_t, u_{t+1} → u_t, the last knot held."
 function shift_plan(sc, z)
@@ -125,9 +127,12 @@ function demo(; num_steps::Integer = 20, scenario_kwargs::NamedTuple = (;),
     mkpath(run_dir)
     jldsave(joinpath(run_dir, "mpc.jld2"); scenario = sc, executed, steps, build_time = ctx.build_time)
     if plot
-        _load_visualization()
-        Base.invokelatest(_visualization(:save_plan_figure), sc, steps[1].z, joinpath(run_dir, "first_plan.pdf");
-                          title = "MPC step 1 plan")
+        # The first plan, drawn as the source draws a solve's scene (PDF and HTML).
+        Base.invokelatest(plotting(:use_scenario!), sc)
+        Base.invokelatest(plotting(:plot_robotic_arm), steps[1].z; rho = steps[1].rho,
+                          path = joinpath(run_dir, "first_plan.pdf"))
+        Base.invokelatest(plotting(:plot_robotic_arm_interactive), steps[1].z; rho = steps[1].rho,
+                          path = joinpath(run_dir, "first_plan.html"), title = "MPC step 1 plan")
     end
     println("wrote ", normpath(run_dir))
     return nothing

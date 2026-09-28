@@ -24,6 +24,16 @@ isdefined(Main, :RoboticArmCore) || Base.include(Main, ROBOTIC_ARM_CORE_PATH)
 using Main.RoboticArmCore
 const Core_ = Main.RoboticArmCore
 
+# The plotting stack is loaded only when a figure is drawn, after the solves (see
+# Robotic_arm.jl).
+const PLOTTING_PATH = joinpath(@__DIR__, "Robotic_arm_plotting.jl")
+"A function of `RoboticArmPlotting` (included on first use), looked up in the latest world."
+function plotting(name::Symbol)
+    isdefined(Main, :RoboticArmPlotting) || Base.include(Main, PLOTTING_PATH)
+    P = Base.invokelatest(getglobal, Main, :RoboticArmPlotting)
+    return Base.invokelatest(getglobal, P, name)
+end
+
 export build_mpc_context, create_planner_from_context, get_current_goal_positions
 
 "An UNSOLVED planning problem: the scenario and its compiled Scholtes KKT system."
@@ -63,7 +73,7 @@ function build_mpc_context(
     linear_solver::Symbol = LINEAR_SOLVER,
     proj_eps::Float64 = PROJ_EPS,
     child_reach_max::Real = 0.4,
-    output_dir::AbstractString = joinpath(@__DIR__, "..", "data", "robotic_arm_scholtes"),
+    output_dir::AbstractString = joinpath(@__DIR__, "..", "data", "robotic_arm_scholtes", "robot_arm_robosuite"),
 )
     nominal = Core_.default_scenario_config()
     g1, g2, c0 = if use_nominal_initial_state
@@ -130,12 +140,16 @@ function create_planner_from_context(
         @printf("[Robotic_arm_receding] T = %d, residual rows m = %d, sqrt(m) = %.3f\n",
                 ctx.planning_horizon, ctx.arm.m, scale)
         θ = Core_.scenario_parameters(ctx.x_init)
+        plotting = get(ENV, "GOOP_PLOT", "1") != "0"
+        cold_traces = Dict{Float64,NamedTuple}()
         st = @timed Core_.solve_rho_sweep(ctx.arm, θ; rho_schedule = ctx.rho_schedule,
             linear_solver = ctx.linear_solver, proj_eps = ctx.proj_eps,
-            max_inner = ctx.max_inner, tol = ctx.tol, stop_at_tol,
-            on_result = (tag, ρ, r, elapsed, tr) -> @printf(
-                "[Robotic_arm_receding]   rho=%.0e %-10s ||K_0||/sqrt(m)=%.3e %-10s goal_dist=%.5f  %4d iters %.2f s\n",
-                ρ, tag, k0(r), k0(r) < ctx.tol ? "converged" : "", goal_dist(r.z), r.iters, elapsed))
+            max_inner = ctx.max_inner, tol = ctx.tol, stop_at_tol, collect_traces = plotting,
+            on_result = (tag, ρ, r, elapsed, tr) -> begin
+                @printf("[Robotic_arm_receding]   rho=%.0e %-10s ||K_0||/sqrt(m)=%.3e %-10s goal_dist=%.5f  %4d iters %.2f s\n",
+                        ρ, tag, k0(r), k0(r) < ctx.tol ? "converged" : "", goal_dist(r.z), r.iters, elapsed)
+                tag == "cold" && tr !== nothing && (cold_traces[ρ] = tr)
+            end)
         cold, warm = st.value
         @printf("[Robotic_arm_receding] sweep: %.2f s -- JIT %.2f s, solves %.2f s\n",
                 st.time, st.compile_time, st.time - st.compile_time)
@@ -147,6 +161,14 @@ function create_planner_from_context(
         isempty(ok) && @warn "create_planner_from_context: no candidate reached tol (best ||K_0||/sqrt(m) = $(k0(result)), tol = $(ctx.tol))"
         @printf("[Robotic_arm_receding] solved: %s, rho=%.0e, ||K_0||/sqrt(m)=%.3e, goal_dist=%.5f\n",
                 scheme, result.rho, k0(result), goal_dist(result.z))
+        # As the source's planner: every row's figures, after the plan is chosen.
+        if plotting
+                tp = @elapsed plot_count = Base.invokelatest(plotting(:write_robotic_arm_plots), sc, cold, warm,
+                cold_traces; max_inner = ctx.max_inner, tol = ctx.tol, tol_scale = scale,
+                output_dir = ctx.output_dir)
+            plot_count > 0 && @printf("[Robotic_arm_receding] wrote %d plots to %s in %.1f s\n",
+                                      plot_count, ctx.output_dir, tp)
+        end
         z[] = result.z
     end
 

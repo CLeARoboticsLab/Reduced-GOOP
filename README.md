@@ -179,8 +179,8 @@ Factorization reuse (`reuse_factorization_iters > 0`) is interior-point only.
 | `experiments/Robotic_arm.jl` | One robotic-arm plan: `Robotic_arm.demo()`. |
 | `experiments/Robotic_arm_mpc.jl` | Closed-loop MPC with warm starts from the shifted previous plan: `Robotic_arm_mpc.demo()`. |
 | `experiments/Robotic_arm_receding.jl` | Python/juliacall entry points (`build_mpc_context`, `create_planner_from_context`). |
-| `experiments/robotic_arm_visualization.jl` | Plan figures for the robotic-arm scripts. |
-| `experiments/Plotting.jl` | Plotting utilities used by the intersection experiments. |
+| `experiments/Robotic_arm_plotting.jl` | Robotic-arm figures (Plots.jl): a PDF and an interactive HTML per initial guess and per solve, ported from ScholtesReducedGOOP.jl's `examples/robotic_arm_plot.jl`. |
+| `experiments/Intersection_plotting.jl` | Figures of the intersection scenario. |
 
 ## Tests
 

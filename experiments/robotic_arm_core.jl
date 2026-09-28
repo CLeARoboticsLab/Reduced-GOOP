@@ -341,6 +341,44 @@ solver_options(ctx::RoboticArmContext, ρ; linear_solver = LINEAR_SOLVER, proj_e
 eq_columns(kkt) =
     findall(v -> startswith(string(v), "lam_") || startswith(string(v), "psi_"), kkt.vars)
 
+# The per-iteration series the convergence panels draw (the source's section 6.6): the
+# direction size ‖δw‖∞, η, the complementarity slackness ‖s ⊙ γ + u‖∞ over the relaxed
+# rows, the smallest s / γ / u before each step, and the accepted step length α. The
+# solver's trace fields are live buffers, so each is reduced to a scalar on the spot.
+new_traces() = (dwn = Float64[], eta = Float64[], comp = Float64[],
+                positive = NamedTuple[], alpha = Float64[])
+
+function convergence_trace(kkt, tr)
+    tr === nothing && return nothing
+    n, nc = kkt.n, kkt.n_comp
+    uidx = kkt.u_index
+    # over the RELAXED rows only: an exact φ pair (u_index = 0) has no u and aims at 0
+    comp_peak(nt) = begin
+        peak = 0.0
+        @inbounds for j in 1:nc
+            uj = uidx[j]
+            uj == 0 && continue
+            v = abs(nt.w[n + j] * nt.b[j] + nt.w[n + nc + uj])
+            v > peak && (peak = v)
+        end
+        peak
+    end
+    return function (nt)
+        push!(tr.dwn, norm(nt.dw, Inf))
+        push!(tr.eta, nt.eta)
+        push!(tr.comp, comp_peak(nt))
+        push!(tr.positive, (iter = nt.iter,
+                            s = minimum(view(nt.w, (n + 1):(n + nc))),
+                            gamma = minimum(nt.b),
+                            u = minimum(view(nt.w, (n + nc + 1):length(nt.w)))))
+        return nothing
+    end
+end
+
+# The accepted Armijo step length; fires after every line search, a failed one included
+# (α = 0).
+step_size_trace(tr) = tr === nothing ? nothing : (nt -> (push!(tr.alpha, nt.alpha); nothing))
+
 """
     solve_rho_sweep(ctx, θ = scenario_parameters(ctx.scenario.x_init); z0, rho_schedule,
                     linear_solver, proj_eps, max_inner, tol, stop_at_tol = false,
@@ -360,14 +398,11 @@ function solve_rho_sweep(ctx::RoboticArmContext, θ = scenario_parameters(ctx.sc
     kkt = ctx.kkt
     scale = sqrt(ctx.m)
     k0(r) = r.residual / scale
-    new_trace() = collect_traces ? (dwn = Float64[], eta = Float64[], alpha = Float64[]) : nothing
-    tracer(tr) = tr === nothing ? nothing :
-                 (nt -> (push!(tr.dwn, maximum(abs, nt.dw)); push!(tr.eta, nt.eta); nothing))
-    step_tracer(tr) = tr === nothing ? nothing : (nt -> (push!(tr.alpha, nt.alpha); nothing))
+    new_trace() = collect_traces ? new_traces() : nothing
     solve_at(ρ; w₀ = nothing, tr = nothing, eta_init = ETA_OPTIONS.eta_init) =
         ReducedGOOP.solve(ReducedGOOP.Scholtes(), kkt, θ; z₀ = z0, w₀,
             options = solver_options(ctx, ρ; linear_solver, proj_eps, max_inner, tol, eta_init),
-            trace = tracer(tr), step_trace = step_tracer(tr))
+            trace = convergence_trace(kkt, tr), step_trace = step_size_trace(tr))
     report(tag, ρ, r, t, tr) = on_result === nothing || on_result(tag, ρ, r, t, tr)
 
     warm = Tuple{String,Float64,Any,Any}[]

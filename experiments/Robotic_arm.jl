@@ -5,7 +5,8 @@ module Robotic_arm
 #
 #   julia --project=experiments -e 'include("experiments/Robotic_arm.jl"); Robotic_arm.demo()'
 #
-# GOOP_PLOT=0 skips the figures.
+# GOOP_PLOT=0 skips the figures. The figures are the source's: one PDF and one HTML per
+# initial guess and per solve (Robotic_arm_plotting.jl).
 
 using JLD2: jldsave
 using LinearAlgebra: norm
@@ -17,13 +18,16 @@ const ROBOTIC_ARM_CORE_PATH = joinpath(@__DIR__, "robotic_arm_core.jl")
 isdefined(Main, :RoboticArmCore) || Base.include(Main, ROBOTIC_ARM_CORE_PATH)
 using Main.RoboticArmCore
 const Core_ = Main.RoboticArmCore
-# CairoMakie is loaded only when a figure is drawn, after every solve: loaded up front
-# it invalidates precompiled Symbolics/ReducedGOOP code and adds ~15 s to the KKT build.
-const VISUALIZATION_PATH = joinpath(@__DIR__, "robotic_arm_visualization.jl")
-_load_visualization() =
-    isdefined(@__MODULE__, :save_plan_figure) || Base.include(@__MODULE__, VISUALIZATION_PATH)
-# A function defined by that include, looked up in the latest world.
-_visualization(name::Symbol) = Base.invokelatest(getglobal, @__MODULE__, name)
+# The plotting stack is loaded only when figures are drawn, after every solve: a plotting
+# package loaded up front invalidates precompiled Symbolics/ReducedGOOP code and slows
+# the KKT build several-fold.
+const PLOTTING_PATH = joinpath(@__DIR__, "Robotic_arm_plotting.jl")
+"A function of `RoboticArmPlotting` (included on first use), looked up in the latest world."
+function plotting(name::Symbol)
+    isdefined(Main, :RoboticArmPlotting) || Base.include(Main, PLOTTING_PATH)
+    P = Base.invokelatest(getglobal, Main, :RoboticArmPlotting)
+    return Base.invokelatest(getglobal, P, name)
+end
 
 """
     demo(; scenario_kwargs = (;), linear_solver = LINEAR_SOLVER, stop_at_tol = false,
@@ -32,10 +36,12 @@ _visualization(name::Symbol) = Base.invokelatest(getglobal, @__MODULE__, name)
 Build the scenario (keyword overrides of `ScenarioConfig` in `scenario_kwargs`), run the ρ
 sweep (a cold row per ρ, then the warm-z+eq chain), print one line per row, pick the
 converged row with the smallest goal error (as the source's `demo()` does; the MPC
-planner in Robotic_arm_receding.jl ranks by ‖K₀‖/√m, as the source's planner does), and save the rows, the
-chosen plan and its metrics to `data/robotic_arm_scholtes/<run_id>/` (`sweep.jld2`).
-Returns `nothing`, as the source's `demo()` does. `save = false` writes nothing (no
-.jld2, no figures), as the source's `demo()` writes nothing without its plotting environment.
+planner in Robotic_arm_receding.jl ranks by ‖K₀‖/√m, as the source's planner does), and
+save the rows, the chosen plan and its metrics to `data/robotic_arm_scholtes/<run_id>/`
+(`sweep.jld2`), with the source's figures beside it when `plot`: a PDF and an HTML for
+each initial guess and each row. Returns `nothing`, as the source's `demo()` does.
+`save = false` writes nothing (no .jld2, no figures), as the source's `demo()` writes
+nothing without its plotting environment.
 """
 function demo(; scenario_kwargs::NamedTuple = (;), linear_solver::Symbol = LINEAR_SOLVER,
               stop_at_tol::Bool = false, run_id = nothing, save::Bool = true,
@@ -59,8 +65,11 @@ function demo(; scenario_kwargs::NamedTuple = (;), linear_solver::Symbol = LINEA
     @printf("%-22s %-6s %-7s %-16s %-9s %-8s %-8s\n", "", "iters", "time_s", "||K_0||/sqrt(m)",
             "goal_err", "min_gap", "tilt")
     rows = Any[]
-    Core_.solve_rho_sweep(ctx, θ; linear_solver, stop_at_tol,
+    cold_traces = Dict{Float64,NamedTuple}()
+    cold, warm = Core_.solve_rho_sweep(ctx, θ; linear_solver, stop_at_tol,
+        collect_traces = plot,
         on_result = (tag, ρ, r, t, tr) -> begin
+            tag == "cold" && tr !== nothing && (cold_traces[ρ] = tr)
             m = Core_.plan_metrics(sc, r.z, θ)
             @printf("%-22s %-6d %-7.2f %-16.3e %-9.4f %-8.3f %-8.3f\n", @sprintf("rho = %.0e, %s", ρ, tag),
                     r.iters, t, r.residual / scale, m.goal_error, m.min_gap, m.max_tilt)
@@ -88,12 +97,13 @@ function demo(; scenario_kwargs::NamedTuple = (;), linear_solver::Symbol = LINEA
                                    for row in rows],
             chosen = (; best.tag, best.rho, z = best.result.z), build_time = ctx.build_time)
     if plot
-        _load_visualization()
-        Base.invokelatest(_visualization(:save_plan_figure), sc, best.result.z, joinpath(run_dir, "plan.pdf");
-                          title = @sprintf("rho = %.0e (%s)", best.rho, best.tag))
-        Base.invokelatest(_visualization(:save_convergence_figure),
-                          [(@sprintf("%.0e %s", row.rho, row.tag), row.result) for row in rows],
-                          joinpath(run_dir, "convergence.pdf"))
+        # Both guesses, as the source draws them, and which one the sweep started from.
+        guesses = ("zero_control" => Core_.zero_control_guess(sc), "direct_path" => Core_.direct_path_guess(sc))
+        tp = @elapsed plot_count = Base.invokelatest(plotting(:write_robotic_arm_plots), sc, cold, warm, cold_traces;
+            max_inner = Core_.MAX_INNER, tol = Core_.TOL, tol_scale = scale, guesses, output_dir = run_dir)
+        @printf("\nwrote %d figures (a PDF and an HTML per solve, plus %d guesses) in %.1f s\n",
+                plot_count, length(guesses), tp)
+        println("the sweep started from zero_control")
     end
     println("wrote ", normpath(run_dir))
     return nothing
