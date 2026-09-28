@@ -13,7 +13,8 @@ module Robotic_arm_receding
 # The planner solves ONCE, lazily on its first call (the ρ sweep of
 # robotic_arm_core.jl), then streams that open-loop plan one interpolated waypoint at a
 # time. x₀ is the parameter θ, so the same compiled system can be re-solved from a
-# measured state; the closed-loop MPC that does so is experiments/Robotic_arm_mpc.jl.
+# measured state; the closed-loop run that does so is
+# `Robotic_arm_final.demo(receding_horizon = N)` (experiments/Robotic_arm_final.jl).
 
 using LinearAlgebra: norm
 using Printf: @printf
@@ -24,8 +25,8 @@ isdefined(Main, :RoboticArmCore) || Base.include(Main, ROBOTIC_ARM_CORE_PATH)
 using Main.RoboticArmCore
 const Core_ = Main.RoboticArmCore
 
-# The plotting stack is loaded only when a figure is drawn, after the solves (see
-# Robotic_arm.jl).
+# The plotting stack is loaded only when a figure is drawn, after the solves: loaded up
+# front it invalidates precompiled Symbolics/ReducedGOOP code and slows the KKT build.
 const PLOTTING_PATH = joinpath(@__DIR__, "Robotic_arm_plotting.jl")
 "A function of `RoboticArmPlotting` (included on first use), looked up in the latest world."
 function plotting(name::Symbol)

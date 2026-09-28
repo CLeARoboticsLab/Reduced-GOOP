@@ -125,6 +125,7 @@ tolerance setting achieves.
   constraint violations come from penalty flatness + `tol`.
 - Single instance, default initial states; a perturbed-initial-state sweep
   would establish whether the exclusion is systematic.
-- `cross_warmstart*.jl` and `tight_tol_3level.jl` require
-  `experiments/Robotic_arm.jl` to be in its **3-level** configuration
+- LEGACY: the scripts that include `experiments/Robotic_arm.jl` (removed; see
+  `Robotic_arm_final.jl`) were written for the old interior-point scenario and no longer
+  run. `cross_warmstart*.jl` and `tight_tol_3level.jl` required it in its **3-level** configuration
   (`control_objective` commented out of `goop_preferences`).

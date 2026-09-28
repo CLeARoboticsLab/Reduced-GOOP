@@ -176,8 +176,7 @@ Factorization reuse (`reuse_factorization_iters > 0`) is interior-point only.
 | `experiments/Intersection.jl` | Two-player open-loop intersection example with trajectory dynamics, prioritized preferences, an interior-point solve, and result plotting. |
 | `experiments/ExamplesQP.jl` | Lightweight entry point for the quadratic-program example. |
 | `experiments/robotic_arm_core.jl` | Two-arm pot-carrying game (Scholtes scenario, x₀ as the parameter θ), the ρ sweep and plan metrics. |
-| `experiments/Robotic_arm.jl` | One robotic-arm plan: `Robotic_arm.demo()`. |
-| `experiments/Robotic_arm_mpc.jl` | Closed-loop MPC with warm starts from the shifted previous plan: `Robotic_arm_mpc.demo()`. |
+| `experiments/Robotic_arm_final.jl` | The robotic arm, open loop or receding horizon: `Robotic_arm_final.demo(; receding_horizon = 1, plot_fig = true, …)`. |
 | `experiments/Robotic_arm_receding.jl` | Python/juliacall entry points (`build_mpc_context`, `create_planner_from_context`). |
 | `experiments/Robotic_arm_plotting.jl` | Robotic-arm figures (Plots.jl): a PDF and an interactive HTML per initial guess and per solve, ported from ScholtesReducedGOOP.jl's `examples/robotic_arm_plot.jl`. |
 | `experiments/Intersection_plotting.jl` | Figures of the intersection scenario. |
