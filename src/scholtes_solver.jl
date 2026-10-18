@@ -118,6 +118,33 @@ function _scheduled_eta(eta, gain_ratio, alpha; gain_low, gain_high, eta_min, et
     return clamp(eta, eta_min, eta_max)
 end
 
+# Initialize explicit preference slacks so both e > 0 and h(x, θ) + e > 0.
+# A seed from a previous solve is retained whenever it is large enough.
+function _initialize_preference_slacks!(
+    kkt::ScholtesKKTSystem,
+    y;
+    margin = 1.0,
+    preference_slacks = nothing,
+)
+    isfinite(margin) && margin > 0 ||
+        throw(ArgumentError("preference-slack margin must be finite and positive"))
+    dims = kkt.preference_slack_dims
+    seed = isnothing(preference_slacks) ? nothing : collect(float.(preference_slacks))
+    if seed !== nothing
+        length(seed) == length(dims) || throw(
+            ArgumentError("preference_slacks has length $(length(seed)), expected $(length(dims))"),
+        )
+        all(isfinite, seed) || throw(ArgumentError("preference_slacks must be finite"))
+    end
+    isempty(dims) && return y
+    y[dims] .= 0.0
+    a0 = _a(kkt, y)
+    for (j, (col, row)) in enumerate(zip(dims, kkt.preference_slack_rows))
+        y[col] = max(seed === nothing ? 0.0 : seed[j], margin, margin - a0[row])
+    end
+    return y
+end
+
 # The starting iterate: duals 0, every original multiplier γ_j = 0.1ρ₁/s_j so the
 # complementarity rows hold exactly at w₀, then the φ slacks are re-evaluated and
 # φ_j = 0.1ρ₁/σ_j, and u = max(ρ₁ − s⊙b, 1e-6ρ₁) on the relaxed rows.
@@ -128,6 +155,7 @@ function _initial_w(kkt::ScholtesKKTSystem, z0, ρ₁::Float64; gamma_cols)
     comp_frac = scholtes ? 0.1 : 1.0
     y = zeros(n)
     y[kkt.primal_dims] .= float.(collect(z0))
+    _initialize_preference_slacks!(kkt, y)
     nc == 0 && return y
 
     s = _a(kkt, y)
@@ -154,21 +182,31 @@ function _initial_w(kkt::ScholtesKKTSystem, z0, ρ₁::Float64; gamma_cols)
 end
 
 """
-    scholtes_warm_start(kkt, θ, z, ρ; eq_cols = Int[], eq = Float64[], s_floor = 1e-8) -> w
+    scholtes_warm_start(kkt, θ, z, ρ; eq_cols = Int[], eq = Float64[],
+                        s_floor = 1e-8, preference_slacks = nothing) -> w
 
 A continuation start at primal `z` and level `ρ`, optionally keeping the
-equality/policy multipliers `eq` at columns `eq_cols` (source `_warm_w`).
+equality/policy multipliers `eq` at columns `eq_cols` (source `_warm_w`). Explicit
+preference slacks may be seeded with `preference_slacks`; each is raised as needed
+to keep both its own bound and its relaxed preference strictly feasible.
 """
-function scholtes_warm_start(kkt::ScholtesKKTSystem, θ, z, ρ; eq_cols = Int[], eq = Float64[], s_floor = 1e-8)
+function scholtes_warm_start(
+    kkt::ScholtesKKTSystem, θ, z, ρ;
+    eq_cols = Int[], eq = Float64[], s_floor = 1e-8, preference_slacks = nothing,
+)
     _set_theta!(kkt, θ)
     _set_rho!(kkt, ρ)
     cols = _gamma_columns(kkt)
     y = zeros(kkt.n)
     y[kkt.primal_dims] .= z
+    _initialize_preference_slacks!(
+        kkt, y; margin = max(s_floor, 0.1ρ), preference_slacks,
+    )
+    y[eq_cols] .= eq
+    kkt.n_comp == 0 && return y
     ng = kkt.original_nc
     s = max.(_a(kkt, y), s_floor)
     y[cols[1:ng]] .= 0.1ρ ./ max.(s[1:ng], ρ)
-    y[eq_cols] .= eq
     a = _a(kkt, y)
     s[(ng + 1):end] .= max.(a[(ng + 1):end], min(s_floor, 0.1ρ))
     y[cols[(ng + 1):end]] .= 0.1ρ ./ max.(s[(ng + 1):end], ρ)
@@ -181,13 +219,19 @@ end
           options = ScholtesOptions(), trace = nothing, step_trace = nothing)
 
 Newton on the Scholtes-form reduced KKT system down a ρ homotopy (see the top of
-src/scholtes_solver.jl). `z₀` is a strictly feasible primal start (default zeros);
-`w₀` a full iterate `[y; s; u]` from a previous result. `trace` / `step_trace` are
+src/scholtes_solver.jl). `z₀` contains only the original primal variables (default
+zeros) and must be strictly feasible for hard inequalities. Preference slacks are
+initialized internally, so prioritized constraints may be violated at `z₀`.
+`w₀` is a full iterate `[y; s; u]` from a previous result. `trace` / `step_trace` are
 called before / after each line search with the source's fields.
 
-Returns a NamedTuple: `status` (`:solved` iff `converged`), `z` (primal), `w`, `s`, `u`,
+Returns a NamedTuple: `status` (`:solved` iff `converged`), `z` (original primal),
+`preference_slacks` (explicit prioritized-constraint slacks), `w`, `s`, `u`,
 `rho` (the last level reached), `residual` (‖K₀(w)‖, the unperturbed KKT residual),
-`converged` (`residual < tol`), `sign_min`, `shortfall` (‖s ⊙ b‖∞), `iters`, `history`
+`relaxed_residual` (‖R(w; ρ)‖ at the returned iterate), `converged` (`residual < tol`),
+`termination_reason` (`:tolerance_reached`, `:inner_tolerance_reached`, `:max_inner`,
+`:nonfinite_residual`, `:invalid_step`, `:line_search_failed`, or `:no_iterations`),
+`sign_min`, `shortfall` (‖s ⊙ b‖∞), `iters`, `history`
 (‖R‖ per iteration), `klu_fallbacks` (dense fallback steps), `eta`.
 """
 function solve(
@@ -288,10 +332,12 @@ function _solve(
     history = Float64[]
     iters, best_k0, ρ = 0, Inf, schedule[1]
     residual_valid = false
+    termination_reason = :no_iterations
 
     for level in schedule
         ρ = level
         residual_valid = false
+        termination_reason = max_inner > 0 ? :max_inner : :no_iterations
         _set_rho!(kkt, ρ)
         if nc > 0
             _b!(kkt, b_cur, view(w, 1:n))
@@ -307,12 +353,18 @@ function _solve(
             nr = norm(r)
             push!(history, nr)
             iters += 1
-            isfinite(nr) || break
+            if !isfinite(nr)
+                termination_reason = :nonfinite_residual
+                break
+            end
 
             k0 = _norm_K0(res, r, w, ρ)
             k0 < best_k0 && (best_k0 = k0)
             k0 < tol && @goto done
-            nr < tol_inner && break
+            if nr < tol_inner
+                termination_reason = :inner_tolerance_reached
+                break
+            end
 
             # The source keeps this nonmonotone reference but its Armijo test below
             # reads `nr`; kept as ported so iteration counts match the source.
@@ -320,7 +372,10 @@ function _solve(
             @inbounds recent[slot] = nr
 
             dw = _bounded_step!(rule, ctx, w, b_cur, r)
-            (length(dw) == length(w) && all(isfinite, dw)) || break
+            if length(dw) != length(w) || !all(isfinite, dw)
+                termination_reason = :invalid_step
+                break
+            end
             trace === nothing || trace((;
                 iter = iters,
                 rho = ρ,
@@ -389,7 +444,10 @@ function _solve(
                 actual_reduction,
                 gain_ratio,
             ))
-            ok || break
+            if !ok
+                termination_reason = :line_search_failed
+                break
+            end
             copyto!(w, w_try)
             r_cur, r_try = r_try, r_cur
             b_cur, b_try = b_try, b_cur
@@ -406,14 +464,18 @@ function _solve(
     s = nc == 0 ? Float64[] : w[(n + 1):(n + nc)]
     u = nc > 0 ? w[(n + nc + 1):end] : Float64[]
     converged = k0 < tol
+    converged && (termination_reason = :tolerance_reached)
     return (;
         status = converged ? :solved : :failed,
+        termination_reason,
         z = w[kkt.primal_dims],
+        preference_slacks = w[kkt.preference_slack_dims],
         w,
         s,
         u,
         rho = ρ,
         residual = k0,
+        relaxed_residual = norm(r_cur),
         converged,
         sign_min = _sign_min(res, w, b_cur),
         shortfall = nc == 0 ? 0.0 : maximum(abs, s .* b_cur),

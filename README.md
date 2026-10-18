@@ -152,7 +152,7 @@ solvers are `:normal`, `:klu_sqrt_eta` (alias `:klu`; augmented diagonals ±√�
 
 | File                                       | Contents                                                                                                                                                                                                                                                      |
 | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `scholtes_kkt.jl`                          | `ScholtesKKTSystem`: the reduced KKT system as three blocks — stationarity and equalities `F_nc`, the sign-constrained functions `a` (g per level, then the φ slacks ρ𝟙 − g ⊙ γ) and their duals `b`. Only the explicit formulation (φ = true) is supported. |
+| `scholtes_kkt.jl`                          | `ScholtesKKTSystem`: stationarity and equalities `F_nc`, level inequalities `a` (including prioritized preference slacks, then φ slacks ρ𝟙 − G ⊙ γ), and their duals `b`. Only the explicit formulation (φ = true) is supported. |
 | `scholtes_residual.jl`                     | The relaxed residual `R(w; ρ)` (`s ⊙ γ + u = ρ𝟙`, exact `σ ⊙ φ = 0`), the true residual ‖K₀‖ and the sign box.                                                                                                                                               |
 | `scholtes_linsolve.jl`, `scholtes_step.jl` | The regularized least-squares Newton step `δ = −Jᵀ(η²I + JJᵀ)⁻¹r` (`:normal`, `:klu_eta`, `:klu_sqrt_eta`, `:svd`) and the projected two-metric bound rule.                                                                                                   |
 | `scholtes_solver.jl`                       | `Scholtes`, `ScholtesOptions`, `solve`, `geometric_schedule`, `scholtes_warm_start`.                                                                                                                                                                          |
@@ -169,11 +169,24 @@ result.z, result.converged, result.residual   # primal answer, status, ‖K₀�
 The Scholtes path requires `projected_step = true` (the default); `false` throws.
 Factorization reuse (`reuse_factorization_iters > 0`) is interior-point only.
 
+In Scholtes mode, a level marked `is_prioritized_constraint = true` introduces
+one `preference_slack` component per preference entry. The level minimizes
+`sum(preference_slack)` subject to `h + preference_slack ≥ 0` and
+`preference_slack ≥ 0`. Upper levels retain these same slack variables and both
+inequality blocks, with their own multipliers and the lower-level Scholtes KKT
+conditions. As in the old reduced formulation, stationarity differentiates with
+respect to the player's original variables and that level's own preference slack;
+inherited preference slacks and lower-level multipliers are held fixed.
+The solver initializes the slacks internally; `result.z` contains the original
+primal variables and `result.preference_slacks` contains the preference slacks.
+Pass the latter to `scholtes_warm_start(...; preference_slacks = ...)` to keep
+them during continuation.
+
 ## Experiments
 
 | File                                   | Description                                                                                                                                                         |
 | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `experiments/Intersection.jl`          | Two-player open-loop intersection example with trajectory dynamics, prioritized preferences, an interior-point solve, and result plotting.                          |
+| `experiments/Intersection.jl`          | Two-player open-loop intersection example with trajectory dynamics, prioritized preferences, a reduced Scholtes solve, and result plotting.                          |
 | `experiments/ExamplesQP.jl`            | Lightweight entry point for the quadratic-program example.                                                                                                          |
 | `experiments/robotic_arm_core.jl`      | Two-arm pot-carrying game (Scholtes scenario, x₀ as the parameter θ), the ρ sweep and plan metrics.                                                                 |
 | `experiments/Robotic_arm_final.jl`     | The robotic arm, open loop or receding horizon: `Robotic_arm_final.demo(; receding_horizon = 1, plot_fig = true, …)`.                                               |

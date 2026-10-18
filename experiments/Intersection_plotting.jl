@@ -1,8 +1,5 @@
-# Intersection_plotting.jl -- the figures of the two-player intersection scenario
-# (experiments/Intersection.jl): the map and trajectories (static and interactive), speed
-# and control profiles, and the solver's convergence, η and condition-number histories.
-# Distilled from the former experiments/Plotting.jl: the functions Intersection.jl calls
-# and what they depend on, unchanged.
+# Intersection_plotting.jl -- one combined dashboard per rho for Intersection.jl,
+# plus reusable map/profile helpers and the optional interactive trajectory view.
 # using TrajectoryGamesBase: OpenLoopStrategy
 using CairoMakie: CairoMakie
 # using LaTeXStrings: @L_str
@@ -46,6 +43,120 @@ function save_figure(path, figure)
         () -> CairoMakie.save(path, figure);
         description = "figure save to $(path)",
     )
+end
+
+"One report page: trajectories above the state, control, and solver diagnostics."
+function intersection_report_figure(page)
+    row = page.solution
+    strategy, warm = row["strategies"], page.warmstart_strategies
+    fig = serif_figure(size = (1600, 1700), fontsize = 20, figure_padding = 30)
+    status = row["status"]
+    CairoMakie.Label(fig[1, 1:3],
+        "Intersection | instance $(page.instance), attempt $(page.attempt) | rho=$(page.rho) | $(status)";
+        fontsize = 26, color = status == :solved ? :darkgreen : :firebrick)
+    error_text = round(row["kkt_error_per_equation"]; sigdigits = 4)
+    CairoMakie.Label(fig[2, 1:3],
+        "$(get(row, "stop_reason", string(status))) | KKT residual/sqrt(m)=$(error_text) | iterations=$(row["total_iters"])";
+        fontsize = 18)
+
+    top = CairoMakie.GridLayout(fig[3, 1:3])
+    for (column, (profiles, title)) in enumerate(((strategy, "Returned trajectory"),
+                                                  (warm, "Warm start for this rho")))
+        ax = CairoMakie.Axis(top[1, column]; title, aspect = CairoMakie.DataAspect(),
+            xlabel = "x [m]", ylabel = "y [m]", xgridvisible = false, ygridvisible = false)
+        draw_intersection_map!(ax; map_end = page.map_end, lane_width = page.lane_width)
+        for player in 1:2
+            xs = profiles[player].xs
+            color = player_plot_color(player)
+            CairoMakie.scatterlines!(ax, [x[1] for x in xs], [x[2] for x in xs];
+                color, linewidth = 3, markersize = 6)
+            CairoMakie.scatter!(ax, [xs[1][1]], [xs[1][2]];
+                color, marker = :circle, markersize = 16)
+            goal = player == 1 ? page.goal_position1 : page.goal_position2
+            CairoMakie.scatter!(ax, [goal[1]], [goal[2]];
+                color, marker = :star5, markersize = 22)
+        end
+    end
+    CairoMakie.Legend(fig[4, 1:3],
+        [CairoMakie.LineElement(color = player_plot_color(1), linewidth = 3),
+         CairoMakie.LineElement(color = player_plot_color(2), linewidth = 3),
+         CairoMakie.LineElement(color = :gray40, linestyle = :dash, linewidth = 2),
+         CairoMakie.LineElement(color = :black, linestyle = :dot, linewidth = 2),
+         CairoMakie.MarkerElement(color = :gray40, marker = :star5, markersize = 16)],
+        ["Player 1", "Player 2", "Warm start", "Bound / tolerance", "Goal"];
+        orientation = :horizontal, framevisible = false, labelsize = 18)
+
+    make_axis(r, c, title, ylabel; xlabel = "time [s]") =
+        CairoMakie.Axis(fig[r, c]; title, xlabel, ylabel,
+            titlesize = 20, xlabelsize = 18, ylabelsize = 18,
+            xticklabelsize = 16, yticklabelsize = 16)
+    function plot_profiles!(ax, getter; controls = false)
+        for player in 1:2, (profiles, style) in ((warm, :dash), (strategy, :solid))
+            values = controls ? profiles[player].us : profiles[player].xs
+            times = (0:(length(values) - 1)) .* page.timestep
+            CairoMakie.lines!(ax, times, getter.(values);
+                color = player_plot_color(player), linestyle = style, linewidth = 2)
+        end
+    end
+    planar = dynamics_model_symbol(page.dynamics_model) in
+        (:PlanarDoubleIntegrator, :planar_double_integrator)
+    ax_vx = make_axis(5, 1, planar ? "Horizontal velocity" : "Speed", "$(planar ? "vx" : "speed") [m/s]")
+    ax_vy = make_axis(5, 2, planar ? "Vertical velocity" : "Heading", planar ? "vy [m/s]" : "heading [rad]")
+    plot_profiles!(ax_vx, x -> x[3])
+    plot_profiles!(ax_vy, x -> x[4])
+    CairoMakie.hlines!(ax_vx, planar ? [-page.speed_limit, page.speed_limit] : [0, page.speed_limit];
+        color = :black, linestyle = :dot)
+    planar && CairoMakie.hlines!(ax_vy, [-page.speed_limit, page.speed_limit];
+        color = :black, linestyle = :dot)
+
+    ax_sep = make_axis(5, 3, "Vehicle separation", "distance [m]")
+    for (profiles, style) in ((warm, :dash), (strategy, :solid))
+        n = min(length(profiles[1].xs), length(profiles[2].xs))
+        distances = [sqrt(sum(abs2, profiles[1].xs[t][1:2] - profiles[2].xs[t][1:2])) for t in 1:n]
+        CairoMakie.lines!(ax_sep, (0:(n - 1)) .* page.timestep, distances;
+            color = :gray30, linestyle = style, linewidth = 2)
+    end
+    CairoMakie.hlines!(ax_sep, [page.collision_avoidance]; color = :black, linestyle = :dot)
+    for component in 1:2
+        ax = make_axis(6, component, "Control $(component)", planar ? "a$(component == 1 ? "x" : "y") [m/s^2]" : "u$(component)")
+        plot_profiles!(ax, u -> u[component]; controls = true)
+    end
+    ax_lane = make_axis(6, 3, "Hard lane violation", "maximum violation [m]")
+    for player in 1:2, (profiles, style) in ((warm, :dash), (strategy, :solid))
+        xs = profiles[player].xs
+        xmax, ymax = player == 1 ? (page.map_end, page.lane_width) : (page.lane_width, page.map_end)
+        violation = [max(abs(x[1]) - xmax, abs(x[2]) - ymax, 0.0) for x in xs]
+        CairoMakie.lines!(ax_lane, (0:(length(xs) - 1)) .* page.timestep, violation;
+            color = player_plot_color(player), linestyle = style, linewidth = 2)
+    end
+
+    scale = page.residual_scale
+    kkt_history = get(row, "kkt_error_history", Float64[]) ./ scale
+    relaxed_history = vcat(get(row, "residual_history", Float64[]), row["relaxed_residual"]) ./ scale
+    eta_history = get(row, "eta_history", Float64[])
+    for (column, title, ylabel, values, threshold) in (
+        (1, "True KKT residual", "log10(||K0|| / sqrt(m))", kkt_history, page.tol),
+        (2, "Relaxed residual", "log10(||R|| / sqrt(m))", relaxed_history, page.rho),
+        (3, "Regularization", "log10(eta)", eta_history, nothing),
+    )
+        ax = make_axis(7, column, title, ylabel; xlabel = "iteration snapshot")
+        if !isempty(values)
+            # Keep exact zeros visible at a finite plotting floor.
+            logs = [isfinite(v) && v >= 0 ? log10(max(v, 1e-16)) : NaN for v in values]
+            CairoMakie.scatterlines!(ax, 0:(length(logs) - 1), logs;
+                color = :dodgerblue, markersize = 4, linewidth = 2)
+        end
+        if !isnothing(threshold) && isfinite(threshold) && threshold > 0
+            CairoMakie.hlines!(ax, [log10(threshold)]; color = :black, linestyle = :dot)
+        end
+    end
+    CairoMakie.Label(fig[8, 1:3],
+        "Solid: returned iterate. Dashed: start of this rho. Circle: start. Star: goal. Controls are unbounded. Collision bounds apply from the second knot.";
+        fontsize = 16)
+    CairoMakie.rowsize!(fig.layout, 3, CairoMakie.Relative(0.34))
+    CairoMakie.rowgap!(fig.layout, 22)
+    CairoMakie.colgap!(fig.layout, 28)
+    return fig
 end
 
 function draw_intersection_map!(ax; map_end, lane_width, offset = 0.2)
@@ -711,6 +822,7 @@ function speed_plot(;
     dynamics_model = PlanarDoubleIntegrator(),
     speed_limit_players = nothing,
     additional_speed_limits = (),
+    component_speed_limits = false,
 )
     if length(strategy) < 2
         error("speed_plot expects strategies for at least two players.")
@@ -734,6 +846,43 @@ function speed_plot(;
     figure = serif_figure(size = (1000, 650))
     model = dynamics_model isa NamedTuple ? dynamics_model.model : dynamics_model
     model_symbol = dynamics_model_symbol(model)
+    if component_speed_limits &&
+       model_symbol in (:PlanarDoubleIntegrator, :planar_double_integrator)
+        axes = map(enumerate(("vx [m/s]", "vy [m/s]"))) do (component, label)
+            ax = CairoMakie.Axis(
+                figure[component, 1];
+                xlabel = "knot index",
+                ylabel = label,
+                xlabelsize = axis_label_fontsize,
+                ylabelsize = axis_label_fontsize,
+                xticklabelsize = tick_label_fontsize,
+                yticklabelsize = tick_label_fontsize,
+            )
+            for player in 1:num_players
+                CairoMakie.scatterlines!(
+                    ax, horizon_steps,
+                    [x[component + 2] for x in xs_by_player[player][1:trajectory_len]];
+                    color = player_plot_color(player), label = "Player $(player)",
+                    linewidth = 3,
+                )
+            end
+            for spec in limit_specs
+                CairoMakie.hlines!(
+                    ax, [-spec.limit, spec.limit];
+                    color = spec.color, linestyle = spec.linestyle, linewidth = 2,
+                    label = replace(speed_limit_label(spec.limit, spec.players),
+                        "Speed Limit [" => "Component Bounds [±"),
+                )
+            end
+            ax
+        end
+        CairoMakie.linkyaxes!(axes...)
+        CairoMakie.Legend(
+            figure[1:2, 2], first(axes);
+            framevisible = false, labelsize = legend_label_fontsize,
+        )
+        return figure, Tuple(axes)
+    end
     if model_symbol in (:Unicycle, :Bicycle, :unicycle, :bicycle)
         speed_profiles = [
             [xs_by_player[player][k][3] for k in 1:trajectory_len] for
@@ -753,8 +902,7 @@ function speed_plot(;
             ] for player in 1:num_players
         ]
     elseif model_symbol in (:PlanarDoubleIntegrator, :planar_double_integrator)
-        # Vehicle speed ‖(vx, vy)‖ — the quantity bounded by the speed-limit
-        # preference (vx² + vy² ≤ speed_limit²).
+        # Magnitude view, retained for runs with squared-speed constraints.
         speed_profiles = [
             [
                 sqrt(xs_by_player[player][k][3]^2 + xs_by_player[player][k][4]^2) for
@@ -768,7 +916,7 @@ function speed_plot(;
     if !isnothing(speed_profiles)
         ax = CairoMakie.Axis(
             figure[1, 1];
-            xlabel = "time step [s]",
+            xlabel = "knot index",
             ylabel = "speed [m/s]",
             xlabelsize = axis_label_fontsize,
             ylabelsize = axis_label_fontsize,
@@ -826,7 +974,7 @@ function speed_plot(;
 
     ax_vx = CairoMakie.Axis(
         figure[1, 1];
-        xlabel = "time step [s]",
+        xlabel = "knot index",
         ylabel = " horizontal speed [m/s]",
         xlabelsize = axis_label_fontsize,
         ylabelsize = axis_label_fontsize,
@@ -861,7 +1009,7 @@ function speed_plot(;
 
     ax_vy = CairoMakie.Axis(
         figure[1, 2];
-        xlabel = "time step [s]",
+        xlabel = "knot index",
         ylabel = "vertical speed [m/s]",
         xlabelsize = axis_label_fontsize,
         ylabelsize = axis_label_fontsize,
@@ -938,7 +1086,7 @@ function control_plot(; strategy, control_lb = nothing, control_ub = nothing)
     for control_idx in 1:control_dimension
         ax = CairoMakie.Axis(
             figure[control_idx, 1];
-            xlabel = control_idx == control_dimension ? "time step [s]" : "",
+            xlabel = control_idx == control_dimension ? "knot index" : "",
             ylabel = "u_$(control_idx)(t)",
             xlabelsize = axis_label_fontsize,
             ylabelsize = axis_label_fontsize,
@@ -1025,7 +1173,7 @@ function plot_convergence_plot(;
 )
     axis_label_fontsize = 30
     tick_label_fontsize = 22
-    ylabel_text = show_ylabel ? L"$\log(|| \mathcal{K}_{\rho}^{(\ell)} ||_\infty)$" : ""
+    ylabel_text = show_ylabel ? L"$\log_{10}(\|\mathcal{K}_0\|_2)$" : ""
     figure = serif_figure()
     ax = CairoMakie.Axis(
         figure[1, 1];

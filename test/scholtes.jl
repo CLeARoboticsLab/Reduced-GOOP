@@ -114,6 +114,222 @@ end
     @test k.n == k.n_nc + k.n_comp                          # K = 2, no equalities: square
 end
 
+@testset "explicit prioritized-constraint preference slacks" begin
+    function prioritized_problem(preferences, flags; inequality = (x, θ) -> [x[1] + 3.0])
+        RG.ParametricGOOP(
+            BlockArray(zeros(1), [1]), BlockArray(zeros(0), [0]);
+            preferences = [Function[preferences...]],
+            is_prioritized_constraint = [collect(flags)],
+            equality_constraints = [nothing], inequality_constraints = [inequality],
+        )
+    end
+    build_prioritized(goop; codegen = :fast_differentiation) =
+        RG.generate_slacked_reduced_kkt_system(goop; complementarity = :scholtes, codegen)
+
+    @testset "inherited constraints and current-level differentiation" begin
+        # Preference variables and inequalities persist above their source level,
+        # but reduced stationarity differentiates only x and the current slack.
+        for flags in ((true, false, false), (false, true, false),
+                      (false, false, true), (true, false, true), (false, true, true))
+            preferences = [flag ? ((x, θ) -> [x[1] + 1.0, 2.0 - x[1]]) :
+                           ((x, θ) -> (x[1] - 0.5)^2) for flag in flags]
+            k = build_prioritized(prioritized_problem(preferences, flags))
+            K = length(flags)
+            dimensions = [1 + (flags[level] ? 2 : 0) for level in 1:K]
+            inequality_dimensions = [1 + 4count(identity, flags[level:K]) for level in 1:K]
+            @test k.primal_dims == 1:1
+            @test length(k.preference_slack_dims) == 2count(identity, flags)
+            @test k.n_nc == sum(dimensions)
+            @test k.original_nc == sum(inequality_dimensions)
+            @test k.n_comp - k.original_nc ==
+                  sum((level - 1) * inequality_dimensions[level] for level in 2:K)
+            @test k.u_index[1:k.original_nc] == collect(1:k.original_nc)
+            @test all(iszero, k.u_index[(k.original_nc + 1):end])
+            @test all(l.kind === :phi_upper for l in k.labels[(k.original_nc + 1):end])
+
+            RG._set_theta!(k, θ0); RG._set_rho!(k, 0.1)
+            columns = RG._gamma_columns(k)
+            @test length(unique(columns[1:k.original_nc])) == k.original_nc
+            y = zeros(k.n)
+            y[1] = 0.25
+            y[k.preference_slack_dims] .= 0.2 .+ 0.1 .* collect(1:length(k.preference_slack_dims))
+            y[columns[1:k.original_nc]] .= 0.01 .* collect(1:k.original_nc)
+            # Keeping all policy and phi multipliers zero isolates the direct terms.
+            values = F_nc(k, y)
+            a = a_of(k, y); b = b_of(k, y)
+            k.J_a!(k.Ja_buf, y, θ0, 0.1)
+            Ja = Matrix(k.Ja_buf)
+            expected_slack_rows = Int[]
+            slack_number = 0
+            for source in 1:K
+                flags[source] || continue
+                for component in 1:2
+                    slack_number += 1
+                    slack_column = k.preference_slack_dims[slack_number]
+                    for level in 1:source
+                        row(kind) = only(findall(l -> l.kind === kind && l.level == level &&
+                            l.lower_level == source && l.inequality == component, k.labels))
+                        pref_row, bound_row = row(:preference), row(:preference_slack)
+                        level == source && push!(expected_slack_rows, pref_row)
+                        @test a[bound_row] == y[slack_column]
+                        @test a[pref_row] ≈ (component == 1 ? 1.25 : 1.75) + y[slack_column]
+                        @test findall(!iszero, Ja[bound_row, :]) == [slack_column]
+                        @test Ja[bound_row, slack_column] == Ja[pref_row, slack_column] == 1.0
+                        if level == source
+                            stationarity_row = sum(dimensions[1:(level - 1)]; init = 0) + 1 + component
+                            @test values[stationarity_row] ≈ 1.0 - b[pref_row] - b[bound_row]
+                        end
+                    end
+                end
+            end
+            @test k.preference_slack_rows == expected_slack_rows
+            # Each exact phi pair bounds one lower-level relaxed product, including
+            # products for h + preference_slack and preference_slack itself.
+            inherited_rows = Int[]
+            for row in (k.original_nc + 1):k.n_comp
+                source_column = only(findall(!iszero, Ja[row, columns[1:k.original_nc]]))
+                push!(inherited_rows, source_column)
+                @test k.labels[source_column].level == k.labels[row].lower_level
+                @test a[row] ≈ 0.1 - a[source_column] * b[source_column]
+            end
+            for row in 1:k.original_nc
+                @test count(==(row), inherited_rows) == k.labels[row].level - 1
+            end
+            # An inherited slack can affect an upper Lagrangian without acquiring
+            # an upper stationarity equation: it is an induced variable there.
+            y[columns[(k.original_nc + 1):end]] .= 0.02
+            for source in 1:K, component in 1:2, level in 1:(source - 1)
+                flags[source] || continue
+                source_slack = 2count(identity, flags[1:(source - 1)]) + component
+                slack_column = k.preference_slack_dims[source_slack]
+                original_rows = findall(l -> l.kind !== :phi_upper && l.level == level, k.labels)
+                phi_rows = findall(l -> l.kind === :phi_upper && l.level == level, k.labels)
+                function upper_lagrangian(at)
+                    first_slack = 2count(identity, flags[1:(level - 1)]) + 1
+                    objective = flags[level] ? sum(at[k.preference_slack_dims[
+                        first_slack:(first_slack + 1)]]) : (at[1] - 0.5)^2
+                    av, bv = a_of(k, at), b_of(k, at)
+                    objective - sum(av[row] * bv[row] for row in original_rows) -
+                        sum(av[row] * bv[row] for row in phi_rows)
+                end
+                own_pref = only(findall(l -> l.kind === :preference && l.level == level &&
+                    l.lower_level == source && l.inequality == component, k.labels))
+                own_bound = only(findall(l -> l.kind === :preference_slack && l.level == level &&
+                    l.lower_level == source && l.inequality == component, k.labels))
+                contribution = 0.0
+                for lower in (level + 1):source, kind in (:preference, :preference_slack)
+                    original_row = only(findall(l -> l.kind === kind && l.level == lower &&
+                        l.lower_level == source && l.inequality == component, k.labels))
+                    inequality = original_row - sum(inequality_dimensions[1:(lower - 1)]; init = 0)
+                    phi_row = only(findall(l -> l.kind === :phi_upper && l.level == level &&
+                        l.lower_level == lower && l.inequality == inequality, k.labels))
+                    contribution += y[columns[phi_row]] * b[original_row]
+                end
+                plus, minus = copy(y), copy(y)
+                plus[slack_column] += 1e-6
+                minus[slack_column] -= 1e-6
+                derivative = (upper_lagrangian(plus) - upper_lagrangian(minus)) / 2e-6
+                @test derivative ≈ -b[own_pref] - b[own_bound] + contribution atol = 1e-8
+                @test abs(derivative) > 1e-4
+            end
+        end
+    end
+
+    @testset "native and FastDifferentiation agree with numerical Jacobians" begin
+        goop = prioritized_problem(Function[
+            (x, θ) -> (x[1] - 0.5)^2,
+            (x, θ) -> [x[1] + 1.0, 2.0 - x[1]],
+            (x, θ) -> [exp(x[1]) - 0.1, 2.0 - x[1]^2],
+        ], (false, true, true))
+        native = build_prioritized(goop; codegen = :native)
+        fd = build_prioritized(goop)
+        @test string.(native.vars) == string.(fd.vars)
+        y = 0.2 .* cos.(collect(1:native.n))
+        rho, h = 0.2, 1e-6
+        direction = sin.(collect(1:native.n))
+        for k in (native, fd)
+            RG._set_theta!(k, θ0); RG._set_rho!(k, rho)
+        end
+        for (evaluate, jacobian, buffer) in (
+            (F_nc, k -> k.J_nc!, k -> k.Jnc_buf),
+            (a_of, k -> k.J_a!, k -> k.Ja_buf),
+            (b_of, k -> k.J_b!, k -> k.Jb_buf),
+        )
+            @test evaluate(native, y) ≈ evaluate(fd, y) atol = 1e-12 rtol = 1e-12
+            jacobian(native)(buffer(native), y, θ0, rho)
+            jacobian(fd)(buffer(fd), y, θ0, rho)
+            @test Matrix(buffer(native)) ≈ Matrix(buffer(fd)) atol = 1e-12 rtol = 1e-12
+            numeric = (evaluate(fd, y + h * direction) - evaluate(fd, y - h * direction)) / (2h)
+            @test numeric ≈ buffer(fd) * direction atol = 2e-7 rtol = 2e-7
+        end
+    end
+
+    @testset "sum of preference slacks preserves the L1 minimizer continuum" begin
+        # min e1 + e2 subject to x + e1 >= 0, -1 - x + e2 >= 0, e >= 0
+        # has value 1 for all x in [-1, 0]. The reduced KKT system need not select
+        # a unique x; a smooth violation power would have a unique inner x = -0.5.
+        goop = prioritized_problem(Function[
+            (x, θ) -> (x[1] + 0.75)^2,
+            (x, θ) -> [x[1], -1.0 - x[1]],
+        ], (false, true); inequality = nothing)
+        k = build_prioritized(goop)
+        columns = RG._gamma_columns(k)
+        # Two full boundary certificates exhibit the L1 continuum without imposing
+        # uniqueness on the reduced outer KKT system.
+        for x in (-0.75, -0.5)
+            y = zeros(k.n)
+            y[1] = x
+            y[k.preference_slack_dims] .= [-x, 1.0 + x]
+            for (row, label) in enumerate(k.labels)
+                if label.kind === :preference
+                    y[columns[row]] = label.level == 2 ? 1.0 :
+                        (label.inequality == 1 ? 2(x + 0.75) : 0.0)
+                end
+            end
+            RG._set_theta!(k, θ0); RG._set_rho!(k, 0.0)
+            a, b = a_of(k, y), b_of(k, y)
+            @test all(>=(0), a) && all(>=(0), b)
+            witness = [y; a; zeros(RG._n_u(k))]
+            residuals = RG.ScholtesResiduals(k)
+            @test norm(RG._resid!(residuals, zeros(residuals.m), zeros(k.n_comp), witness, 0.0)) == 0.0
+            @test sum(y[k.preference_slack_dims]) == 1.0
+        end
+        cold = RG._initial_w(k, [-0.25], 0.1; gamma_cols = RG._gamma_columns(k))
+        @test all(>(0), cold[k.preference_slack_dims])
+        @test all(>(0), a_of(k, cold[1:k.n])[1:k.original_nc])
+        options = RG.ScholtesOptions(rho_schedule = 10.0 .^ collect(-2:-1:-10),
+            linear_solver = :normal, max_inner = 1000, tol = 1e-7, tol_inner = 1e-11)
+        result = RG.solve(RG.Scholtes(), k, θ0; z₀ = [-0.25], options)
+        @test result.converged
+        @test length(result.z) == 1
+        @test result.z == result.w[k.primal_dims]
+        @test all(isfinite, result.z)
+        @test result.preference_slacks == result.w[k.preference_slack_dims]
+        @test result.preference_slacks ≈ [-result.z[1], 1.0 + result.z[1]] atol = 1e-4
+        @test sum(result.preference_slacks) ≈ 1.0 atol = 1e-5
+        eq_cols = findall(v -> startswith(string(v), "psi_"), k.vars)
+        w0 = RG.scholtes_warm_start(k, θ0, result.z, 1e-10;
+            eq_cols, eq = result.w[eq_cols], preference_slacks = result.preference_slacks)
+        @test w0[k.primal_dims] == result.z
+        @test all(>(0), w0[k.preference_slack_dims])
+        @test all(>(0), a_of(k, w0[1:k.n])[1:k.original_nc])
+        @test all(w0[k.preference_slack_dims] .>= result.preference_slacks)
+        @test w0[k.preference_slack_dims] ≈ result.preference_slacks atol = 1e-7
+        for invalid_seed in ([1.0], [NaN, 1.0], [1.0, Inf])
+            @test_throws ArgumentError RG.scholtes_warm_start(k, θ0, result.z, 1e-10;
+                preference_slacks = invalid_seed)
+        end
+        for backend in (:normal, :klu_eta, :klu_sqrt_eta, :svd)
+            warm = RG.solve(RG.Scholtes(), k, θ0; w₀ = w0,
+                options = RG.ScholtesOptions(linear_solver = backend,
+                    rho_schedule = [1e-10], max_inner = 2, tol = 0.0, tol_inner = 0.0))
+            @test warm.z == warm.w[k.primal_dims]
+            @test length(warm.z) == 1
+            @test all(isfinite, warm.preference_slacks)
+        end
+    end
+end
+
 @testset "quasi-stationarity: shape is unchanged" begin
     for prob in (prob_C, prob_E, prob_F, prob_G)
         ke, kq = skkt(prob; quasi = false), skkt(prob; quasi = true)
@@ -267,6 +483,49 @@ end
     @test length(L[1]) == 1
     @test issorted(length.(L))
     @test minimum(L[end]) <= minimum(L[1])
+end
+
+@testset "termination diagnostics" begin
+    k = skkt(prob_A)
+    converged = ssolve(k, prob_A.z0; rho_schedule = [1e-3], tol = Inf)
+    @test converged.status == :solved
+    @test converged.termination_reason == :tolerance_reached
+
+    inner = ssolve(k, prob_A.z0; rho_schedule = [1e-3], tol = 0.0, tol_inner = Inf)
+    @test inner.status == :failed
+    @test inner.termination_reason == :inner_tolerance_reached
+    @test inner.iters == 1
+
+    empty_run = ssolve(k, prob_A.z0; rho_schedule = [1e-3], max_inner = 0, tol = 0.0)
+    @test empty_run.termination_reason == :no_iterations
+    @test empty_run.iters == 0
+    @test isempty(empty_run.history)
+
+    free = sproblem(ni = [1], objectives = [[z -> z[1]^2]], z0 = [1.0])
+    kfree = skkt(free)
+    budget = ssolve(kfree, free.z0; rho_schedule = [1e-3], max_inner = 1,
+                   tol = 0.0, tol_inner = 0.0, linear_solver = :normal)
+    @test budget.termination_reason == :max_inner
+    @test budget.iters == 1
+    @test budget.relaxed_residual ≈ norm(F_nc(kfree, budget.w))
+    @test budget.relaxed_residual < budget.history[end]
+    # A final accepted step can meet tol after the last loop-entry check.
+    last_step = ssolve(kfree, free.z0; rho_schedule = [1e-3], max_inner = 1,
+                      tol = 1e-6, tol_inner = 0.0, linear_solver = :normal)
+    @test last_step.converged
+    @test last_step.termination_reason == :tolerance_reached
+
+    nonfinite = ssolve(kfree, free.z0; rho_schedule = [1e-3], w0 = [NaN])
+    @test nonfinite.status == :failed
+    @test nonfinite.termination_reason == :nonfinite_residual
+    @test isnan(nonfinite.relaxed_residual)
+
+    # Fault injection: no projected trial with a NaN direction can pass Armijo.
+    stalled = ssolve(kfree, free.z0; rho_schedule = [1e-3], tol = 0.0,
+                     tol_inner = 0.0, trace = nt -> fill!(nt.dw, NaN))
+    @test stalled.status == :failed
+    @test stalled.termination_reason == :line_search_failed
+    @test stalled.w == free.z0
 end
 
 @testset "warm start reproduces the solve" begin

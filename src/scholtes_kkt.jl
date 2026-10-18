@@ -6,17 +6,22 @@
 # `γ_k ≥ 0` on `g` at every level, and each upper level k adds, for each of the
 # K−k levels m below it,
 #
-#     −φ_{k,m}ᵀ (ρ𝟙 − g ⊙ γ_m),        φ_{k,m} ≥ 0,
+#     −φ_{k,m}ᵀ (ρ𝟙 − G_m ⊙ γ_m),        φ_{k,m} ≥ 0,
 #
-# whose lifted slack σ_{k,m} = ρ𝟙 − g ⊙ γ_m and φ_{k,m} satisfy EXACT
-# complementarity σ ⊙ φ = 0. The original pairs are Scholtes-relaxed by the
+# whose slack σ_{k,m} = ρ𝟙 − G_m ⊙ γ_m and φ_{k,m} satisfy EXACT
+# complementarity σ ⊙ φ = 0. The level inequality pairs are Scholtes-relaxed by the
 # solver: s ⊙ γ + u = ρ𝟙. The system is returned as three blocks,
 #
-#     F_nc(y)  stationarity of every level (w.r.t. the player's own x only) + equalities
-#     a(y)     g repeated Kⁱ times, then ρ𝟙 − g ⊙ γ_m for every φ pair
-#     b(y)     γ_1 … γ_K, then φ                       (a coordinate projection)
+# A prioritized constraint h_m >= 0 instead introduces e_m, minimizes sum(e_m),
+# and adds h_m + e_m >= 0, e_m >= 0. These variables and inequalities persist in
+# every upper level k <= m, with a fresh inequality multiplier at each level.
+# Let G_k collect g and the preference inequalities available at level k. Then
 #
-# with y = [x; duals]. The slacks s and the relaxation u are solver-side blocks, as
+#     F_nc(y)  stationarity w.r.t. own x and the current level's e_k, plus equalities
+#     a(y)     G_1 ... G_K, then ρ𝟙 − G_m ⊙ γ_m for every φ pair
+#     b(y)     γ_1 ... γ_K, then φ                     (a coordinate projection)
+#
+# with y = [x; preference slacks; duals]. The slacks s and the relaxation u are solver-side blocks, as
 # in the source (src/scholtes_residual.jl). ρ enters the generated code in the slot
 # the interior-point system uses for ϵ.
 
@@ -126,13 +131,10 @@ function _couple_policy_terms(groups::Vector{Vector{_LTerm}}, ψ::AbstractVector
     return coupled
 end
 
-# The scalar objective of player `i` at level `k` (1 = outermost). A prioritized
-# constraint level uses the interior-point builder's smooth violation penalty.
-function _scholtes_level_objective(goop::ParametricGOOP, i, k, x, θ)
-    value = goop.preferences[i][k](x, θ)
-    if goop.is_prioritized_constraint[i][k]
-        return _num(sum(smooth_piecewise_preference_objective.(value, k)))
-    end
+# A prioritized level minimizes the sum of its own explicit preference slacks.
+# Its vector h enters h + preference_slack >= 0 below, not a smooth penalty.
+function _scholtes_level_objective(goop::ParametricGOOP, i, k, value, preference_slack)
+    goop.is_prioritized_constraint[i][k] && return _num(sum(preference_slack))
     return _num(value isa AbstractVector ? only(value) : value)
 end
 
@@ -156,42 +158,75 @@ function _scholtes_player_system(
         Symbolics.Num[]
     sym(base, args...) = Symbolics.variable(Symbol(base, "_p$(i)", args...))
 
-    function base_terms(k, lam, gam)
-        terms = _LTerm[_LTerm(_scholtes_level_objective(goop, i, k, x, θ))]
+    values = [preference(x, θ) for preference in goop.preferences[i]]
+    prioritized = goop.is_prioritized_constraint[i]
+    as_vector(value) = collect(Symbolics.Num, value isa AbstractVector ? value : [value])
+    preference_values = [prioritized[k] ? as_vector(values[k]) : Symbolics.Num[] for k in 1:K]
+    # Each source level owns ONE vector. All upper levels reference those same
+    # variables and carry both h_m + e_m >= 0 and e_m >= 0 with fresh duals.
+    preference_slacks = [
+        Symbolics.Num[sym("preference_slack", "_k$(k)_$j") for j in eachindex(preference_values[k])]
+        for k in 1:K
+    ]
+
+    function level_data(k)
+        lam = Symbolics.Num[sym("lam", k == K ? "_K$j" : "_k$(k)_$j") for j in 1:nE]
+        gam = Symbolics.Num[sym("gam", k == K ? "_K$j" : "_k$(k)_$j") for j in 1:nI]
+        G = copy(g_val)
+        labels = NamedTuple[
+            (; kind = :gamma, player = i, level = k, lower_level = 0, inequality = j)
+            for j in 1:nI
+        ]
+        for m in k:K
+            prioritized[m] || continue
+            e = preference_slacks[m]
+            append!(G, preference_values[m] .+ e)
+            append!(G, e)
+            append!(gam, Symbolics.Num[sym("gam_preference", "_k$(k)_m$(m)_$j") for j in eachindex(e)])
+            append!(gam, Symbolics.Num[sym("mu_preference", "_k$(k)_m$(m)_$j") for j in eachindex(e)])
+            for kind in (:preference, :preference_slack), j in eachindex(e)
+                push!(labels, (; kind, player = i, level = k, lower_level = m, inequality = j))
+            end
+        end
+        # Match goop.jl's commented vars = vcat(x[Block(player)], preference_slack):
+        # differentiate only the current level's slack, holding inherited slacks
+        # and lower-level multipliers fixed in upper-level stationarity.
+        vars = vcat(xi, preference_slacks[k])
+        objective = _scholtes_level_objective(goop, i, k, values[k], preference_slacks[k])
+        terms = _LTerm[_LTerm(objective)]
         nE > 0 && push!(terms, _LTerm(h_val; duals = lam))
-        nI > 0 && push!(terms, _LTerm(g_val; duals = gam))
-        return terms
+        !isempty(G) && push!(terms, _LTerm(G; duals = gam))
+        return (; vars, G, gam, lam, terms, labels)
     end
+    levels = [level_data(k) for k in 1:K]
 
-    # Innermost level k = K: no policy chain, no φ.
-    lamK = [sym("lam", "_K$j") for j in 1:nE]
-    gamK = [sym("gam", "_K$j") for j in 1:nI]
-    gL_K, chain_K = _diff_sum(base_terms(K, lamK, gamK), xi, trunc)
-
+    # Innermost level k = K: no policy chain, no φ. Preference slack gradients
+    # include 1 - gam_preference - mu_preference = 0 at their source level.
+    inner = levels[K]
+    gL_K, chain_K = _diff_sum(inner.terms, inner.vars, trunc)
     stat = Vector{Symbolics.Num}[gL_K]
-    gams = Vector{Symbolics.Num}[gamK]
     chains = Vector{_LTerm}[chain_K]
-    duals = Symbolics.Num[lamK; gamK]
+    duals = Symbolics.Num[inner.lam; inner.gam]
     phi_pairs = NamedTuple[]
 
     # Upper levels k = K-1, …, 1.
     for k in (K - 1):-1:1
-        n_lower = K - k
-        ψk = [sym("psi", "_k$(k)_$j") for j in 1:(n_lower * length(xi))]
+        # Lower stationarity columns can have different lengths because each
+        # level includes its own newly introduced preference slacks.
+        n_policy = sum(length(group[1].expr) for group in chains)
+        ψk = Symbolics.Num[sym("psi", "_k$(k)_$j") for j in 1:n_policy]
         φk = Vector{Symbolics.Num}[]
-        lamk = [sym("lam", "_k$(k)_$j") for j in 1:nE]
-        gamk = [sym("gam", "_k$(k)_$j") for j in 1:nI]
-
-        terms = base_terms(k, lamk, gamk)
+        current = levels[k]
+        terms = copy(current.terms)
         append!(terms, _couple_policy_terms(chains, ψk))
-        for ℓ in 1:n_lower
-            m = K - ℓ + 1
-            product = g_val .* gams[ℓ]
-            φ = [sym("phi_upper", "_k$(k)_m$(m)_$j") for j in 1:nI]
+        for m in K:-1:(k + 1)
+            lower = levels[m]
+            product = lower.G .* lower.gam
+            φ = Symbolics.Num[sym("phi_upper", "_k$(k)_m$(m)_$j") for j in eachindex(lower.G)]
             slack = ρ .- product
-            push!(terms, _LTerm(slack; duals = φ))   # −φᵀ(ρ − g⊙γ_m)
+            push!(terms, _LTerm(slack; duals = φ))   # −φᵀ(ρ − G_m⊙γ_m)
             push!(φk, φ)
-            for j in 1:nI
+            for j in eachindex(lower.G)
                 push!(
                     phi_pairs,
                     (;
@@ -207,24 +242,32 @@ function _scholtes_player_system(
             end
         end
 
-        gL_k, chain_k = _diff_sum(terms, xi, trunc)
+        gL_k, chain_k = _diff_sum(terms, current.vars, trunc)
         push!(stat, gL_k)
-        push!(gams, gamk)
         pushfirst!(chains, chain_k)
         append!(duals, ψk)
         foreach(block -> append!(duals, block), φk)
-        append!(duals, lamk)
-        append!(duals, gamk)
+        append!(duals, current.lam)
+        append!(duals, current.gam)
     end
 
     reverse!(stat)
-    reverse!(gams)
+    # One h_m + e_m row at the source level initializes each e_m. The upper
+    # copies refer to the same e_m but need no additional primal coordinate.
+    preference_slack_rows = Int[]
+    row_offset = 0
+    for k in 1:K
+        append!(preference_slack_rows, row_offset .+ nI .+ eachindex(preference_slacks[k]))
+        row_offset += length(levels[k].G)
+    end
     return (
-        F = [vcat(stat...); h_val; repeat(g_val, K) .* vcat(gams...)],
+        F_nc = [vcat(stat...); h_val],
         duals,
-        comp_offset = K * length(xi) + nE,
-        comp_a = repeat(g_val, K),
-        comp_b = vcat(gams...),
+        preference_slacks = reduce(vcat, preference_slacks; init = Symbolics.Num[]),
+        preference_slack_rows,
+        comp_a = reduce(vcat, (level.G for level in levels); init = Symbolics.Num[]),
+        comp_b = reduce(vcat, (level.gam for level in levels); init = Symbolics.Num[]),
+        comp_labels = reduce(vcat, (level.labels for level in levels); init = NamedTuple[]),
         phi_pairs,
     )
 end
@@ -240,7 +283,7 @@ Jacobian memo (`Jy`, `Jvalid`), since one Newton step asks for the Jacobian seve
 at the same iterate.
 """
 struct ScholtesKKTSystem{T1,T2,T3,T4,T5,T6}
-    "Length of y = [x; duals]"
+    "Length of y = [x; preference slacks; duals]"
     n::Int
     "Number of non-complementarity rows (stationarity and equalities)"
     n_nc::Int
@@ -248,6 +291,10 @@ struct ScholtesKKTSystem{T1,T2,T3,T4,T5,T6}
     n_comp::Int
     "Coordinates of y holding the primal x"
     primal_dims::UnitRange{Int}
+    "Coordinates of y holding explicit prioritized-constraint preference slacks"
+    preference_slack_dims::UnitRange{Int}
+    "One source-level h + preference_slack row of a per preference slack, in coordinate order"
+    preference_slack_rows::Vector{Int}
     "Length of θ"
     parameter_dimension::Int
     F_nc!::T1
@@ -265,7 +312,7 @@ struct ScholtesKKTSystem{T1,T2,T3,T4,T5,T6}
     S_b::Tuple{Vector{Int},Vector{Int}}
     "Compact u index per complementarity row; 0 marks an exact φ row"
     u_index::Vector{Int}
-    "Number of original g/γ pairs; rows past it are φ pairs"
+    "Number of relaxed G/γ pairs, including preference inequalities; remaining rows are exact φ pairs"
     original_nc::Int
     "Kind, player, level, lower level and inequality of each complementarity row"
     labels::Vector{NamedTuple}
@@ -338,7 +385,7 @@ function generate_scholtes_reduced_kkt_system(
     trunc = quasi ? quasi_order : typemax(Int)
     backend = SymbolicTracingUtils.SymbolicsBackend()
 
-    local F_nc, a, b, y, θ_symbolic, ρ, η, labels, exact, original_nc
+    local F_nc, a, b, y, θ_symbolic, ρ, η, labels, exact, original_nc, preference_slack_dims, preference_slack_rows
     @timeit TO "Scholtes symbolic construction" begin
         x = SymbolicTracingUtils.make_variables(backend, :x, sum(goop.primal_dims))
         θ_symbolic = SymbolicTracingUtils.make_variables(backend, :θ, sum(goop.parameter_dims))
@@ -359,29 +406,22 @@ function generate_scholtes_reduced_kkt_system(
             ) for i in 1:(goop.num_players)
         ]
 
-        comp_idx = Int[]
-        row_base = 0
-        for (i, p) in enumerate(players)
-            K = length(goop.preferences[i])
-            start = row_base + p.comp_offset + 1
-            append!(comp_idx, start:(start + K * goop.inequality_dims[i] - 1))
-            row_base += length(p.F)
+        preference_slack_rows = Int[]
+        row_offset = 0
+        for p in players
+            append!(preference_slack_rows, row_offset .+ p.preference_slack_rows)
+            row_offset += length(p.comp_a)
         end
-
-        y = Symbolics.Num[x; reduce(vcat, (p.duals for p in players); init = Symbolics.Num[])]
-        F = reduce(vcat, (p.F for p in players); init = Symbolics.Num[])
+        preference_slacks = reduce(vcat, (p.preference_slacks for p in players); init = Symbolics.Num[])
+        preference_slack_dims = (length(x) + 1):(length(x) + length(preference_slacks))
+        y = Symbolics.Num[x; preference_slacks; reduce(vcat, (p.duals for p in players); init = Symbolics.Num[])]
+        F_nc = reduce(vcat, (p.F_nc for p in players); init = Symbolics.Num[])
         a = reduce(vcat, (p.comp_a for p in players); init = Symbolics.Num[])
         b = reduce(vcat, (p.comp_b for p in players); init = Symbolics.Num[])
         original_nc = length(a)
-        labels = NamedTuple[
-            (; kind = :gamma, player = i, level = k, lower_level = 0, inequality = j) for
-            i in 1:(goop.num_players) for k in 1:length(goop.preferences[i]) for
-            j in 1:goop.inequality_dims[i]
-        ]
+        labels = reduce(vcat, (p.comp_labels for p in players); init = NamedTuple[])
         exact = falses(original_nc)
         for p in players, pair in p.phi_pairs
-            push!(F, pair.a * pair.b)
-            push!(comp_idx, length(F))
             push!(a, pair.a)
             push!(b, pair.b)
             push!(exact, true)
@@ -396,7 +436,6 @@ function generate_scholtes_reduced_kkt_system(
                 ),
             )
         end
-        F_nc = F[setdiff(1:length(F), comp_idx)]
     end
 
     blocks = @timeit TO "Scholtes KKT codegen" map((F_nc, a, b)) do exprs
@@ -423,6 +462,8 @@ function generate_scholtes_reduced_kkt_system(
         length(F_nc),
         n_comp,
         1:sum(goop.primal_dims),
+        preference_slack_dims,
+        preference_slack_rows,
         sum(goop.parameter_dims),
         F_nc!,
         a!,

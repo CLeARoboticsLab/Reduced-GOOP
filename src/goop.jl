@@ -147,7 +147,9 @@ and returns a `ScholtesKKTSystem` for `Scholtes`; it is opt-in, supports only
 `phi = true`, and generates code with FastDifferentiation unless `codegen` says
 otherwise, split into functions of `fd_codegen_chunk_size` expressions (default
 `SCHOLTES_FD_CHUNK_SIZE`; pass `typemax(Int)` for one function per block). See
-src/scholtes_kkt.jl.
+src/scholtes_kkt.jl. In Scholtes mode, prioritized constraint vectors introduce
+explicit preference slacks: minimize their sum subject to `h + slack ≥ 0` and
+`slack ≥ 0`, retaining these variables and inequalities at every upper level.
 """
 function generate_slacked_reduced_kkt_system(
     goop::ParametricGOOP;

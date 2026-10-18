@@ -571,8 +571,8 @@ end
 end
 
 @testset "Scholtes mode accepts prioritized-constraint levels (smoke)" begin
-	# Build and run only: the Scholtes relaxation is not judged on
-	# prioritized-constraint levels, which enter as a smooth violation penalty.
+	# Prioritized vectors introduce explicit preference slacks and their two
+	# inequality blocks, including the corresponding Scholtes complementarity.
 	num_players = 3
 	primal_dims = fill(PRIMAL_DIM, num_players)
 	x_template = BlockArray(zeros(sum(primal_dims)), primal_dims)
