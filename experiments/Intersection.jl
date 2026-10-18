@@ -94,6 +94,8 @@ function get_setup(
     trajectory(z; player) =
         unflatten_trajectory(z[Block(player)], state_dimension, control_dimension)
 
+    # Normalizing lane and speed inequalities by their bound ranges improves
+    # numerical scaling and can help solver convergence.
     function lane_bounds(x; player)
         px = x[1]
         py = x[2]
