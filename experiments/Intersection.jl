@@ -1,20 +1,20 @@
 # Intersection.jl -- two crossing vehicles, solved with reduced Scholtes GOOP.
 # Run from the repository root (including the file alone does not solve):
 #
-#  julia --project=experiments -e 'include("experiments/Intersection.jl"); Intersection.demo(; debug=true, run_id="intersection_lanes", verbose=true)'
+#  julia --project=experiments -e 'include("experiments/Intersection.jl"); Intersection.demo()'
 #
 # Add plot_fig=false to skip plots; use a new run_id for each experiment.
-# State [px,py,vx,vy], control [ax,ay]; default dt=0.2 s, 12 knots (2.2 s).
-# P1 goes (-4,-1)->(6,-1); P2 goes (1,-5)->(1,6); the first state is fixed.
+# State [px,py,vx,vy], control [ax,ay]; default dt=0.2 s, 15 knots (2.8 s).
+# Fixed positions/goals: P1 (-4,-1)->(6,-1); P2 (1,-5)->(1,6).
 # Preferences, LOWEST -> HIGHEST: P1 control -> speed -> goal;
 #                               P2 control -> goal -> speed.
 # Speed levels minimize sum(preference_slack), with h+slack>=0 and slack>=0.
 # Linear vx/vy bounds are +/-speed_limit, scaled by max-min (default 4).
 # Hard lanes: P1 |px|<=map_end, |py|<=lane_width; P2 swaps bounds. Rows /full width.
-# Hard collision separation is 1.5 m at knots 2:T; controls are not bounded.
-# Warm rho chain: rollout first, then previous primals, preference slacks, lambda/psi.
+# Hard collision separation is 3.0 m at knots 2:T; controls are not bounded.
+# Warm rho chain: blue-first guess, then previous primals, preference slacks, lambda/psi.
 # Gamma/phi, solver slacks, relaxation variables, and eta restart at each rho.
-# Defaults: rho=1e-1,...,1e-10, max_inner_iters=500, tol=1e-5, linear_solver=:normal.
+# Tuned: rho=[1e-2,1e-4,1e-6], max_inner_iters=800, tol=7e-4, solver=:normal.
 # KKT convergence: ||K0||/sqrt(m)<tol; inner convergence: ||R||/sqrt(m)<rho.
 # [solver exit] table reports residuals, goal errors, separation, and stop reasons.
 # Output: data/Intersection_open_loop/{debug|runs}/<run_id>/plots/.
@@ -170,6 +170,7 @@ function get_setup(
     inequality_constraints = [
         (z, θ) -> vcat(
             lane_bound_inequality(z; player = i),
+            control_bound_inequality(z, i),
             # speed_limit_preference(; player = i)(z, θ),
             shared_collision_avoidance(z, θ),
         ) for i in 1:num_players
@@ -192,27 +193,6 @@ function get_setup(
             vcat(
                 initial_state_constraint,
                 dynamics_constraints,
-                # squared_violation.(
-                # mapreduce(vcat, us) do u
-                # 	vcat(u[lb_mask] - lb[lb_mask], ub[ub_mask] - u[ub_mask])
-                # end,
-                # ),
-                # squared_violation.(
-                # 	mapreduce(vcat, 1:length(xs)) do t
-                # 		px = xs[t][1]
-                # 		py = xs[t][2]
-                # 		i == 1 ? vcat(
-                # 			px + map_end,
-                # 			-px + map_end,
-                # 			py + lane_width,
-                # 			-py + lane_width,
-                # 		) : vcat(
-                # 			px + lane_width,
-                # 			-px + lane_width,
-                # 			py + map_end,
-                # 			-py + map_end,
-                # 		)
-                # 	end),
             )
         end for i in 1:num_players
     ]
@@ -344,23 +324,31 @@ end
 # ── Experiment entry point ─────────────────────────────────────────────────────
 
 function demo(;
-    map_end = 7,
-    lane_width = 2,
+    map_end = 7.0,
+    lane_width = 2.0,
     eta_0 = 1e-4,
     verbose = false,
     rng_seed = 123,
     random_initial_state = false,
     debug = false,
-    run_id = "ScholtesGOOP version",
+    run_id = "blue_first_yielding_fixed",
     use_scalarized_baseline = false,
     use_social_equilibrium_baseline = false,
     show_interactive_trajectory = false,
-    planning_horizon = 12,
-    rho_schedule = [1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9, 1e-10],
+    planning_horizon = 15,
+    rho_schedule = [1e-2, 1e-4, 1e-6, 1e-7, 1e-8],
     max_inner_iters = 500,
     linear_solver = :normal,
-    tol = 1e-5,
+    tol = 1e-4,
     plot_fig = true,
+    collision_avoidance = 1.5,
+    speed_limit = 3.0,
+    time_step = 0.2,
+    initial_state1 = [-6.0, -1.0, 1.5, 0.0],
+    initial_state2 = [1.0, -5.0, 0.0, 2.0],
+    goal_position1 = [6.0, -1.0],
+    goal_position2 = [1.0, 6.0],
+    warmstart = :yielding,
 )
     reset_timer!(TO)
     @timeit TO "experiment setup" Random.seed!(rng_seed)
@@ -373,8 +361,6 @@ function demo(;
 
     # ── Problem parameters ─────────────────────────────────────────────────────
     num_players = 2
-    collision_avoidance = 1.5
-    speed_limit = 2.0
     num_instances = 1
     perturbation_scale = 0.3
 
@@ -382,24 +368,24 @@ function demo(;
     isempty(rho_schedule) && throw(ArgumentError("rho_schedule must not be empty"))
     all(ρ -> isfinite(ρ) && ρ > 0, rho_schedule) ||
         throw(ArgumentError("rho_schedule entries must be finite and positive"))
+    warmstart in (:yielding, :rollout) ||
+        throw(ArgumentError("warmstart must be :yielding or :rollout"))
 
     # ── Scenario ───────────────────────────────────────────────────────────────
     # Planar double integrator: state = [px, py, vx, vy]
-    base_initial_state1 = [-4.0, -1.0, 1.99, 0.0]
-    base_initial_state2 = [1.0, -5.0, 0.0, 1.5]
+    base_initial_state1 = Float64.(initial_state1)
+    base_initial_state2 = Float64.(initial_state2)
     # Unicycle: state = [px, py, speed, heading] — uncomment to switch
     # base_initial_state1 = [-6.0, -1.0, 0.0, 0.0]
     # base_initial_state2 = [1.0, -6.0, 1.3, π/2]
 
-    goal_position1 = [6.0, -1.0]
-    goal_position2 = [1.0, 6.0]
     obstacle_position = [0.25, 0.15]   # placeholder
 
     # ── Build dynamics and problem ─────────────────────────────────────────────
     state_dimension = 4
     control_dimension = 2
-    Δt = 0.2
-    control_bounds = (; lb = [-10.0, -10.0], ub = [10.0, 10.0])
+    Δt = time_step
+    control_bounds = (; lb = [-3.0, -3.0], ub = [3.0, 3.0])
 
     dynamics = @timeit TO "dynamics construction" build_intersection_dynamics(
         dynamics_model;
@@ -578,13 +564,13 @@ function demo(;
                 obstacle_position,
             )
         (; warmstart_solution) = @timeit TO "warmstart construction" if compute_warmstart
-            build_default_warmstart(
-                planning_horizon,
-                dynamics,
-                initial_state1,
-                initial_state2;
-                speed_limit,
-            )
+            if warmstart == :yielding
+                build_yielding_warmstart(planning_horizon, dynamics,
+                    initial_state1, initial_state2, goal_position1; speed_limit)
+            else
+                build_default_warmstart(planning_horizon, dynamics,
+                    initial_state1, initial_state2; speed_limit)
+            end
         else
             (;
                 warmstart_solution = load(
@@ -709,6 +695,16 @@ function demo(;
                 "debug" => debug,
                 "run_dir" => run_dir,
                 "rng_seed" => rng_seed,
+                "planning_horizon" => planning_horizon,
+                "time_step" => time_step,
+                "map_end" => map_end,
+                "lane_width" => lane_width,
+                "collision_avoidance" => collision_avoidance,
+                "initial_state1" => base_initial_state1,
+                "initial_state2" => base_initial_state2,
+                "goal_position1" => goal_position1,
+                "goal_position2" => goal_position2,
+                "warmstart" => warmstart,
                 "dynamics_model" => dynamics_model_name(dynamics_model),
                 "num_instances" => num_instances,
                 "random_initial_state" => random_initial_state,
@@ -1023,6 +1019,36 @@ function build_default_warmstart(
         [player1_warmstart.us, player2_warmstart.us],
     )
     (; warmstart_solution)
+end
+
+"A blue-first initial guess; all states and controls remain free in the solve."
+function build_yielding_warmstart(T, dynamics, initial_state1, initial_state2,
+    goal_position1; speed_limit = 2.0,
+)
+    T >= 5 || return build_default_warmstart(T, dynamics,
+        initial_state1, initial_state2; speed_limit)
+    dynamics.model isa PlanarDoubleIntegrator ||
+        throw(ArgumentError("The yielding warm start requires PlanarDoubleIntegrator"))
+    dt = infer_planar_di_timestep(dynamics)
+    # An early speed pulse places blue ahead in the initial guess. Normalize its
+    # area using the double integrator's trapezoidal position update to reach the goal.
+    weights = [exp(-((dt * (t - 1) - 0.5) / 0.4)^2) for t in 1:T]
+    weights[1] = weights[end] = 0.0
+    vx1 = fill(speed_limit, T)
+    vx1[1] = initial_state1[3]
+    extra = (goal_position1[1] - initial_state1[1]) / dt -
+            (sum(vx1) - 0.5(vx1[1] + vx1[end]))
+    vx1 .+= extra .* weights ./ sum(weights)
+    vy1 = [initial_state1[4]; zeros(T - 1)]
+    vx2 = [initial_state2[3]; zeros(T - 1)]
+    # Seed a wait followed by acceleration to the limit; this is not a constraint.
+    vy2 = [t == 1 ? initial_state2[4] : dt * (t - 1) < 1.2 ? 0.0 :
+           min(speed_limit, (dt * (t - 1) - 1.2) * 4) for t in 1:T]
+    p1 = build_planar_di_speed_profile_warmstart(T, dynamics, initial_state1;
+        vx_profile = vx1, vy_profile = vy1)
+    p2 = build_planar_di_speed_profile_warmstart(T, dynamics, initial_state2;
+        vx_profile = vx2, vy_profile = vy2)
+    (; warmstart_solution = flatten_warmstart_solution(T, [p1.xs, p2.xs], [p1.us, p2.us]))
 end
 
 function infer_planar_di_timestep(dynamics)
