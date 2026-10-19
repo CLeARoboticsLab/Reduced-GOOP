@@ -5,16 +5,16 @@
 #
 # Add plot_fig=false to skip plots; use a new run_id for each experiment.
 # State [px,py,vx,vy], control [ax,ay]; default dt=0.2 s, 15 knots (2.8 s).
-# Fixed positions/goals: P1 (-4,-1)->(6,-1); P2 (1,-5)->(1,6).
+# Fixed positions/goals: P1 (-6,-1)->(6,-1); P2 (1,-5)->(1,6).
 # Preferences, LOWEST -> HIGHEST: P1 control -> speed -> goal;
 #                               P2 control -> goal -> speed.
 # Speed levels minimize sum(preference_slack), with h+slack>=0 and slack>=0.
-# Linear vx/vy bounds are +/-speed_limit, scaled by max-min (default 4).
+# max_speed=3 caps forward velocity; min_speed=1 caps transverse velocity (both +/-).
 # Hard lanes: P1 |px|<=map_end, |py|<=lane_width; P2 swaps bounds. Rows /full width.
-# Hard collision separation is 3.0 m at knots 2:T; controls are not bounded.
+# Hard collision separation is 1.3 m at knots 2:T; controls are not bounded.
 # Warm rho chain: blue-first guess, then previous primals, preference slacks, lambda/psi.
 # Gamma/phi, solver slacks, relaxation variables, and eta restart at each rho.
-# Tuned: rho=[1e-2,1e-4,1e-6], max_inner_iters=800, tol=7e-4, solver=:normal.
+# Defaults: rho=1e-4,...,1e-8, max_inner_iters=500, tol=1e-4, solver=:normal.
 # KKT convergence: ||K0||/sqrt(m)<tol; inner convergence: ||R||/sqrt(m)<rho.
 # [solver exit] table reports residuals, goal errors, separation, and stop reasons.
 # Output: data/Intersection_open_loop/{debug|runs}/<run_id>/plots/.
@@ -49,13 +49,15 @@ function get_setup(
     control_bounds = (; lb = [-10.0, -10.0], ub = [10.0, 10.0]),
     planning_horizon = 5,
     collision_avoidance = 1.0,
-    speed_limit = 1.5,
+    min_speed = 1.0,
+    max_speed = 3.0,
     map_end = 7,
     lane_width = 2,
     use_scalarized_baseline = false,
     use_social_equilibrium_baseline = false,
 )
     num_players == 2 || error("Intersection setup currently expects exactly two players.")
+    player_speed_bounds(1; min_speed, max_speed) # Validate configurable caps.
     all(v -> isfinite(v) && v > 0, (map_end, lane_width)) ||
         throw(ArgumentError("map_end and lane_width must be finite and positive"))
 
@@ -141,7 +143,13 @@ function get_setup(
         function (z, _)
             (; xs) = trajectory(z; player)
             mapreduce(vcat, 1:length(xs)) do t
-                speed_limit_constraints(dynamics.model, xs[t]; speed_limit)
+                if dynamics.model isa PlanarDoubleIntegrator
+                    speed_limit_constraints(dynamics.model, xs[t];
+                        player, min_speed, max_speed)
+                else
+                    speed_limit_constraints(dynamics.model, xs[t];
+                        speed_limit = max_speed)
+                end
             end
         end
     end
@@ -336,13 +344,14 @@ function demo(;
     use_social_equilibrium_baseline = false,
     show_interactive_trajectory = false,
     planning_horizon = 15,
-    rho_schedule = [1e-2, 1e-4, 1e-6, 1e-7, 1e-8],
+    rho_schedule = [1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8],
     max_inner_iters = 500,
     linear_solver = :normal,
-    tol = 1e-4,
+    tol = 1e-5,
     plot_fig = true,
-    collision_avoidance = 1.5,
-    speed_limit = 3.0,
+    collision_avoidance = 1.3,
+    min_speed = 0.7,
+    max_speed = 3.0,
     time_step = 0.2,
     initial_state1 = [-6.0, -1.0, 1.5, 0.0],
     initial_state2 = [1.0, -5.0, 0.0, 2.0],
@@ -401,7 +410,7 @@ function demo(;
             control_bounds,
             planning_horizon,
             collision_avoidance,
-            speed_limit,
+            min_speed, max_speed,
             map_end,
             lane_width,
             use_scalarized_baseline,
@@ -566,10 +575,10 @@ function demo(;
         (; warmstart_solution) = @timeit TO "warmstart construction" if compute_warmstart
             if warmstart == :yielding
                 build_yielding_warmstart(planning_horizon, dynamics,
-                    initial_state1, initial_state2, goal_position1; speed_limit)
+                    initial_state1, initial_state2, goal_position1; min_speed, max_speed)
             else
                 build_default_warmstart(planning_horizon, dynamics,
-                    initial_state1, initial_state2; speed_limit)
+                    initial_state1, initial_state2)
             end
         else
             (;
@@ -618,8 +627,8 @@ function demo(;
                     instance = solved_attempts + 1, attempt = total_attempts,
                     warmstart_strategies = result.solution_dict["warmstart_strategies"],
                     map_end, lane_width, θ1, θ2,
-                    goal_position1, goal_position2, speed_limit, collision_avoidance,
-                    dynamics_model, timestep = Δt, tol, residual_scale,
+                    goal_position1, goal_position2, min_speed, max_speed, collision_avoidance,
+                    dynamics_model, control_bounds, timestep = Δt, tol, residual_scale,
                 )
                 report_path = joinpath(plots_dir,
                     "Intersection_instance_$(solved_attempts + 1)_rho$(ρ)_attempt_$(total_attempts).pdf")
@@ -700,6 +709,7 @@ function demo(;
                 "map_end" => map_end,
                 "lane_width" => lane_width,
                 "collision_avoidance" => collision_avoidance,
+                "control_bounds" => control_bounds,
                 "initial_state1" => base_initial_state1,
                 "initial_state2" => base_initial_state2,
                 "goal_position1" => goal_position1,
@@ -722,11 +732,12 @@ function demo(;
                 "eta_schedule" => true,
                 "tightening_rate" => 1.2,
                 "loosening_rate" => 3.0,
-                "speed_limit" => speed_limit,
+                "min_speed" => min_speed,
+                "max_speed" => max_speed,
                 "speed_constraint" => :component,
-                "velocity_min" => -speed_limit,
-                "velocity_max" => speed_limit,
-                "velocity_scale" => 2 * speed_limit,
+                "velocity_min" => [player_speed_bounds(i; min_speed, max_speed).lower for i in 1:num_players],
+                "velocity_max" => [player_speed_bounds(i; min_speed, max_speed).upper for i in 1:num_players],
+                "velocity_scale" => [2 .* player_speed_bounds(i; min_speed, max_speed).upper for i in 1:num_players],
                 "perturbation_scale" => perturbation_scale,
             ),
         )
@@ -875,18 +886,29 @@ function dynamics_model_name(::Bicycle)
     "bicycle"
 end
 
-function speed_limit_constraints(::PlanarDoubleIntegrator, x; speed_limit = 1.5)
-    isfinite(speed_limit) && speed_limit > 0 ||
-        throw(ArgumentError("speed_limit must be finite and positive"))
+"Forward cap max_speed and transverse cap min_speed; component order is [vx, vy]."
+function player_speed_bounds(player; min_speed = 1.0, max_speed = 3.0)
+    isfinite(min_speed) && isfinite(max_speed) && 0 < min_speed <= max_speed ||
+        throw(ArgumentError("Speed caps must be finite with 0 < min_speed <= max_speed"))
+    player in (1, 2) || throw(ArgumentError("Speed bounds are defined for players 1 and 2"))
+    upper = player == 1 ? [max_speed, min_speed] : [min_speed, max_speed]
+    (; lower = -upper, upper)
+end
+
+function speed_limit_constraints(::PlanarDoubleIntegrator, x;
+    player = 1, min_speed = 1.0, max_speed = 3.0,
+)
+    (; lower, upper) = player_speed_bounds(player; min_speed, max_speed)
     vx, vy = x[3], x[4]
-    velocity_min, velocity_max = -speed_limit, speed_limit
-    velocity_scale = velocity_max - velocity_min
+    vx_min, vy_min = lower
+    vx_max, vy_max = upper
+    vx_scale, vy_scale = upper .- lower
     # Scaled component bounds; each row is interpreted as h ≥ 0.
     return [
-        (vx - velocity_min) / velocity_scale,
-        (velocity_max - vx) / velocity_scale,
-        (vy - velocity_min) / velocity_scale,
-        (velocity_max - vy) / velocity_scale,
+        (vx - vx_min) / vx_scale,
+        (vx_max - vx) / vx_scale,
+        (vy - vy_min) / vy_scale,
+        (vy_max - vy) / vy_scale,
     ]
 end
 
@@ -986,8 +1008,7 @@ function build_default_warmstart(
     planning_horizon,
     dynamics,
     initial_state1,
-    initial_state2;
-    speed_limit = 1.5,
+    initial_state2,
 )
     player1_warmstart = build_constant_control_warmstart(
         planning_horizon,
@@ -1003,16 +1024,6 @@ function build_default_warmstart(
         [0.0, 0.0],
     )
 
-    # player2_vx_profile = fill(0.0, planning_horizon)
-    # player2_vy_profile = vcat(1.0, fill(speed_limit, planning_horizon - 1))
-    # player2_warmstart = build_planar_di_speed_profile_warmstart(
-    # 	planning_horizon,
-    # 	dynamics,
-    # 	initial_state2;
-    # 	vx_profile = player2_vx_profile,
-    # 	vy_profile = player2_vy_profile,
-    # )
-
     warmstart_solution = flatten_warmstart_solution(
         planning_horizon,
         [player1_warmstart.xs, player2_warmstart.xs],
@@ -1023,18 +1034,21 @@ end
 
 "A blue-first initial guess; all states and controls remain free in the solve."
 function build_yielding_warmstart(T, dynamics, initial_state1, initial_state2,
-    goal_position1; speed_limit = 2.0,
+    goal_position1;
+    min_speed = 1.0,
+    max_speed = 3.0,
 )
     T >= 5 || return build_default_warmstart(T, dynamics,
-        initial_state1, initial_state2; speed_limit)
+        initial_state1, initial_state2)
     dynamics.model isa PlanarDoubleIntegrator ||
         throw(ArgumentError("The yielding warm start requires PlanarDoubleIntegrator"))
+    player_speed_bounds(1; min_speed, max_speed)
     dt = infer_planar_di_timestep(dynamics)
     # An early speed pulse places blue ahead in the initial guess. Normalize its
     # area using the double integrator's trapezoidal position update to reach the goal.
     weights = [exp(-((dt * (t - 1) - 0.5) / 0.4)^2) for t in 1:T]
     weights[1] = weights[end] = 0.0
-    vx1 = fill(speed_limit, T)
+    vx1 = fill(Float64(max_speed), T)
     vx1[1] = initial_state1[3]
     extra = (goal_position1[1] - initial_state1[1]) / dt -
             (sum(vx1) - 0.5(vx1[1] + vx1[end]))
@@ -1043,7 +1057,7 @@ function build_yielding_warmstart(T, dynamics, initial_state1, initial_state2,
     vx2 = [initial_state2[3]; zeros(T - 1)]
     # Seed a wait followed by acceleration to the limit; this is not a constraint.
     vy2 = [t == 1 ? initial_state2[4] : dt * (t - 1) < 1.2 ? 0.0 :
-           min(speed_limit, (dt * (t - 1) - 1.2) * 4) for t in 1:T]
+           min(max_speed, (dt * (t - 1) - 1.2) * 4) for t in 1:T]
     p1 = build_planar_di_speed_profile_warmstart(T, dynamics, initial_state1;
         vx_profile = vx1, vy_profile = vy1)
     p2 = build_planar_di_speed_profile_warmstart(T, dynamics, initial_state2;

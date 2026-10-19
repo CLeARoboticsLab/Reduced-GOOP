@@ -104,10 +104,17 @@ function intersection_report_figure(page)
     ax_vy = make_axis(5, 2, planar ? "Vertical velocity" : "Heading", planar ? "vy [m/s]" : "heading [rad]")
     plot_profiles!(ax_vx, x -> x[3])
     plot_profiles!(ax_vy, x -> x[4])
-    CairoMakie.hlines!(ax_vx, planar ? [-page.speed_limit, page.speed_limit] : [0, page.speed_limit];
-        color = :black, linestyle = :dot)
-    planar && CairoMakie.hlines!(ax_vy, [-page.speed_limit, page.speed_limit];
-        color = :black, linestyle = :dot)
+    if planar
+        for player in 1:2, (component, ax) in ((1, ax_vx), (2, ax_vy))
+            bounds = player_speed_bounds(player; min_speed = page.min_speed, max_speed = page.max_speed)
+            CairoMakie.hlines!(ax,
+                [bounds.lower[component], bounds.upper[component]];
+                color = player_plot_color(player), linestyle = :dot)
+        end
+    else
+        CairoMakie.hlines!(ax_vx, [0, page.max_speed];
+            color = :black, linestyle = :dot)
+    end
 
     ax_sep = make_axis(5, 3, "Vehicle separation", "distance [m]")
     for (profiles, style) in ((warm, :dash), (strategy, :solid))
@@ -118,8 +125,12 @@ function intersection_report_figure(page)
     end
     CairoMakie.hlines!(ax_sep, [page.collision_avoidance]; color = :black, linestyle = :dot)
     for component in 1:2
-        ax = make_axis(6, component, "Control $(component)", planar ? "a$(component == 1 ? "x" : "y") [m/s^2]" : "u$(component)")
+        title = component == 1 ? "Horizontal control" : "Vertical control"
+        ax = make_axis(6, component, title, planar ? "a$(component == 1 ? "x" : "y") [m/s^2]" : "u$(component)")
         plot_profiles!(ax, u -> u[component]; controls = true)
+        limits = filter(isfinite,
+            [page.control_bounds.lb[component], page.control_bounds.ub[component]])
+        isempty(limits) || CairoMakie.hlines!(ax, limits; color = :black, linestyle = :dot)
     end
     ax_lane = make_axis(6, 3, "Hard lane violation", "maximum violation [m]")
     for player in 1:2, (profiles, style) in ((warm, :dash), (strategy, :solid))
