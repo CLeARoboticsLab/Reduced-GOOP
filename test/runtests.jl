@@ -217,31 +217,6 @@ end
 	end
 end
 
-@testset "Interior-Point Complete KKT Smoke" begin
-	case = build_unconstrained_quadratic_problem()
-
-	complete = solve_with_interior_point(
-		case.problem,
-		case.expected;
-		z₀ = case.z₀,
-		kkt_system = complete_kkt_system,
-	)
-	reduced = solve_with_interior_point(
-		case.problem,
-		case.expected;
-		z₀ = case.z₀,
-		kkt_system = reduced_kkt_system,
-	)
-
-	@test complete.output.status === :solved
-	@test reduced.output.status === :solved
-	@test complete.output.kkt_error <= 1e-8
-	@test reduced.output.kkt_error <= 1e-8
-	@test isapprox(complete.primals, case.expected; atol = IP_ATOL, rtol = 0.0)
-	@test isapprox(reduced.primals, case.expected; atol = IP_ATOL, rtol = 0.0)
-	@test isapprox(reduced.primals, complete.primals; atol = IP_ATOL, rtol = 0.0)
-end
-
 @testset "Reduced KKT dual-coordinate metadata" begin
 	x_template = BlockArray(zeros(2), [2])
 	θ_template = BlockArray(zeros(1), [1])
@@ -623,4 +598,5 @@ end
 	end
 end
 
+include(joinpath(@__DIR__, "complete_kkt.jl"))
 include(joinpath(@__DIR__, "scholtes.jl"))

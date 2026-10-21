@@ -29,7 +29,7 @@ end
 Which column of y each complementarity row reads its multiplier (γ or φ) off, or
 `nothing` if `b(y)` is not a coordinate projection.
 """
-function _gamma_columns(kkt::ScholtesKKTSystem)
+function _gamma_columns(kkt::AbstractScholtesKKTSystem)
     kkt.n_comp == 0 && return nothing
     rows, cols = kkt.S_b
     length(rows) == kkt.n_comp || return nothing
@@ -49,7 +49,7 @@ end
 The caches a backend runs against and the count of dense fallbacks: pinv steps for
 `:normal`, SVD fallback steps of `_klu_step_with_fallback!` for the KLU variants.
 """
-mutable struct _ScholtesBackend{K<:ScholtesKKTSystem}
+mutable struct _ScholtesBackend{K<:AbstractScholtesKKTSystem}
     kkt::K
     scholtes::Bool
     saddle::Union{Nothing,_ScholtesSaddle}
@@ -152,7 +152,7 @@ end
 
 function _build_scholtes_step_ctx(
     solver::_ScholtesStepSolver,
-    kkt::ScholtesKKTSystem;
+    kkt::AbstractScholtesKKTSystem;
     gamma_cols = _gamma_columns(kkt),
     eta_init = 1e-8,
     eta_max = 1e2,
@@ -208,6 +208,9 @@ end
         c != 0 && f(c, w[c])
         ucol = _u_col(ctx.kkt, j)
         ctx.scholtes && ucol != 0 && f(ucol, w[ucol])
+    end
+    @inbounds for i in _direct_sign_dims(ctx.kkt)
+        f(i, w[i])
     end
 end
 

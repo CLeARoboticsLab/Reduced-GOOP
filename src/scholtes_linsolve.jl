@@ -32,7 +32,7 @@ struct _EntryList
     col::Vector{Int}
 end
 
-function _augmented_pattern(kkt::ScholtesKKTSystem; scholtes::Bool = false)
+function _augmented_pattern(kkt::AbstractScholtesKKTSystem; scholtes::Bool = false)
     n_nc, ncomp, n = kkt.n_nc, kkt.n_comp, kkt.n
     m = n_nc + 2 * ncomp
     p = n + ncomp + (scholtes ? _n_u(kkt) : 0)
@@ -82,7 +82,7 @@ end
 struct _Unmasked end
 @inline Base.getindex(::_Unmasked, ::Int) = 1.0
 
-@inline function _scatter(f, e::_EntryList, kkt::ScholtesKKTSystem, y, s, bv, col_scale)
+@inline function _scatter(f, e::_EntryList, kkt::AbstractScholtesKKTSystem, y, s, bv, col_scale)
     vnc, va, vb = _fill_jacobians!(kkt, y)
     @inbounds for k in eachindex(e.block)
         f(
@@ -95,7 +95,7 @@ struct _Unmasked end
 end
 
 "Refill the three Jacobian buffers at `y`, memoized on the value of `y`."
-function _fill_jacobians!(kkt::ScholtesKKTSystem, y)
+function _fill_jacobians!(kkt::AbstractScholtesKKTSystem, y)
     if !(kkt.Jvalid[] && _same_y(kkt.Jy, y))
         kkt.J_nc!(kkt.Jnc_buf, y, kkt.θ, kkt.ρ[])
         kkt.J_a!(kkt.Ja_buf, y, kkt.θ, kkt.ρ[])
@@ -164,7 +164,7 @@ struct _ScholtesSaddle
     p::Int
 end
 
-function _build_scholtes_saddle(kkt::ScholtesKKTSystem; scholtes::Bool = false, sqrt_eta::Bool = true)
+function _build_scholtes_saddle(kkt::AbstractScholtesKKTSystem; scholtes::Bool = false, sqrt_eta::Bool = true)
     pat = _augmented_pattern(kkt; scholtes)
     J = SparseArrays.sparse(pat.rows, pat.cols, ones(length(pat.rows)), pat.m, pat.p)
     at = _slot_finder(J)
@@ -325,7 +325,7 @@ function _normal_gram!(cache::_AugmentedNormal)
     return S
 end
 
-function _build_augmented_normal(kkt::ScholtesKKTSystem; scholtes::Bool = false)
+function _build_augmented_normal(kkt::AbstractScholtesKKTSystem; scholtes::Bool = false)
     pat = _augmented_pattern(kkt; scholtes)
     m, p = pat.m, pat.p
     J = SparseArrays.sparse(pat.rows, pat.cols, ones(length(pat.rows)), m, p)
@@ -457,7 +457,7 @@ struct _AugmentedDense
     p::Int
 end
 
-function _build_augmented_dense(kkt::ScholtesKKTSystem; scholtes::Bool = false)
+function _build_augmented_dense(kkt::AbstractScholtesKKTSystem; scholtes::Bool = false)
     pat = _augmented_pattern(kkt; scholtes)
     pos = [(pat.cols[t] - 1) * pat.m + pat.rows[t] for t in eachindex(pat.rows)]
     return _AugmentedDense(zeros(pat.m, pat.p), pat.entries, pos, pat.m, pat.p)

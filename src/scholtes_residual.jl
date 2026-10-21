@@ -14,7 +14,7 @@ Scratch for evaluating `R(w; ρ)` and its companions on a `ScholtesKKTSystem`. T
 caller owns the residual and `b(y)` buffers, because the line search needs two of
 each live at once.
 """
-struct ScholtesResiduals{K<:ScholtesKKTSystem}
+struct ScholtesResiduals{K<:AbstractScholtesKKTSystem}
     kkt::K
     n::Int
     nc::Int
@@ -25,7 +25,7 @@ struct ScholtesResiduals{K<:ScholtesKKTSystem}
     ab::Vector{Float64}
 end
 
-function ScholtesResiduals(kkt::ScholtesKKTSystem)
+function ScholtesResiduals(kkt::AbstractScholtesKKTSystem)
     n, nc, n_nc = kkt.n, kkt.n_comp, kkt.n_nc
     ScholtesResiduals(kkt, n, nc, n_nc, n_nc + 2nc, nc > 0, zeros(n_nc), zeros(nc))
 end
@@ -91,13 +91,16 @@ end
     _sign_min(R, w, bbuf) -> Float64
 
 The smallest sign-box margin: every slack, every b coordinate (γ or φ) and every
-original u. `Inf` when there are no complementarity rows.
+original u, plus any direct complete-system sign bounds. `Inf` without bounds.
 """
 function _sign_min(R::ScholtesResiduals, w, bbuf)
-    R.nc == 0 && return Inf
+    mn = Inf
+    @inbounds for i in _direct_sign_dims(R.kkt)
+        mn = min(mn, w[i])
+    end
+    R.nc == 0 && return mn
     n, nc = R.n, R.nc
     u_index = R.kkt.u_index
-    mn = Inf
     @inbounds for j in 1:nc
         mn = min(mn, w[n + j])
         mn = min(mn, bbuf[j])

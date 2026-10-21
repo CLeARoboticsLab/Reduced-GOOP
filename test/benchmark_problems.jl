@@ -320,7 +320,8 @@ function assert_active_set(
     end
 end
 
-function build_unconstrained_quadratic_problem()
+function build_unconstrained_quadratic_problem(; levels::Int = 1)
+    @assert levels >= 1
     n = PRIMAL_DIM
     x_template = BlockArray(zeros(n), [n])
     θ_template = BlockArray([0.0], [1])
@@ -333,8 +334,8 @@ function build_unconstrained_quadratic_problem()
     problem = ReducedGOOP.ParametricGOOP(
         x_template,
         θ_template;
-        preferences = [[objective]],
-        is_prioritized_constraint = [[false]],
+        preferences = [fill(objective, levels)],
+        is_prioritized_constraint = [fill(false, levels)],
         equality_constraints = [nothing],
         inequality_constraints = [nothing],
     )

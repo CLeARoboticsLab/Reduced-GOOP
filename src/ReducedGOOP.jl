@@ -27,6 +27,7 @@ include("scholtes_residual.jl")
 include("scholtes_linsolve.jl")
 include("scholtes_step.jl")
 include("scholtes_solver.jl")
+include("scholtes_complete_kkt.jl")
 include("scholtes_certify.jl")
 include("scholtes_multistart.jl")
 

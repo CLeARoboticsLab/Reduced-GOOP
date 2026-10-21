@@ -272,6 +272,11 @@ function _scholtes_player_system(
     )
 end
 
+abstract type AbstractScholtesKKTSystem end
+
+_direct_sign_dims(::AbstractScholtesKKTSystem) = ()
+_initialize_direct_signs!(::AbstractScholtesKKTSystem, y) = y
+
 """
 Numeric reduced KKT system in Scholtes form, built by
 `generate_slacked_reduced_kkt_system(goop; complementarity = :scholtes)`.
@@ -282,7 +287,7 @@ the evaluation state the solver sets: the parameters `θ`, the relaxation level 
 Jacobian memo (`Jy`, `Jvalid`), since one Newton step asks for the Jacobian several times
 at the same iterate.
 """
-struct ScholtesKKTSystem{T1,T2,T3,T4,T5,T6}
+struct ScholtesKKTSystem{T1,T2,T3,T4,T5,T6} <: AbstractScholtesKKTSystem
     "Length of y = [x; preference slacks; duals]"
     n::Int
     "Number of non-complementarity rows (stationarity and equalities)"
@@ -490,7 +495,7 @@ end
 
 # --- evaluation state -----------------------------------------------------------------
 
-function _set_rho!(kkt::ScholtesKKTSystem, ρ)
+function _set_rho!(kkt::AbstractScholtesKKTSystem, ρ)
     if kkt.ρ[] != ρ
         kkt.ρ[] = ρ
         kkt.Jvalid[] = false
@@ -498,7 +503,7 @@ function _set_rho!(kkt::ScholtesKKTSystem, ρ)
     kkt
 end
 
-function _set_theta!(kkt::ScholtesKKTSystem, θ)
+function _set_theta!(kkt::AbstractScholtesKKTSystem, θ)
     length(θ) == kkt.parameter_dimension || throw(
         ArgumentError("θ has length $(length(θ)), expected $(kkt.parameter_dimension)"),
     )
@@ -509,13 +514,13 @@ function _set_theta!(kkt::ScholtesKKTSystem, θ)
     kkt
 end
 
-_F_nc!(kkt::ScholtesKKTSystem, out, y) = kkt.F_nc!(out, y, kkt.θ, kkt.ρ[])
-_a!(kkt::ScholtesKKTSystem, out, y) = kkt.a!(out, y, kkt.θ, kkt.ρ[])
-_b!(kkt::ScholtesKKTSystem, out, y) = kkt.b!(out, y, kkt.θ, kkt.ρ[])
-_F_nc(kkt::ScholtesKKTSystem, y) = _F_nc!(kkt, zeros(kkt.n_nc), y)
-_a(kkt::ScholtesKKTSystem, y) = _a!(kkt, zeros(kkt.n_comp), y)
-_b(kkt::ScholtesKKTSystem, y) = _b!(kkt, zeros(kkt.n_comp), y)
+_F_nc!(kkt::AbstractScholtesKKTSystem, out, y) = kkt.F_nc!(out, y, kkt.θ, kkt.ρ[])
+_a!(kkt::AbstractScholtesKKTSystem, out, y) = kkt.a!(out, y, kkt.θ, kkt.ρ[])
+_b!(kkt::AbstractScholtesKKTSystem, out, y) = kkt.b!(out, y, kkt.θ, kkt.ρ[])
+_F_nc(kkt::AbstractScholtesKKTSystem, y) = _F_nc!(kkt, zeros(kkt.n_nc), y)
+_a(kkt::AbstractScholtesKKTSystem, y) = _a!(kkt, zeros(kkt.n_comp), y)
+_b(kkt::AbstractScholtesKKTSystem, y) = _b!(kkt, zeros(kkt.n_comp), y)
 
-_n_u(kkt::ScholtesKKTSystem) = maximum(kkt.u_index; init = 0)
-@inline _u_col(kkt::ScholtesKKTSystem, j::Int) =
+_n_u(kkt::AbstractScholtesKKTSystem) = maximum(kkt.u_index; init = 0)
+@inline _u_col(kkt::AbstractScholtesKKTSystem, j::Int) =
     kkt.u_index[j] == 0 ? 0 : kkt.n + kkt.n_comp + kkt.u_index[j]

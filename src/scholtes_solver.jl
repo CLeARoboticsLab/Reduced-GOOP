@@ -121,7 +121,7 @@ end
 # Initialize explicit preference slacks so both e > 0 and h(x, θ) + e > 0.
 # A seed from a previous solve is retained whenever it is large enough.
 function _initialize_preference_slacks!(
-    kkt::ScholtesKKTSystem,
+    kkt::AbstractScholtesKKTSystem,
     y;
     margin = 1.0,
     preference_slacks = nothing,
@@ -148,7 +148,7 @@ end
 # The starting iterate: duals 0, every original multiplier γ_j = 0.1ρ₁/s_j so the
 # complementarity rows hold exactly at w₀, then the φ slacks are re-evaluated and
 # φ_j = 0.1ρ₁/σ_j, and u = max(ρ₁ − s⊙b, 1e-6ρ₁) on the relaxed rows.
-function _initial_w(kkt::ScholtesKKTSystem, z0, ρ₁::Float64; gamma_cols)
+function _initial_w(kkt::AbstractScholtesKKTSystem, z0, ρ₁::Float64; gamma_cols)
     _set_rho!(kkt, ρ₁)
     n, nc = kkt.n, kkt.n_comp
     scholtes = nc > 0
@@ -156,6 +156,7 @@ function _initial_w(kkt::ScholtesKKTSystem, z0, ρ₁::Float64; gamma_cols)
     y = zeros(n)
     y[kkt.primal_dims] .= float.(collect(z0))
     _initialize_preference_slacks!(kkt, y)
+    _initialize_direct_signs!(kkt, y)
     nc == 0 && return y
 
     s = _a(kkt, y)
@@ -215,7 +216,7 @@ function scholtes_warm_start(
 end
 
 """
-    solve(::Scholtes, kkt::ScholtesKKTSystem, θ; z₀ = nothing, w₀ = nothing,
+    solve(::Scholtes, kkt::AbstractScholtesKKTSystem, θ; z₀ = nothing, w₀ = nothing,
           options = ScholtesOptions(), trace = nothing, step_trace = nothing)
 
 Newton on the Scholtes-form reduced KKT system down a ρ homotopy (see the top of
@@ -224,6 +225,11 @@ zeros) and must be strictly feasible for hard inequalities. Preference slacks ar
 initialized internally, so prioritized constraints may be violated at `z₀`.
 `w₀` is a full iterate `[y; s; u]` from a previous result. `trace` / `step_trace` are
 called before / after each line search with the source's fields.
+
+`CompleteKKTSystem` uses the same projected engine on its full residual and
+explicit sign bounds. Its aggregate formulation uses `rho_schedule` for the
+legacy epsilon bounds; its exact formulation is unrelaxed. A complete-system
+`w₀` contains all complete variables, including its inequality slacks.
 
 Returns a NamedTuple: `status` (`:solved` iff `converged`), `z` (original primal),
 `preference_slacks` (explicit prioritized-constraint slacks), `w`, `s`, `u`,
@@ -236,7 +242,7 @@ Returns a NamedTuple: `status` (`:solved` iff `converged`), `z` (original primal
 """
 function solve(
     ::Scholtes,
-    kkt::ScholtesKKTSystem,
+    kkt::AbstractScholtesKKTSystem,
     θ::AbstractVector{<:Real};
     z₀ = nothing,
     w₀ = nothing,
@@ -252,7 +258,7 @@ function solve(
 end
 
 function _solve(
-    kkt::ScholtesKKTSystem,
+    kkt::AbstractScholtesKKTSystem,
     θ::AbstractVector{<:Real},
     z₀::Vector{Float64},
     w₀::Vector{Float64};
@@ -339,7 +345,7 @@ function _solve(
         residual_valid = false
         termination_reason = max_inner > 0 ? :max_inner : :no_iterations
         _set_rho!(kkt, ρ)
-        if nc > 0
+        if nc > 0 || !isempty(_direct_sign_dims(kkt))
             _b!(kkt, b_cur, view(w, 1:n))
             all(isfinite, w) && _sign_min(res, w, b_cur) > 0 || throw(
                 ArgumentError("warm start violates a required slack, gamma, phi, or u bound"),

@@ -167,7 +167,7 @@ function generate_slacked_reduced_kkt_system(
             "complementarity must be :interior_point or :scholtes, got $complementarity",
         ),
     )
-    if complementarity === :scholtes
+    if complementarity === :scholtes # TODO: we ultimately want generated_slacked_reduced_kkt_system() to do Scholtes HERE. 
         return generate_scholtes_reduced_kkt_system(
             goop;
             quasi = drop_higher_order_terms,
@@ -660,7 +660,17 @@ function generate_slacked_quasi_kkt_system(
     )
 end
 
-"Construct the Complete KKT system corresponding to a ParametricGOOP."
+"""
+Construct the complete KKT residual for a `ParametricGOOP`.
+
+Prioritized constraints minimize `sum(preference_slack)` subject to
+`h + preference_slack ≥ 0` and `preference_slack ≥ 0`, as in the reduced
+Scholtes path. The existing inner relaxation uses aggregate bounds
+`ϵ - γ' * G ≥ 0`; the returned residual still requires the sign restrictions
+identified by its slack and inequality-dual coordinate blocks.
+Zero aggregate products enforce componentwise complementarity under these signs;
+equivalence of recursive stationarity with the manuscript is not established.
+"""
 function generate_slacked_complete_kkt_system(
     goop::ParametricGOOP;
     backend = SymbolicTracingUtils.SymbolicsBackend(),
@@ -668,7 +678,12 @@ function generate_slacked_complete_kkt_system(
     codegen = :native,
     fd_codegen_chunk_size = nothing,
 )
-    # Symbolic variables for all primals and parameters.
+    for (player, preferences) in enumerate(goop.preferences)
+        length(preferences) >= 2 || throw(ArgumentError(
+            "Complete KKT construction requires K >= 2 for every player; " *
+            "player $player has K = $(length(preferences)).",
+        ))
+    end
     x =
         SymbolicTracingUtils.make_variables(backend, :x, sum(goop.primal_dims)) |>
         to_blockvector(goop.primal_dims)
@@ -676,373 +691,166 @@ function generate_slacked_complete_kkt_system(
         SymbolicTracingUtils.make_variables(backend, :θ, sum(goop.parameter_dims)) |>
         to_blockvector(goop.parameter_dims)
     ϵ = only(SymbolicTracingUtils.make_variables(backend, :ϵ, 1))
-
     η = only(SymbolicTracingUtils.make_variables(backend, :η, 1))
-
     symbolic_type = eltype(x)
+    # Pack by variable type; recursive z vectors instead follow the level hierarchy.
+    preference_slacks = symbolic_type[]
+    inequality_slacks = symbolic_type[]
+    equality_duals = symbolic_type[]
+    inequality_duals = symbolic_type[]
 
-    # Keep track of all the preference (s) and interior point (σ) slacks we create.
-    s = symbolic_type[]
-    Σ = symbolic_type[]
-
-    # Keep track of all equality constraint duals (λ) that we create.
-    Λ = symbolic_type[]
-
-    # Keep track of all inequality constraint duals (γ) that we create.
-    Γ = symbolic_type[]
-
-    # Recursive function to construct a player's KKT conditions.
     function construct_player_kkt_conditions(
         preferences,
         is_prioritized_constraint;
         player,
     )
-        num_levels = length(goop.preferences[player]) # Kⁱ
         @assert length(preferences) == length(is_prioritized_constraint)
-        level = 1 + num_levels - length(preferences)
+        level = 1 + length(goop.preferences[player]) - length(preferences)
+        h = first(preferences)(x, θ)
+        prioritized = first(is_prioritized_constraint)
 
-        f =
-            isnothing(goop.equality_constraints[player]) ? nothing :
-            goop.equality_constraints[player](x, θ)
-        g =
-            isnothing(goop.inequality_constraints[player]) ? nothing :
-            goop.inequality_constraints[player](x, θ)
-
-        # Base case is the inner-most layer.
         if length(preferences) == 1
+            f = isnothing(goop.equality_constraints[player]) ? nothing :
+                goop.equality_constraints[player](x, θ)
+            g = isnothing(goop.inequality_constraints[player]) ? nothing :
+                goop.inequality_constraints[player](x, θ)
             λ = SymbolicTracingUtils.make_variables(
-                backend,
-                Symbol("λ_$(player)_$(level)"),
-                goop.equality_dims[player],
+                backend, Symbol("λ_$(player)_$(level)"), goop.equality_dims[player],
             )
-            push!(Λ, λ...)
-
             γ = SymbolicTracingUtils.make_variables(
-                backend,
-                Symbol("γ_$(player)_$(level)"),
-                goop.inequality_dims[player],
+                backend, Symbol("γ_$(player)_$(level)"), goop.inequality_dims[player],
             )
-            push!(Γ, γ...)
+            append!(equality_duals, λ)
+            append!(inequality_duals, γ)
 
-            # σ = SymbolicTracingUtils.make_variables(
-            # 	backend,
-            # 	Symbol("σ_$(player)_$(level)"),
-            # 	goop.inequality_dims[player],
-            # )
-            # push!(Σ, σ...)
-
-            h = only(preferences)(x, θ)
-
-            if only(is_prioritized_constraint)
-                # Highest priority is a constraint.
+            preference_slack = symbolic_type[]
+            γₚ = symbolic_type[]
+            μₛ = symbolic_type[]
+            if prioritized
                 preference_slack = SymbolicTracingUtils.make_variables(
-                    backend,
-                    Symbol("s_$(player)_$(level)"),
-                    length(h),
+                    backend, Symbol("s_$(player)_$(level)"), length(h),
                 )
-                push!(s, preference_slack...)
-
-                # σₚ = SymbolicTracingUtils.make_variables(
-                # 	backend,
-                # 	Symbol("σₚ_$(player)_$(level)"),
-                # 	length(h),
-                # )
-                # push!(Σ, σₚ...)
-
-                # σₚₛ = SymbolicTracingUtils.make_variables(
-                # 	backend,
-                # 	Symbol("σₚₛ_$(player)_$(level)"),
-                # 	length(h),
-                # )
-                # push!(Σ, σₚₛ...)
-
                 γₚ = SymbolicTracingUtils.make_variables(
-                    backend,
-                    Symbol("γₚ_$(player)_$(level)"),
-                    length(h),
+                    backend, Symbol("γₚ_$(player)_$(level)"), length(h),
                 )
-                push!(Γ, γₚ...)
-
-                # μₛ = SymbolicTracingUtils.make_variables(
-                # 	backend,
-                # 	Symbol("μₛ_$(player)_$(level)"),
-                # 	length(h),
-                # )
-                # push!(Γ, μₛ...)
-
-                # Form Lagrangian at this stage.
-                (; xs, us) = unflatten_trajectory(
-                    x[Block(player)],
-                    4, #state_dimension,
-                    2, # control_dimnesion
+                μₛ = SymbolicTracingUtils.make_variables(
+                    backend, Symbol("μₛ_$(player)_$(level)"), length(h),
                 )
-                # L =
-                # 	sum(preference_slack) - γₚ' * (h .+ preference_slack) - μₛ' * preference_slack -
-                # 	(isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g)
-                L =
-                    sum(preference_slack .^ 2) - γₚ' * (h .+ preference_slack) -
-                    (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g)
-                # player == 2 && let  # TODO: make this non hard-coded
-                # 	goal_deviation = xs[end][1:2] .- θ[Block(2)][5:6] # Player 2
-                # 	L += 0.03 * sum(goal_deviation .^ 2)
-                # end
-
-                ∇L = SymbolicTracingUtils.gradient(
-                    L,
-                    vcat(x[Block(player)], preference_slack),
-                )
-
-                F = Vector{symbolic_type}(filter!(
-                    !isnothing,
-                    [
-                        ∇L #.+ η * vcat(x[Block(player)], preference_slack)
-                        f
-                        # h .+ preference_slack .- σₚ
-                        # σₚ .* γₚ .- ϵ
-                        # preference_slack .- σₚₛ
-                        # σₚₛ .* μₛ .- ϵ
-                        # isnothing(g) ? nothing : g .- σ
-                        # isnothing(g) ? nothing : σ .* γ .- ϵ
-                    ],
-                ))
-                G = Vector{symbolic_type}(
-                    filter!(
-                        !isnothing,
-                        [
-                            h .+ preference_slack
-                            γₚ
-                            ϵ - γₚ' * (h .+ preference_slack)
-                            # μₛ
-                            isnothing(g) ? nothing : γ
-                            isnothing(g) ? nothing : g
-                            isnothing(g) ? nothing : ϵ - γ' * g
-                        ],
-                    ),
-                )
-                z = Vector{symbolic_type}(
-                    vcat(
-                        x[Block(player)],
-                        preference_slack,
-                        γₚ,
-                        (isnothing(f) ? [] : λ),
-                        (isnothing(g) ? [] : γ),
-                    ),
-                )
-                return (; F, G, z)
+                append!(preference_slacks, preference_slack)
+                append!(inequality_duals, γₚ)
+                append!(inequality_duals, μₛ)
+                objective = sum(preference_slack) - γₚ' * (h .+ preference_slack) -
+                            μₛ' * preference_slack
             else
-                @assert length(h) == 1 "Expected a single preference function at the base level, but got $(length(h))"
-                # Highest priority is a cost. 
-                L = h - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g)
-                ∇L = SymbolicTracingUtils.gradient(L, x[Block(player)])
-                F = Vector{symbolic_type}(filter!(
-                    !isnothing,
-                    [
-                        ∇L #.+ η * x[Block(player)]
-                        f
-                        # isnothing(g) ? nothing : g .- σ
-                        # isnothing(g) ? nothing : σ .* γ .- ϵ
-                    ],
-                ))
-                G = Vector{symbolic_type}(
-                    filter!(
-                        !isnothing,
-                        [
-                            isnothing(g) ? nothing : γ
-                            isnothing(g) ? nothing : g
-                            isnothing(g) ? nothing : ϵ - γ' * g
-                        ],
-                    ),
-                )
-                z = Vector{symbolic_type}(
-                    vcat(
-                        x[Block(player)],
-                        (isnothing(f) ? [] : λ),
-                        (isnothing(g) ? [] : γ),
-                    ),
-                )
-                return (; F, G, z)
+                @assert length(h) == 1 "Expected a scalar objective at level $level"
+                objective = h
             end
+
+            L = objective - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g)
+            ∇L = SymbolicTracingUtils.gradient(L, vcat(x[Block(player)], preference_slack))
+            F = Vector{symbolic_type}(isnothing(f) ? ∇L : [∇L; f])
+            G = symbolic_type[]
+            # The existing inner relaxation bounds a sum of complementarity products.
+            if prioritized && !isempty(preference_slack)
+                append!(G, [h .+ preference_slack; γₚ; ϵ - γₚ' * (h .+ preference_slack)])
+                append!(G, [preference_slack; μₛ; ϵ - μₛ' * preference_slack])
+            end
+            if !isnothing(g) && !isempty(g)
+                append!(G, [γ; g; ϵ - γ' * g])
+            end
+            z = Vector{symbolic_type}([
+                x[Block(player)]; preference_slack; γₚ; μₛ;
+                isnothing(f) ? [] : λ;
+                isnothing(g) ? [] : γ
+            ])
+            return (; F, G, z)
         end
 
-        # Handle higher levels via tail recursion.
         (; F, G, z) = construct_player_kkt_conditions(
-            preferences[2:end],
-            is_prioritized_constraint[2:end];
-            player,
+            preferences[2:end], is_prioritized_constraint[2:end]; player,
         )
-
-        h = first(preferences)(x, θ)
-
         λ = SymbolicTracingUtils.make_variables(
-            backend,
-            Symbol("λ_$(player)_$(level)"),
-            length(F),
+            backend, Symbol("λ_$(player)_$(level)"), length(F),
         )
-        push!(Λ, λ...)
-
         γ = SymbolicTracingUtils.make_variables(
-            backend,
-            Symbol("γ_$(player)_$(level)"),
-            length(G),
+            backend, Symbol("γ_$(player)_$(level)"), length(G),
         )
-        push!(Γ, γ...)
+        append!(equality_duals, λ)
+        append!(inequality_duals, γ)
 
-        # σ = SymbolicTracingUtils.make_variables(
-        # 	backend,
-        # 	Symbol("σ_$(player)_$(level)"),
-        # 	length(G),
-        # )
-        # push!(Σ, σ...)
-
-        if first(is_prioritized_constraint)
-            # Highest priority is a constraint.
+        preference_slack = symbolic_type[]
+        γₚ = symbolic_type[]
+        μₛ = symbolic_type[]
+        if prioritized
             preference_slack = SymbolicTracingUtils.make_variables(
-                backend,
-                Symbol("s_$(player)_$(level)"),
-                length(h),
+                backend, Symbol("s_$(player)_$(level)"), length(h),
             )
-            push!(s, preference_slack...)
-
-            # σₚ = SymbolicTracingUtils.make_variables(
-            # 	backend,
-            # 	Symbol("σₚ_$(player)_$(level)"),
-            # 	length(h),
-            # )
-            # push!(Σ, σₚ...)
-
-            # σₚₛ = SymbolicTracingUtils.make_variables(
-            # 	backend,
-            # 	Symbol("σₚₛ_$(player)_$(level)"),
-            # 	length(h),
-            # )
-            # push!(Σ, σₚₛ...)
-
             γₚ = SymbolicTracingUtils.make_variables(
-                backend,
-                Symbol("γₚ_$(player)_$(level)"),
-                length(h),
+                backend, Symbol("γₚ_$(player)_$(level)"), length(h),
             )
-            push!(Γ, γₚ...)
-
-            # μₛ = SymbolicTracingUtils.make_variables(
-            # 	backend,
-            # 	Symbol("μₛ_$(player)_$(level)"),
-            # 	length(h),
-            # )
-            # push!(Γ, μₛ...)
-
-            # Form Lagrangian at this stage.
-            (; xs, us) = unflatten_trajectory(
-                x[Block(player)],
-                4, #state_dimension,
-                2, # control_dimnesion
+            μₛ = SymbolicTracingUtils.make_variables(
+                backend, Symbol("μₛ_$(player)_$(level)"), length(h),
             )
-            # L = sum(preference_slack) + 0.001sum(sum(u .^ 2) for u in us) - γₚ' * (h .+ preference_slack) - μₛ' * preference_slack -λ' * F - γ' * G
-            L =
-                sum(preference_slack .^ 2) - γₚ' * (h .+ preference_slack) - λ' * F -
-                γ' * G
-            ∇L = SymbolicTracingUtils.gradient(L, vcat(z, preference_slack))
+            append!(preference_slacks, preference_slack)
+            append!(inequality_duals, γₚ)
+            append!(inequality_duals, μₛ)
+            objective = sum(preference_slack) - γₚ' * (h .+ preference_slack) -
+                        μₛ' * preference_slack
+        else
+            @assert length(h) == 1 "Expected a scalar objective at level $level"
+            objective = h
+        end
 
-            F̃ = Vector{symbolic_type}(filter!(
-                !isnothing,
-                [
-                    ∇L #.+ η * vcat(z, preference_slack)
-                    # h .+ preference_slack .- σₚ
-                    # σₚ .* γₚ .- ϵ
-                    # preference_slack .- σₚₛ
-                    # σₚₛ .* μₛ .- ϵ
-                    # G .- σ
-                    # σ .* γ .- ϵ
-                    F
-                ],
-            ))
-            G̃ = Vector{symbolic_type}(
-                filter!(
-                    !isnothing,
-                    [
-                        h .+ preference_slack
-                        γₚ
-                        ϵ - γₚ' * (h .+ preference_slack)
-                        # μₛ
-                        γ
-                        G
-                        ϵ - γ' * G
-                    ],
-                ),
+        L = objective - λ' * F - γ' * G
+        # Lower-level multipliers are induced primals at this level.
+        ∇L = SymbolicTracingUtils.gradient(L, vcat(z, preference_slack))
+        F̃ = Vector{symbolic_type}([∇L; F])
+        G̃ = symbolic_type[]
+        if prioritized && !isempty(preference_slack)
+            append!(G̃, [h .+ preference_slack; γₚ; ϵ - γₚ' * (h .+ preference_slack)])
+            append!(G̃, [preference_slack; μₛ; ϵ - μₛ' * preference_slack])
+        end
+        append!(G̃, [γ; G; isempty(G) ? symbolic_type[] : [ϵ - γ' * G]])
+
+        if level == 1
+            σ_g = SymbolicTracingUtils.make_variables(
+                backend, Symbol("σ_g_$(player)_$(level)"), length(G),
             )
-            if level == 1
-                σ_g = SymbolicTracingUtils.make_variables(
-                    backend,
-                    Symbol("σ_g_$(player)_$(level)"),
-                    length(G),
-                )
-                push!(Σ, σ_g...)
+            append!(inequality_slacks, σ_g)
+            if prioritized
                 σₚ = SymbolicTracingUtils.make_variables(
-                    backend,
-                    Symbol("σₚ_$(player)_$(level)"),
-                    length(h),
+                    backend, Symbol("σₚ_$(player)_$(level)"), length(h),
                 )
-                push!(Σ, σₚ...)
-
+                σₛ = SymbolicTracingUtils.make_variables(
+                    backend, Symbol("σₛ_$(player)_$(level)"), length(h),
+                )
+                append!(inequality_slacks, σₚ)
+                append!(inequality_slacks, σₛ)
                 return (;
-                    F = [
-                        F̃;
-                        h .+ preference_slack .- σₚ;
-                        ϵ - γₚ' * (h .+ preference_slack);
-                        G .- σ_g;
-                        ϵ - γ' * G
-                    ],
+                    F = [F̃;
+                        isempty(preference_slack) ? symbolic_type[] : h .+ preference_slack .- σₚ;
+                        isempty(preference_slack) ? symbolic_type[] : [ϵ - γₚ' * (h .+ preference_slack)];
+                        isempty(preference_slack) ? symbolic_type[] : preference_slack .- σₛ;
+                        isempty(preference_slack) ? symbolic_type[] : [ϵ - μₛ' * preference_slack];
+                        G .- σ_g; isempty(G) ? symbolic_type[] : [ϵ - γ' * G]],
                     G = G̃,
-                    z = Vector{symbolic_type}([z; preference_slack; λ; γ; γₚ; σ_g]),
+                    z = Vector{symbolic_type}([
+                        z; preference_slack; λ; γ; γₚ; μₛ; σ_g; σₚ; σₛ
+                    ]),
                 )
             end
             return (;
-                F = F̃,
-                G = G̃,
-                z = Vector{symbolic_type}([z; preference_slack; λ; γ; γₚ]),
+                F = [F̃; G .- σ_g; isempty(G) ? symbolic_type[] : [ϵ - γ' * G]], G = G̃,
+                z = Vector{symbolic_type}([z; λ; γ; σ_g]),
             )
-        else
-            @assert length(h) == 1 "Expected a single preference function at the level $(level), but got $(length(h))"
-            # Current priority is a cost.
-            L = h - λ' * F - γ' * G
-            ∇L = SymbolicTracingUtils.gradient(L, z)
-            F̃ = Vector{symbolic_type}(filter!(
-                !isnothing,
-                [
-                    ∇L
-                    # G .- σ
-                    # σ .* γ .- ϵ
-                    F
-                ],
-            ))
-            G̃ = Vector{symbolic_type}(filter!(
-                !isnothing,
-                [
-                    γ
-                    G
-                    ϵ - γ' * G
-                ],
-            ))
-            if level == 1
-                σ_g = SymbolicTracingUtils.make_variables(
-                    backend,
-                    Symbol("σ_g_$(player)_$(level)"),
-                    length(G),
-                )
-                push!(Σ, σ_g...)
-                return (;
-                    F = [F̃; G .- σ_g; ϵ - γ' * G],
-                    G = G̃,
-                    z = Vector{symbolic_type}([z; λ; γ; σ_g]),
-                )
-            end
-            return (; F = F̃, G = G̃, z = Vector{symbolic_type}([z; λ; γ]))
         end
+        return (;
+            F = F̃, G = G̃,
+            z = Vector{symbolic_type}([z; preference_slack; λ; γ; γₚ; μₛ]),
+        )
     end
 
-    # Recursively generate the rest of the KKT conditions for each player.
-    # One result per player, always a vector (see the reduced generator above).
-    F_G_pair = [
+    player_systems = [
         construct_player_kkt_conditions(
             goop.preferences[player],
             goop.is_prioritized_constraint[player];
@@ -1050,21 +858,22 @@ function generate_slacked_complete_kkt_system(
         ) for player in 1:(goop.num_players)
     ]
 
-    # Flatten the F vectors for all players.
-    flattened_F = reduce(vcat, (pair.F for pair in F_G_pair))
+    F = Vector{symbolic_type}(
+        filter!(!iszero, reduce(vcat, (pair.F for pair in player_systems))),
+    )
 
-    # Filter out zeros.
-    F = Vector{symbolic_type}(filter!(!isnothing, vcat(filter!(!iszero, flattened_F))))
-
-    # Pack all variables together.
-    z = Vector{symbolic_type}(vcat(x, s, Σ, Λ, Γ))
+    z = Vector{symbolic_type}(
+        vcat(x, preference_slacks, inequality_slacks, equality_duals, inequality_duals),
+    )
     θ = Vector{symbolic_type}(θ)
 
-    idx = blockedrange(length.([x, s, Σ, Λ, Γ]))
-    primal_dims = idx[Block(1)] # x
-    preference_slack_dims = idx[Block(2)] # s
-    interior_point_slack_dims = vcat(idx[Block(3)]) # Σ
-    inequality_constraint_dual_dims = vcat(idx[Block(5)]) # Γ
+    idx = blockedrange(length.([
+        x, preference_slacks, inequality_slacks, equality_duals, inequality_duals,
+    ]))
+    primal_dims = idx[Block(1)]
+    preference_slack_dims = idx[Block(2)]
+    interior_point_slack_dims = vcat(idx[Block(3)])
+    inequality_constraint_dual_dims = vcat(idx[Block(5)])
 
     BuildGOOPKKTSystem(
         F,
