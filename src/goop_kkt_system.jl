@@ -90,9 +90,15 @@ function _symbolics_to_fd(x, varmap, memo)
         varmap[x]
     elseif Symbolics.SymbolicUtils.iscall(x)
         op = Symbolics.SymbolicUtils.operation(x)
+        # `sorted_arguments`, not `arguments`: for a sum or product, `arguments` follows the
+        # iteration order of SymbolicUtils' internal Dict, which can differ between Julia
+        # processes. FD then adds the same terms in a different order, the last bits of a few
+        # generated rows change, and Scholtes solves took different paths in about 1 process
+        # in 8 (2026-10-24). The canonical order, also used by SymbolicUtils' own code
+        # generator, makes the generated code identical in every process (checked in 48).
         args = map(
             arg -> _symbolics_to_fd(arg, varmap, memo),
-            Symbolics.SymbolicUtils.arguments(x),
+            Symbolics.SymbolicUtils.sorted_arguments(x),
         )
         if op === ifelse || op === Core.ifelse
             # FD supports if_else for evaluation/codegen (differentiation has

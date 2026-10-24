@@ -103,7 +103,7 @@ function get_setup(
         obstacle_position = first(θ_iter, 2)
         (; initial_state, goal_position, obstacle_position)
     end
-
+ 
     function control_objective(; player)
         function (z, _)
             (; xs, us) = trajectory(z; player)
