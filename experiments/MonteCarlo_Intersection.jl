@@ -6,10 +6,11 @@ For every objective variant and every sampled initial state:
  1. Solve the REDUCED KKT system with Scholtes down `rho_schedule`, starting from
     Intersection's yielding initial guess. Every solve, reduced or complete, is accepted iff
     its unrelaxed KKT residual ‖K0‖/√m is at most `tol` (reduced) or `complete_tol`. A ρ chain
-    runs all its stages and is judged, and kept, at the stage with the lowest ‖K0‖.
+    runs all its stages and is judged, and kept, at the stage with the lowest ‖K0‖; a complete
+    check likewise keeps its best try.
  2. For an accepted reduced solution, test each COMPLETE formulation in each mode:
       :fixed_primal  keep the reduced trajectory fixed and solve only for the other complete
-                     variables (multipliers, slacks) by bounded nonlinear least squares.
+                     variables (multipliers, slacks) with Scholtes, x entering as a parameter.
                      A pass means the complete system holds, to tolerance, with the reduced trajectory.
       :warmstart     solve the whole complete system with Scholtes from the mapped reduced
                      solution, and report how far the trajectory moves.
@@ -37,7 +38,6 @@ module MonteCarlo_Intersection
 
 using BlockArrays, LinearAlgebra, SparseArrays, Random, Statistics, Serialization, Dates, Printf
 import ReducedGOOP
-import NonlinearSolve as NS
 import Symbolics
 import CairoMakie as CM
 include(joinpath(@__DIR__, "Intersection.jl"))
@@ -163,9 +163,9 @@ default_settings() = (;
     # Monte Carlo
     num_instances=2,                             # accepted initial states per objective variant
     rng_seed=123,                                # Xoshiro seed for sampling
-    objective_variants=(:quadratic, :cosh),      # names in objective_variants(settings)
-    complete_formulations=(:aggregate, :exact),  # names in `builders` (run)
-    comparison_modes=(:fixed_primal, :warmstart),  # names in `modes` (run)
+    objective_variants=(:cosh,),                 # names in objective_variants(settings); (:quadratic, :cosh)
+    complete_formulations=(:exact,),             # names in `builders` (run)            ; (:exact, :aggregate)
+    comparison_modes=(:fixed_primal,),           # names in `modes` (run)               ; (:fixed_primal, :warmstart)
     # Scenario (Intersection.jl). Units m, s; state [px, py, vx, vy]; P1 drives along x, P2 along y.
     planning_horizon=7,                          # state knots; horizon (planning_horizon - 1) * time_step = 3 s
     time_step=0.5,
@@ -196,16 +196,14 @@ default_settings() = (;
     complete_rho_schedule = [1.0,  1e-1, 1e-2, 1e-3, 1e-4, 1e-5], # aggregate complete system; exact runs at ρ = 0
     #! format: on
     max_inner_iters=500,                         # Scholtes Newton steps per ρ stage
-    NS_iters=1000,                               # NonlinearSolve iterations, fixed-primal mode
     linear_solver=:normal,                       # ScholtesOptions.linear_solver
-    eta_0=1e-4,                                  # initial regularization η
-    # One complete-solve retry per entry: :warmstart retries with that η, :fixed_primal with trust radius 0.1.
-    retry_eta=[1e-2],
+    eta_0=1e-5,                                  # initial regularization η
+    # One complete-solve retry per entry, with that η.
+    retry_eta=[1e-4, 1e-3, 1e-2],
     # Acceptance: a solve is accepted iff its unrelaxed KKT residual ‖K0‖ / √(number of equations) <= tol,
-    # at the best stage of its ρ chain.
-    tol=1e-5,                                    # reduced system
+    # at the best stage of its ρ chain (and, for a complete check, its best try).
+    tol=2e-4,                                    # reduced system
     complete_tol=1e-3,                           # complete systems
-    fixed_tol=1e-3,                              # NonlinearSolve abstol (RMS-scaled); a stopping rule, not acceptance
     inner_ρ_tol=1e-2,                            # Scholtes ρ stage's inner stop: ‖R‖/√m < min(ρ, inner_ρ_tol). 1.0 for old behavior
     # Complete-system start (complete_initialization)
     positive_seed=1.0,                           # unmapped nonnegative variables
@@ -245,8 +243,8 @@ function run(; overrides=(;))
     )
     variants = filter(v -> v.name in settings.objective_variants, objective_variants(settings))
     modes = [
-        (; name=:fixed_primal, label="Fixed-primal recovery", solver=:nonlinear_solve),
-        (; name=:warmstart, label="Warm-started complete", solver=:scholtes),
+        (; name=:fixed_primal, label="Fixed-primal recovery"),
+        (; name=:warmstart, label="Warm-started complete"),
     ]
     modes = filter(m -> m.name in settings.comparison_modes, modes)
     builders = [
@@ -306,7 +304,7 @@ function run(; overrides=(;))
             # The exact system is square; the fixed-primal Jacobian keeps every row but drops
             # the physical columns.
             builder.name === :exact && @assert kkt.n == kkt.n_nc
-            @assert size(fixed.J) == (kkt.n_nc, kkt.n-length(kkt.primal_dims))
+            @assert size(fixed.system.Jnc_buf) == (kkt.n_nc, kkt.n-length(kkt.primal_dims))
             (;
                 builder.name,
                 kkt,
@@ -492,7 +490,6 @@ function run(; overrides=(;))
                     check = (;
                         formulation=formulation.name,
                         mode=mode.name,
-                        solver=mode.solver,
                         result,
                         metrics,
                         category,
@@ -505,7 +502,6 @@ function run(; overrides=(;))
                         (;
                             formulation=formulation.name,
                             mode=mode.name,
-                            solver=mode.solver,
                             category=:reduced_failed,
                             reason="Best reduced stage did not pass acceptance",
                         ),
@@ -582,9 +578,7 @@ function compact(x)
 end
 
 "The acceptance tolerances, printed before the first solve and on the report's summary page."
-tolerance_line(settings) =
-    "Tolerances: reduced ‖K0‖/√m ≤ $(compact(settings.tol)), complete ‖K0‖/√m ≤ $(compact(settings.complete_tol)) " *
-        "(NonlinearSolve abstol $(compact(settings.fixed_tol)))"
+tolerance_line(settings) = "Tolerances: reduced ‖K0‖/√m ≤ $(compact(settings.tol)), complete ‖K0‖/√m ≤ $(compact(settings.complete_tol))"
 
 "Progress bar on its own line: other output interleaves with it, so it is not redrawn in place."
 function print_progress(done, total; width=24)
@@ -605,18 +599,19 @@ end
 function complete_verdict(formulation, mode, result, metrics, category, settings)
     name = ":$(formulation.name), :$(mode.name) mode"
     haskey(result, :error) && return "→ $name FAILED with an exception: $(first(split(result.error, '\n')))"
-    final = last(result.attempts)
+    final = result.attempts[result.best_attempt]
     tries = length(result.attempts) == 1 ? "1 try" : "$(length(result.attempts)) tries"
     stage = "ρ = $(compact(final.stages[final.best_stage].ρ))"
     k0, tol = compact(result.validation.unrelaxed_rms), compact(settings.complete_tol)
-    result.accepted || return "→ $name REJECTED after $tries: best ‖K0‖/√m = $k0 ($stage) > $tol"
+    result.accepted ||
+        return "→ $name REJECTED after $tries: best ‖K0‖/√m = $k0 (try $(result.best_attempt), $stage) > $tol"
     moved =
         mode.name === :fixed_primal ? "trajectory held fixed" :
         "trajectory moved RMS $(compact(metrics.rms)) ($(replace(string(category), '_' => ' ')))"
     "→ $name accepted after $tries at $stage: ‖K0‖/√m = $k0 ≤ $tol; $moved"
 end
 
-"Header above each solve's ρ-stage table; `label` names the solve and the setting this try uses (η₀ or trust radius)."
+"Header above each solve's ρ-stage table; `label` names the solve and the η₀ this try uses."
 function print_kkt_header(label; io=stdout)
     println(io, "\n[solver exit] $label")
     println(io, "Residuals /sqrt(m); goal errors and minimum separation in m.")
@@ -862,47 +857,79 @@ function compile_slack_targets(kkt)
 end
 
 """
-Retain every complete equation; only the nonphysical Jacobian columns are unknowns. The
-physical coordinates enter as parameters, so the system is rectangular (n_nc rows, n minus
-the physical columns) and is solved as bounded least squares; nonnegative coordinates get
-lower bound 0.
+Fixed-primal view of a complete KKT system, for `solve(Scholtes(), system, [θ; x]; w₀)`. Every
+complete equation is kept; the physical columns x become parameters and the other (free) columns
+are the unknowns, so the system is rectangular (n_nc rows, n minus the physical columns). Since x
+enters as a parameter, one compiled system serves every trial.
 """
 function fixed_primal_formulation(kkt)
     physical = collect(kkt.primal_dims)
     free = setdiff(collect(1:kkt.n), physical)
+    nθ, nx = kkt.parameter_dimension, length(physical)
+    # y = [x; everything else], so the free columns are exactly nx+1:n and the complete system's
+    # sign-constrained coordinates shift down by nx.
+    free == collect((nx+1):kkt.n) || error("expected the physical columns to come first in y")
     full = zeros(kkt.n)
     full_J = copy(kkt.Jnc_buf)
     # `slots` has full_J's sparsity pattern with values 1:nnz. Its free columns list, in CSC
-    # order, which entries of nonzeros(full_J) form J = full_J[:, free], so jacobian! can
-    # refresh J's values in place without building a new sparse matrix.
+    # order, which entries of nonzeros(full_J) form J = full_J[:, free], so J! can refresh J's
+    # values in place without building a new sparse matrix.
     rows, cols, _ = findnz(full_J)
     slots = sparse(rows, cols, collect(1:nnz(full_J)), size(full_J)...)
     selected_slots = nonzeros(slots[:, free])
     J = copy(full_J[:, free])
-    residual! = function (r, v, parameters)
-        full[physical] .= parameters.physical
+    θ_buffer = zeros(nθ)
+    function fill_full!(v, θx)
+        full[physical] .= view(θx, (nθ+1):(nθ+nx))
         full[free] .= v
-        kkt.F_nc!(r, full, parameters.θ, parameters.ρ)
-        r
+        θ_buffer .= view(θx, 1:nθ)
+        full
     end
-    jacobian! = function (J, v, parameters)
-        full[physical] .= parameters.physical
-        full[free] .= v
-        kkt.J_nc!(full_J, full, parameters.θ, parameters.ρ)
-        nonzeros(J) .= nonzeros(full_J)[selected_slots]
-        J
+    F! = (out, v, θx, ρ) -> kkt.F_nc!(out, fill_full!(v, θx), θ_buffer, ρ)
+    J! = function (J_out, v, θx, ρ)
+        kkt.J_nc!(full_J, fill_full!(v, θx), θ_buffer, ρ)
+        nonzeros(J_out) .= view(nonzeros(full_J), selected_slots)
+        J_out
     end
-    lower = fill(-Inf, length(free))
-    lower[findall(in(kkt.nonnegative_dims), free)] .= 0.0
-    (;
-        free,
-        physical,
+    # The unrelaxed residual that _norm_K0 evaluates for :aggregate (exact ignores it).
+    function complete_residual!(out, v, θx, ρ)
+        kkt.complete_residual!(out, fill_full!(v, θx), θ_buffer, ρ)
+    end
+    nonnegative_dims = kkt.nonnegative_dims .- nx
+    # ScholtesKKTSystem and CompleteKKTSystem are ReducedGOOP internals; this builds them the way
+    # _generate_complete_kkt_system does (src/scholtes_complete_kkt.jl), with no new codegen.
+    no_rows = spzeros(0, length(free))
+    inner = ReducedGOOP.ScholtesKKTSystem(
+        length(free),                     # n: unknowns are the free columns
+        kkt.n_nc,                         # every complete equation
+        0,                                # no complementarity block, as in the complete system
+        1:0,                              # no primal coordinates among the unknowns
+        kkt.preference_slack_dims .- nx,
+        Int[],
+        nθ + nx,                          # parameters [θ; x]
+        F!,
+        kkt.a!,
+        kkt.b!,
+        J!,
+        kkt.J_a!,
+        kkt.J_b!,
         J,
-        residual!,
-        jacobian!,
-        lower,
-        dimensions=(; rows=kkt.n_nc, columns=length(free), full_columns=kkt.n),
+        no_rows,
+        copy(no_rows),
+        findnz(J)[1:2],
+        (Int[], Int[]),
+        (Int[], Int[]),
+        Int[],
+        0,
+        NamedTuple[],
+        kkt.vars[free],
+        zeros(nθ + nx),
+        Ref(0.0),
+        zeros(length(free)),
+        Ref(false),
     )
+    system = ReducedGOOP.CompleteKKTSystem(inner, (; kkt.formulation, complete_residual!, nonnegative_dims))
+    (; free, physical, system, dimensions=(; rows=kkt.n_nc, columns=length(free), full_columns=kkt.n))
 end
 
 """
@@ -991,168 +1018,93 @@ function solve_complete(
 )
     kkt = formulation.kkt
     # exact is unrelaxed: one stage at ρ = 0. aggregate runs down complete_rho_schedule (ρ plays
-    # the legacy ε). Each retry restarts from `initial`, with the next η (:warmstart) or the
-    # smaller initial trust radius (:fixed_primal).
+    # the legacy ε). Each retry restarts from `initial` with the next η.
     schedule = formulation.name === :exact ? [0.0] : settings.complete_rho_schedule
+    # :warmstart solves the whole complete system. :fixed_primal solves the fixed-primal system,
+    # whose unknowns are the free columns and whose parameters are [θ; x], so x cannot move.
+    # Note: until 2026-10-22 :fixed_primal used NonlinearSolve's BoundedTrustRegion. On these
+    # rank-deficient systems it stopped far from a stationary point (projected gradient ≫ 0) after
+    # 1000+ steps, while Scholtes on the fixed-primal system met the tolerance in under 100.
+    fixed_mode = mode.name === :fixed_primal
+    system = fixed_mode ? formulation.fixed.system : kkt
+    parameters = fixed_mode ? [θ; physical] : θ
+    unknowns = fixed_mode ? formulation.fixed.free : Colon()
+    residuals = ReducedGOOP.ScholtesResiduals(system)
+    residual_scale = sqrt(kkt.n_nc)
     attempts = Any[]
     for (attempt, eta) in enumerate([settings.eta_0; retry_values])
         y = copy(initial)
         stages = Any[]
         best = nothing
-        # What a retry changes: η₀ for Scholtes, the initial trust radius for NonlinearSolve
-        # (0 selects its default, max(‖u0‖, 1)).
-        initial_trust_radius = attempt == 1 ? 0.0 : 0.1
-        changed =
-            mode.solver === :scholtes ? "η₀ = $(compact(eta))" :
-            attempt == 1 ? "trust radius max(‖u0‖, 1)" : "trust radius $initial_trust_radius"
         try_label =
             attempt == 1 ? "first try" :
             attempt == 2 ? "retry (first try rejected)" : "retry $(attempt - 1) (earlier tries rejected)"
         print_kkt_header(
-            "$context | complete :$(formulation.name), :$(mode.name) mode | $try_label: $changed";
+            "$context | complete :$(formulation.name), :$(mode.name) mode | $try_label: η₀ = $(compact(eta))";
             io,
         )
         for ρ in schedule
             stage_initial = copy(y)
             history = Any[]
-            if mode.solver === :scholtes
-                residuals = ReducedGOOP.ScholtesResiduals(kkt)
-                trace =
-                    nt -> push!(
-                        history,
-                        (;
-                            raw=norm(nt.r),
-                            unrelaxed=ReducedGOOP._norm_K0(residuals, nt.r, nt.w, ρ),
-                            eta=nt.eta,
-                        ),
-                    )
-                residual_scale = sqrt(kkt.n_nc)
-                # Same options as solve_reduced, with the complete tolerance and this attempt's η.
-                # The 1e-12 floor is defensive: exact ignores ρ (its residual is evaluated at ρ = 0)
-                # and complete_rho_schedule stays above it, so it changes nothing today; for exact
-                # it only keeps ρ and tol_inner positive. As in solve_reduced, the inner loop stops
-                # at ‖R‖/√m < min(ρ, inner_ρ_tol).
-                options = ReducedGOOP.ScholtesOptions(;
-                    rho_schedule=[max(Float64(ρ), 1e-12)],
-                    max_inner=settings.max_inner_iters,
-                    tol=settings.complete_tol * residual_scale,
-                    tol_inner=min(max(ρ, 1e-12), settings.inner_ρ_tol) * residual_scale,
-                    projected_step=true,
-                    proj_eps=1e-8,
-                    linear_solver=settings.linear_solver,
-                    eta_schedule=true,
-                    eta_init=eta,
-                    eta_min=1e-8,
-                    eta_max=1e4,
-                    gain_low=0.25,
-                    gain_high=0.75,
-                    tightening_rate=1.2,
-                    loosening_rate=3.0,
-                )
-                timed = @timed ReducedGOOP.solve(
-                    ReducedGOOP.Scholtes(),
-                    kkt,
-                    θ;
-                    w₀=y,
-                    options,
-                    trace,
-                )
-                output = timed.value
-                y = copy(output.w)
-                status, reason, iterations =
-                    output.status, output.termination_reason, output.iters
-                status_ok = output.status === :solved
-                stop = Intersection.solver_stop_reason(
-                    output,
-                    options;
-                    scale=residual_scale,
-                )
-                push!(
+            trace =
+                nt -> push!(
                     history,
                     (;
-                        raw=output.relaxed_residual,
-                        unrelaxed=output.residual,
-                        eta=output.eta,
+                        raw=norm(nt.r),
+                        unrelaxed=ReducedGOOP._norm_K0(residuals, nt.r, nt.w, ρ),
+                        eta=nt.eta,
                     ),
                 )
-            else
-                # Fixed-primal mode: bounded least squares with NonlinearSolve, used for now as a
-                # secondary check (CLAUDE.md otherwise prefers Scholtes for complete solves).
-                # TODO: verify that this solve keeps the physical primals fixed and solves only for
-                # the complete dual variables; `fixed.free` currently also includes the preference
-                # and auxiliary slacks.
-                fixed = formulation.fixed
-                parameters = (; θ, physical, ρ)
-                # NonlinearSolve sees r / √n_nc and its least-squares stop uses the 2-norm, so
-                # abstol = fixed_tol is an RMS test, like complete_tol. `history` keeps unscaled
-                # norms, as the Scholtes trace does, plus the unrelaxed (ρ = 0) residual;
-                # plot_results rescales both.
-                unrelaxed_buffer, full = zeros(kkt.n_nc), copy(y)
-                f! = function (r, v, p)
-                    fixed.residual!(r, v, p)
-                    full[fixed.free] .= v
-                    full[fixed.physical] .= p.physical
-                    kkt.F_nc!(unrelaxed_buffer, full, p.θ, 0.0)
-                    push!(
-                        history,
-                        (; raw=norm(r), unrelaxed=norm(unrelaxed_buffer), eta=NaN),
-                    )
-                    r ./= sqrt(kkt.n_nc)
-                    nothing
-                end
-                jac! =
-                    (J, v, p) -> (
-                        fixed.jacobian!(J, v, p);
-                        nonzeros(J) ./= sqrt(kkt.n_nc);
-                        nothing
-                    )
-                nf = NS.NonlinearFunction{true}(
-                    f!;
-                    jac=jac!,
-                    jac_prototype=copy(fixed.J),
-                    resid_prototype=zeros(kkt.n_nc),
-                )
-                nonlinear_problem = NS.NonlinearLeastSquaresProblem(
-                    nf,
-                    y[fixed.free],
-                    parameters;
-                    lb=fixed.lower,
-                )
-                # initial_trust_radius = 0 selects the package default max(‖u0‖, 1); retries start
-                # from 0.1 (η is unused here, so a retry differs only in this radius). gtol = 0 turns
-                # off the projected-gradient stop, which for least squares reports ReturnCode.Success
-                # at ANY stationary point of ‖r‖², even one with a nonzero residual.
-                algorithm = NS.BoundedTrustRegion(;
-                    linsolve=NS.QRFactorization(),
-                    concrete_jac=true,
-                    initial_trust_radius,
-                    gtol=0.0,
-                )
-                timed = @timed NS.solve(
-                    nonlinear_problem,
-                    algorithm;
-                    abstol=settings.fixed_tol,
-                    reltol=0.0,
-                    maxiters=settings.NS_iters,
-                )
-                output = timed.value
-                y[fixed.free] .= output.u
-                y[fixed.physical] .= physical
-                retcode = Symbol(string(output.retcode))
-                status, reason, iterations = retcode, retcode, output.stats.nsteps
-                status_ok = output.retcode == NS.ReturnCode.Success
-                stop = string(output.retcode)
-            end
+            # Same options as solve_reduced, with the complete tolerance and this attempt's η.
+            # The 1e-12 floor is defensive: exact ignores ρ (its residual is evaluated at ρ = 0)
+            # and complete_rho_schedule stays above it, so it changes nothing today; for exact
+            # it only keeps ρ and tol_inner positive. As in solve_reduced, the inner loop stops
+            # at ‖R‖/√m < min(ρ, inner_ρ_tol).
+            options = ReducedGOOP.ScholtesOptions(;
+                rho_schedule=[max(Float64(ρ), 1e-12)],
+                max_inner=settings.max_inner_iters,
+                tol=settings.complete_tol * residual_scale,
+                tol_inner=min(max(ρ, 1e-12), settings.inner_ρ_tol) * residual_scale,
+                projected_step=true,
+                proj_eps=1e-8,
+                linear_solver=settings.linear_solver,
+                eta_schedule=true,
+                eta_init=eta,
+                eta_min=1e-8,
+                eta_max=1e4,
+                gain_low=0.25,
+                gain_high=0.75,
+                tightening_rate=1.2,
+                loosening_rate=3.0,
+            )
+            timed = @timed ReducedGOOP.solve(
+                ReducedGOOP.Scholtes(),
+                system,
+                parameters;
+                w₀=y[unknowns],
+                options,
+                trace,
+            )
+            output = timed.value
+            y[unknowns] .= output.w
+            push!(
+                history,
+                (;
+                    raw=output.relaxed_residual,
+                    unrelaxed=output.residual,
+                    eta=output.eta,
+                ),
+            )
             push!(
                 stages,
                 (;
                     ρ,
                     parameter=formulation.name===:exact ? :unrelaxed :
                               :epsilon_complete,
-                    status,
-                    reason,
-                    iterations,
-                    status_ok,
+                    status=output.status,
+                    reason=output.termination_reason,
+                    iterations=output.iters,
+                    status_ok=output.status === :solved,
                     seconds=max(
                         0.0,
                         timed.time-timed.compile_time-timed.recompile_time,
@@ -1164,20 +1116,20 @@ function solve_complete(
                     final=copy(y),
                 ),
             )
-            # Evaluate the returned iterate; the last NonlinearSolve callback may be a rejected trial.
+            # Residuals of the full complete iterate, for the table and the best-stage choice.
             r, r0 = zeros(kkt.n_nc), zeros(kkt.n_nc)
             kkt.F_nc!(r, y, θ, ρ)
             kkt.F_nc!(r0, y, θ, 0.0)
             print_kkt_stage(;
                 ρ,
-                status=status_ok ? :solved : :failed,
-                iterations,
+                status=output.status,
+                iterations=output.iters,
                 seconds=last(stages).seconds,
                 relaxed_rms=norm(r)/sqrt(kkt.n_nc),
                 unrelaxed_rms=norm(r0)/sqrt(kkt.n_nc),
                 physical=y[kkt.primal_dims],
                 settings,
-                stop,
+                stop=Intersection.solver_stop_reason(output, options; scale=residual_scale),
                 io,
             )
             # Track the stage with the lowest ‖K0‖ (a non-finite residual counts as Inf).
@@ -1231,11 +1183,15 @@ function solve_complete(
         )
         accepted && break
     end
-    final = last(attempts)
+    # Keep the best try, as a ρ chain keeps its best stage: a retry restarts from `initial` and can
+    # end worse than an earlier try. An accepted try is the last and has the lowest ‖K0‖.
+    best_attempt = argmin([isfinite(a.validation.unrelaxed_rms) ? a.validation.unrelaxed_rms : Inf for a in attempts])
+    final = attempts[best_attempt]
     mode.name === :fixed_primal && @assert final.solution[kkt.primal_dims] == physical
     (;
         accepted=final.accepted,
         attempts,
+        best_attempt,
         validation=final.validation,
         physical=final.solution[kkt.primal_dims],
         solution=final.solution,
@@ -1300,7 +1256,6 @@ function save_results(directory, settings, instances, sampling, metadata, result
         metadata,
         results,
         julia=string(VERSION),
-        nonlinear_solve=string(Base.pkgversion(NS)),
         blas_threads=BLAS.get_num_threads(),
     )
     temporary = joinpath(directory, "results.jls.tmp")
@@ -1437,13 +1392,25 @@ function plot_trial_trajectories!(layout, row, check, settings)
         fontsize=20,
     )
     complete = haskey(check, :result) ? check.result : nothing
-    for (column, name, physical, status, accepted) in (
+    # Subtitles give K0/sqrt(m) of the plotted iterate: the reduced solve's best stage, and the best
+    # stage of the complete check's best try. An exception plots the reduced trajectory and has no K0.
+    reduced_k0 = let stage = row.reduced.stages[row.reduced.best_stage]
+        "K0/sqrt(m) = $(compact(row.reduced.validation.unrelaxed_rms)) at rho = $(compact(stage.ρ))"
+    end
+    complete_k0 =
+        isnothing(complete) ? "not run" :
+        isempty(complete.attempts) ? "no K0: the complete solve threw an exception" :
+        let final = complete.attempts[complete.best_attempt], stage = final.stages[final.best_stage]
+            "K0/sqrt(m) = $(compact(final.validation.unrelaxed_rms)) at rho = $(compact(stage.ρ)), try $(final.attempt)"
+        end
+    for (column, name, physical, status, accepted, k0) in (
         (
             1,
             "Reduced",
             row.reduced.output.z,
             row.reduced.output.status,
             row.reduced.accepted,
+            reduced_k0,
         ),
         (
             2,
@@ -1451,11 +1418,13 @@ function plot_trial_trajectories!(layout, row, check, settings)
             isnothing(complete) ? nothing : complete.physical,
             isnothing(complete) ? :skipped : complete.status,
             !isnothing(complete) && complete.accepted,
+            complete_k0,
         ),
     )
         ax = CM.Axis(
             layout[2, column];
             title="$name | $status | accepted=$accepted",
+            subtitle=k0,
             aspect=CM.DataAspect(),
             xlabel="x [m]",
             ylabel="y [m]",
@@ -1501,7 +1470,7 @@ function plot_trial_trajectories!(layout, row, check, settings)
                 [x[2] for x in xs];
                 color,
                 linewidth=3,
-                markersize=6,
+                markersize=10,
             )
             CM.scatter!(
                 ax,
@@ -1665,7 +1634,7 @@ function summary_page(data, directory)
     number(x) = @sprintf("%.3e", x)
 
     label!("Intersection KKT comparison: $(settings.num_instances) instances per objective variant"; fontsize=32)
-    label!("Run $(basename(directory)); Julia $(data.julia), NonlinearSolve $(data.nonlinear_solve), $(data.blas_threads) BLAS threads.")
+    label!("Run $(basename(directory)); Julia $(data.julia), $(data.blas_threads) BLAS threads.")
     monospace!(tolerance_line(settings))
 
     heading!("Pass counts")
@@ -1727,13 +1696,13 @@ function summary_page(data, directory)
         "Both systems use identical physical ordering: player, time knot, [px, py, vx, vy, ax, ay]. Preference slacks map by player/source preference/component, not flat index order. The innermost original equality and inequality multipliers also map by player and original row. All other equality/induced multipliers start at zero; remaining sign-constrained variables use positive_seed, followed by auxiliary-slack initialization from their defining expressions. Full source/destination index maps and labels are saved in results.jls.",
     )
     paragraph!(
-        "Reduced and :warmstart complete solves use Scholtes; each rho stage's inner loop stops at R/sqrt(m) < min(rho, $(settings.inner_ρ_tol)), at max_inner_iters, or on a line-search stall, unless K0 reaches its tolerance first. :fixed_primal recovery uses NonlinearSolve BoundedTrustRegion with analytic free-column Jacobians and nonnegative-coordinate bounds. Exact complete equations have no epsilon schedule; aggregate uses complete_rho_schedule as legacy epsilon. All complete rows remain after fixing physical columns.",
+        "Every solve uses Scholtes; each rho stage's inner loop stops at R/sqrt(m) < min(rho, $(settings.inner_ρ_tol)), at max_inner_iters, or on a line-search stall, unless K0 reaches its tolerance first. :fixed_primal recovery solves the complete system with the physical trajectory as a parameter, so only the remaining columns move; nonnegative coordinates stay inside the sign box. Exact complete equations have no epsilon schedule; aggregate uses complete_rho_schedule as legacy epsilon. All complete rows remain after fixing physical columns.",
     )
     paragraph!(
-        "Residual curves show the full relaxed and unrelaxed L2 residuals divided by sqrt(number of equations) on logarithmic axes, concatenated across stages, against solver-trace samples (Scholtes iterates; NonlinearSolve residual evaluations, including rejected trials). Reduced curves include all sampled trials; complete curves include all attempted checks, using the final retry. Histograms use accepted pairs only. Curves use available samples only: no padding after a run ends. Lines are geometric means; bands are mean +/- one sample standard deviation in log10 residual, drawn at indices with at least two contributors. Stage endpoints and raw histories are in results.jls. Each comparison page also shows every trial's reduced and complete position, velocity, and acceleration profiles side by side, including failed returned iterates with explicit status labels.",
+        "Residual curves show the full relaxed and unrelaxed L2 residuals divided by sqrt(number of equations) on logarithmic axes, concatenated across stages, against solver-trace samples (Scholtes iterates). Reduced curves include all sampled trials; complete curves include all attempted checks, using each check's kept (best) try. Histograms use accepted pairs only. Curves use available samples only: no padding after a run ends. Lines are geometric means; bands are mean +/- one sample standard deviation in log10 residual, drawn at indices with at least two contributors. Stage endpoints and raw histories are in results.jls. Each comparison page also shows every trial's reduced and complete position, velocity, and acceleration profiles side by side, including failed returned iterates with explicit status labels.",
     )
     paragraph!(
-        "A solve is accepted iff its unrelaxed KKT residual K0/sqrt(m) is at most $(settings.tol) (reduced) or $(settings.complete_tol) (complete); the solver's exit status is not required. A rho chain runs all its stages and is judged at the stage with the lowest K0; that stage's iterate is the one kept, compared and plotted. NonlinearSolve abstol = $(settings.fixed_tol) is only its stopping tolerance. Fixed trajectories retain the reduced solution's finite physical residual; these rows are not removed. The full residual includes stationarity, equality, complementarity, and auxiliary-slack equations. The relaxed residual, largest residual entry, multiplier signs and original physical feasibility are recorded as diagnostics only. Failures do not prove incompatibility.",
+        "A solve is accepted iff its unrelaxed KKT residual K0/sqrt(m) is at most $(settings.tol) (reduced) or $(settings.complete_tol) (complete); the solver's exit status is not required. A rho chain runs all its stages and is judged at the stage with the lowest K0, and a complete check keeps its best try (retries restart with the next eta); that iterate is the one kept, compared and plotted. Fixed trajectories retain the reduced solution's finite physical residual; these rows are not removed. The full residual includes stationarity, equality, complementarity, and auxiliary-slack equations. The relaxed residual, largest residual entry, multiplier signs and original physical feasibility are recorded as diagnostics only. Failures do not prove incompatibility.",
     )
     paragraph!(
         ":warmstart complete times are refinement costs. Construction and independent warm-ups are excluded. Reported solve seconds subtract Julia's measured compilation and recompilation time from wall time (clamped at zero); wall and compilation seconds are saved separately, and nonzero measured compilation is flagged below. Both starts and every attempt/stage are saved. No warm-up or previous-trial solution seeds measured trials.",
@@ -1819,7 +1788,7 @@ function comparison_page(data, variant, formulation, mode)
                 vcat,
                 (
                     [getproperty(h, field)/sqrt(complete_rows) for h in s.history] for
-                    s in last(p.check.result.attempts).stages
+                    s in p.check.result.attempts[p.check.result.best_attempt].stages
                 ),
             ) for p in attempted
         ]
@@ -1839,8 +1808,12 @@ function comparison_page(data, variant, formulation, mode)
             CM.axislegend(axis; position=:rt, labelsize=14)
         end
     end
+    # At most 4 x ticks, labelled like the console (9.4e-4): the default labels (9.4×10⁻⁴, ~9 ticks)
+    # overlap whenever the values span less than a decade.
     second = CM.Axis(
         convergence[1, 3],
+        xticks=CM.WilkinsonTicks(4),
+        xtickformat=values -> compact.(values),
         xlabel=mode===:fixed_primal ? "Unrelaxed residual RMS (best stage)" : "Scaled trajectory RMS",
         ylabel="Accepted pairs",
         title=mode===:fixed_primal ? "Fixed-primal recovery $(length(successful))/$nred" :
