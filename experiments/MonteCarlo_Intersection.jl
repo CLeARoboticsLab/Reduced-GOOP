@@ -25,12 +25,6 @@ Terms
              norm / √(number of equations).
   physical   the stacked trajectory z, ordered player, knot, [px, py, vx, vy, ax, ay].
 
-Entry points: `run(; overrides)`, and `plot_results(directory)`, which redraws report.pdf
-from results.jls without building or solving anything. Each run writes a timestamped
-directory under output/intersection_kkt_comparison/ with two files: results.jls (all the
-numbers; rewritten after every check, so a crash keeps partial results) and report.pdf (a
-summary page, then one page per variant/formulation/mode).
-
     julia --project=experiments -e 'include("experiments/MonteCarlo_Intersection.jl");
         MonteCarlo_Intersection.run(overrides = (; num_instances = 50))'
 """
@@ -50,14 +44,12 @@ function objective_variants(settings)
     [
         (;
             name=:quadratic,
-            label="Quadratic",
             objective=(d, a) -> d^2, # reference only: get_setup keeps Intersection's objectives
             control_scale=settings.control_shape_scale,
             goal_scale=settings.goal_shape_scale,
         ),
         (;
             name=:cosh,
-            label="Scaled cosh",
             objective=(d, a) -> 2a^2 * (cosh(d/a)-1),
             control_scale=settings.control_shape_scale,
             goal_scale=settings.goal_shape_scale,
@@ -224,11 +216,15 @@ function run(; overrides=(;))
     schedules = (settings.rho_schedule, settings.complete_rho_schedule)
     all(s -> !isempty(s) && all(ρ -> isfinite(ρ) && ρ > 0, s), schedules) || error("invalid relaxation schedule")
     mkpath(settings.output_dir)
-    directory = mktempdir(
-        settings.output_dir;
-        prefix=Dates.format(now(), "yyyymmdd_HHMMSS") * "_",
-        cleanup=false,
-    )
+    # One directory per run, named by its start time; a second run started in the same second gets
+    # _2, _3, ... so no run overwrites another.
+    stamp = Dates.format(now(), "yyyymmdd_HHMMSS")
+    directory = joinpath(settings.output_dir, stamp)
+    for suffix in Iterators.countfrom(2)
+        ispath(directory) || break
+        directory = joinpath(settings.output_dir, "$(stamp)_$suffix")
+    end
+    mkdir(directory)
     rng = Xoshiro(settings.rng_seed)
     instances, sampling = sample_instances(rng, settings)
     results, metadata = Any[], Any[]
@@ -243,8 +239,8 @@ function run(; overrides=(;))
     )
     variants = filter(v -> v.name in settings.objective_variants, objective_variants(settings))
     modes = [
-        (; name=:fixed_primal, label="Fixed-primal recovery"),
-        (; name=:warmstart, label="Warm-started complete"),
+        (; name=:fixed_primal),
+        (; name=:warmstart),
     ]
     modes = filter(m -> m.name in settings.comparison_modes, modes)
     builders = [
@@ -318,10 +314,13 @@ function run(; overrides=(;))
             metadata,
             (;
                 variant=variant.name,
-                label=variant.label,
                 objective=(; variant.control_scale, variant.goal_scale),
-                # Reduced Scholtes system: rows of R(w; ρ), columns of w = [y; s; u].
+                # Reduced KKT system: variables y, equations F_nc and complementarity pairs; then the
+                # Scholtes system the solver works on: rows of R(w; ρ), columns of w = [y; s; u].
                 reduced=(;
+                    variables=GOOP_kkt_system.n,
+                    equations=GOOP_kkt_system.n_nc,
+                    complementarity=GOOP_kkt_system.n_comp,
                     rows=GOOP_kkt_system.n_nc+2GOOP_kkt_system.n_comp,
                     columns=GOOP_kkt_system.n+GOOP_kkt_system.n_comp+ReducedGOOP._n_u(
                         GOOP_kkt_system,
@@ -334,6 +333,8 @@ function run(; overrides=(;))
                 ],
             ),
         )
+        println("KKT system sizes, $(variant.name) variant:")
+        foreach(line -> println("  ", line), size_lines(last(metadata)))
         # Untimed warm-up on the first instance, so measured trials don't pay first-call (JIT)
         # costs. Not related to the :warmstart comparison mode.
         warmup = instances[1]
@@ -577,6 +578,31 @@ function compact(x)
     "$(isinteger(mantissa) ? Int(mantissa) : mantissa)e$exponent"
 end
 
+"""
+A variant's system sizes, printed after the systems are built and on the report's summary page:
+each KKT system's variables and equations, then the size its solver works on (the reduced
+system's Scholtes form; the complete system's fixed-primal unknowns).
+"""
+function size_lines(metadata)
+    (; reduced) = metadata
+    lines = [
+        @sprintf(
+            "%-18s %5d variables · %d equations + %d complementarity pairs",
+            "reduced",
+            reduced.variables,
+            reduced.equations,
+            reduced.complementarity,
+        ),
+        @sprintf("%-18s (solved in Scholtes form: %d equations × %d unknowns)", "", reduced.rows, reduced.columns),
+    ]
+    for complete in metadata.complete
+        (; rows, columns, full_columns) = complete.dimensions
+        push!(lines, @sprintf("%-18s %5d variables · %d equations", "complete :$(complete.name)", full_columns, rows))
+        push!(lines, @sprintf("%-18s (fixed-primal: %d equations × %d unknowns)", "", rows, columns))
+    end
+    lines
+end
+
 "The acceptance tolerances, printed before the first solve and on the report's summary page."
 tolerance_line(settings) = "Tolerances: reduced ‖K0‖/√m ≤ $(compact(settings.tol)), complete ‖K0‖/√m ≤ $(compact(settings.complete_tol))"
 
@@ -614,16 +640,16 @@ end
 "Header above each solve's ρ-stage table; `label` names the solve and the η₀ this try uses."
 function print_kkt_header(label; io=stdout)
     println(io, "\n[solver exit] $label")
-    println(io, "Residuals /sqrt(m); goal errors and minimum separation in m.")
+    println(io, "Residuals are scaled, ‖·‖/√m; goal errors and minimum separation in m.")
     @printf(
         io,
         "%-9s %-7s %6s %8s %12s %12s %8s %8s %8s  %s\n",
-        "rho",
+        "ρ",
         "status",
         "iters",
         "time_s",
-        "R/sqrt(m)",
-        "K0/sqrt(m)",
+        "‖R‖/√m",
+        "‖K0‖/√m",
         "goal1",
         "goal2",
         "min_sep",
@@ -1347,7 +1373,8 @@ const MONO_FONT = "DejaVu Sans Mono" # ships with Makie, so report.pdf renders t
 
 """
 Plot the geometric mean of `histories` at each trace index (line) with ± one standard
-deviation of the log10 values (band, only where at least two histories contribute).
+deviation of the log10 values (band, only where at least two histories contribute). With a
+single history it draws that history as is, with no band.
 """
 function plot_history!(axis, histories, label, color)
     isempty(histories) && return
@@ -1357,7 +1384,14 @@ function plot_history!(axis, histories, label, color)
             log10(max(h[j], 1e-16)) for
             h in histories if length(h)>=j && isfinite(h[j]) && h[j]>=0
         ]
-        isempty(values) && break
+        # No finite value at this index: leave a gap rather than stop, so x stays the sample index
+        # (the trial pages' ρ stage markers count samples).
+        if isempty(values)
+            push!(average, NaN)
+            push!(deviation, NaN)
+            push!(counts, 0)
+            continue
+        end
         push!(average, mean(values))
         push!(deviation, length(values)>=2 ? std(values) : NaN)
         push!(counts, length(values))
@@ -1384,46 +1418,255 @@ function plot_history!(axis, histories, label, color)
     end
 end
 
-"Intersection's map and component profiles, with reduced and complete iterates side by side."
-function plot_trial_trajectories!(layout, row, check, settings)
-    CM.Label(
-        layout[1, 1:2],
-        "Trial $(row.trial) | circle: start; star: goal; dotted: bound / preference";
-        fontsize=20,
-    )
-    complete = haskey(check, :result) ? check.result : nothing
-    # Subtitles give K0/sqrt(m) of the plotted iterate: the reduced solve's best stage, and the best
-    # stage of the complete check's best try. An exception plots the reduced trajectory and has no K0.
-    reduced_k0 = let stage = row.reduced.stages[row.reduced.best_stage]
-        "K0/sqrt(m) = $(compact(row.reduced.validation.unrelaxed_rms)) at rho = $(compact(stage.ρ))"
+"Line colour of each complete check in the residual plots and histograms; the reduced solve is dark orange."
+const CHECK_COLORS = Dict(
+    (:exact, :fixed_primal) => :navy,
+    (:exact, :warmstart) => :seagreen,
+    (:aggregate, :fixed_primal) => :purple,
+    (:aggregate, :warmstart) => :goldenrod,
+)
+
+"A solve's `field` trace (:unrelaxed for K0, :raw for R) over all its stages, as RMS over `equations` rows."
+function stage_history(stages, field, equations)
+    reduce(vcat, ([getproperty(h, field)/sqrt(equations) for h in s.history] for s in stages))
+end
+
+"""
+Draw `field` (:unrelaxed for K0, :raw for R) for the reduced solves of `rows` and for each complete
+check's kept try, with both tolerances. One row gives that trial's own curves; several give their
+geometric mean ± band (plot_history!), and `counted` adds the number of curves to each label.
+"""
+function plot_residuals!(axis, rows, metadata, field, settings; counted=false)
+    label(name, n) = counted ? "$name (n=$n)" : name
+    reduced = [stage_history(r.reduced.stages, field, metadata.reduced.rows) for r in rows]
+    plot_history!(axis, reduced, label("Reduced", length(reduced)), :darkorange)
+    for formulation in settings.complete_formulations, mode in settings.comparison_modes
+        equations = only(filter(c -> c.name === formulation, metadata.complete)).dimensions.rows
+        # Skipped checks have no result, and a check that threw has no tries.
+        kept = [
+            c.result for r in rows for c in r.checks if
+            c.formulation === formulation && c.mode === mode && haskey(c, :result) && !isempty(c.result.attempts)
+        ]
+        histories = [stage_history(k.attempts[k.best_attempt].stages, field, equations) for k in kept]
+        plot_history!(
+            axis,
+            histories,
+            label(":$formulation, :$mode", length(histories)),
+            CHECK_COLORS[(formulation, mode)],
+        )
     end
-    complete_k0 =
-        isnothing(complete) ? "not run" :
-        isempty(complete.attempts) ? "no K0: the complete solve threw an exception" :
-        let final = complete.attempts[complete.best_attempt], stage = final.stages[final.best_stage]
-            "K0/sqrt(m) = $(compact(final.validation.unrelaxed_rms)) at rho = $(compact(stage.ρ)), try $(final.attempt)"
-        end
-    for (column, name, physical, status, accepted, k0) in (
-        (
-            1,
-            "Reduced",
-            row.reduced.output.z,
-            row.reduced.output.status,
-            row.reduced.accepted,
-            reduced_k0,
-        ),
-        (
-            2,
-            "Complete",
-            isnothing(complete) ? nothing : complete.physical,
-            isnothing(complete) ? :skipped : complete.status,
-            !isnothing(complete) && complete.accepted,
-            complete_k0,
+    CM.hlines!(
+        axis,
+        [settings.tol];
+        color=:darkorange,
+        linestyle=:dot,
+        label="Reduced tolerance ($(compact(settings.tol)))",
+    )
+    # Black: every complete check shares this tolerance, so it takes none of their colours.
+    CM.hlines!(
+        axis,
+        [settings.complete_tol];
+        color=:black,
+        linestyle=:dot,
+        label="Complete tolerance ($(compact(settings.complete_tol)))",
+    )
+end
+
+"Legend of `axis`'s labelled plots at `position`, a cell under the plot, so it covers no part of it."
+function legend_under!(position, axis; nbanks=1)
+    CM.Legend(position, axis; orientation=:horizontal, nbanks, framevisible=false, labelsize=13, tellwidth=false)
+end
+
+"""
+Aggregate-page histogram of one comparison mode over the accepted checks, one colour per complete
+formulation: the fixed-primal scaled residual, or how far :warmstart moved the trajectory. Its
+legend goes at `legend_position`, under the plot.
+"""
+function plot_acceptance_histogram!(position, legend_position, rows, settings, mode)
+    fixed = mode === :fixed_primal
+    # At most 4 x ticks, labelled like the console (9.4e-4): the default labels (9.4×10⁻⁴, ~9 ticks)
+    # overlap whenever the values span less than a decade.
+    axis = CM.Axis(
+        position;
+        xticks=CM.WilkinsonTicks(4),
+        xtickformat=values -> compact.(values),
+        xlabel=fixed ? "Scaled residual (best stage)" : "Scaled trajectory RMS",
+        ylabel="Accepted pairs",
+        title=fixed ? "Fixed-primal recovery" : "Trajectory adjustment (:warmstart)",
+    )
+    nred = count(r -> r.reduced.accepted, rows)
+    plotted = false
+    for formulation in settings.complete_formulations
+        accepted = [
+            c for r in rows for c in r.checks if
+            c.formulation === formulation && c.mode === mode && haskey(c, :result) && c.result.accepted
+        ]
+        isempty(accepted) && continue
+        values = [fixed ? c.result.validation.unrelaxed_rms : c.metrics.rms for c in accepted]
+        CM.hist!(
+            axis,
+            values;
+            bins=max(1, min(10, length(values))),
+            color=(CHECK_COLORS[(formulation, mode)], 0.6),
+            label=":$formulation, $(length(values))/$nred accepted",
+        )
+        plotted = true
+    end
+    if plotted
+        legend_under!(legend_position, axis)
+    else
+        CM.text!(axis, 0.5, 0.5; text="No accepted pairs", space=:relative, align=(:center, :center))
+    end
+end
+
+"""
+Report page for one trial: initial states and verdicts, this trial's residual histories, the
+reduced and :warmstart complete trajectories next to their vehicle separation, then velocity and
+acceleration profiles overlaid (solid: reduced; dashed: complete). A :fixed_primal check keeps the
+reduced trajectory, so it gets a verdict line and residual curves but no trajectory of its own.
+"""
+function trial_page(data, row)
+    (; settings) = data
+    metadata = only(filter(m -> m.variant === row.variant, data.metadata))
+    figure = Intersection.serif_figure(size=(1600, 1600), fontsize=18, figure_padding=30)
+    CM.Label(figure[1, 1], "Trial $(row.trial) | $(row.variant)"; fontsize=26)
+    s1, s2 = data.instances[row.trial].states
+    # The one wording, used once per check, for a check that never ran.
+    skipped = "skipped (reduced solve rejected)"
+    verdicts = [
+        "P1 initial state [px, py, vx, vy]: $(round.(s1; digits=3))",
+        "P2 initial state [px, py, vx, vy]: $(round.(s2; digits=3))",
+        reduced_verdict(row.reduced, settings),
+    ]
+    for check in row.checks
+        formulation, mode = (; name=check.formulation), (; name=check.mode)
+        push!(
+            verdicts,
+            haskey(check, :result) ?
+            complete_verdict(formulation, mode, check.result, check.metrics, check.category, settings) :
+            "→ :$(check.formulation), :$(check.mode) mode $skipped",
+        )
+    end
+    CM.Label(figure[2, 1], join(verdicts, "\n"); font=MONO_FONT, fontsize=14, halign=:left, justification=:left)
+
+    residuals = CM.GridLayout(figure[3, 1])
+    for (column, field, title) in ((1, :unrelaxed, "True KKT residual"), (2, :raw, "Relaxed residual"))
+        axis = CM.Axis(
+            residuals[1, column];
+            xlabel="Trace sample (stages concatenated)",
+            ylabel="Scaled residual",
+            yscale=log10,
+            title,
+        )
+        plot_residuals!(axis, [row], metadata, field, settings)
+        # Both plots have the same entries, so one legend under the pair serves both.
+        column == 1 && legend_under!(residuals[2, 1:2], axis)
+        field === :raw || continue
+        # Relaxed residual only: mark where each reduced ρ stage starts, and its ρ. R jumps up there
+        # because each stage re-initializes γ/φ, s and u. The x limits are frozen so the labels can
+        # sit at a fixed height, in relative coordinates, on the log-scaled y axis.
+        starts = cumsum([1; [length(s.history) for s in row.reduced.stages[1:(end-1)]]]) .- 0.5
+        CM.reset_limits!(axis)
+        (; origin, widths) = axis.finallimits[]
+        CM.xlims!(axis, origin[1], origin[1]+widths[1])
+        CM.vlines!(axis, starts; color=(:darkorange, 0.5), linestyle=:dash, linewidth=1)
+        CM.text!(
+            axis,
+            [CM.Point2f((x-origin[1])/widths[1], 0.03) for x in starts];
+            text=["ρ = $(compact(s.ρ))" for s in row.reduced.stages],
+            space=:relative,
+            rotation=π/2,
+            align=(:left, :top),
+            fontsize=13,
+            color=:chocolate,
+        )
+    end
+
+    # Trajectories: the reduced solution, then each formulation's :warmstart result. Subtitles give
+    # the scaled residual K0/sqrt(m) of the plotted iterate: the reduced solve's best stage, and the
+    # best stage of the complete check's best try. A check that threw keeps the reduced trajectory
+    # and has no residual.
+    subtitle(k0, ρ) = "Scaled residual = $(compact(k0)) at ρ = $(compact(ρ))"
+    # A skipped check says so once, in its status, and has no subtitle. Its reason goes on its own
+    # line, so the title stays as narrow as its map.
+    check_status(check) = haskey(check, :result) ? string(check.result.status) : replace(skipped, " (" => "\n(")
+    function check_subtitle(check)
+        haskey(check, :result) || return ""
+        isempty(check.result.attempts) && return "no residual: the complete solve threw an exception"
+        final = check.result.attempts[check.result.best_attempt]
+        subtitle(final.validation.unrelaxed_rms, final.stages[final.best_stage].ρ)
+    end
+    # A :fixed_primal check keeps the reduced trajectory, so its name, status and residual go under
+    # the reduced map.
+    reduced_stage = row.reduced.stages[row.reduced.best_stage]
+    reduced_lines = [subtitle(row.reduced.validation.unrelaxed_rms, reduced_stage.ρ)]
+    for check in filter(c -> c.mode === :fixed_primal, row.checks)
+        push!(reduced_lines, "Complete :$(check.formulation), :fixed_primal | $(check_status(check))")
+        isempty(check_subtitle(check)) || push!(reduced_lines, check_subtitle(check))
+    end
+    trajectories = NamedTuple[]
+    push!(
+        trajectories,
+        (;
+            name="Reduced",
+            physical=row.reduced.output.z,
+            status=row.reduced.output.status,
+            k0=join(reduced_lines, "\n"),
+            linestyle=:solid,
         ),
     )
+    for check in filter(c -> c.mode === :warmstart, row.checks)
+        complete = haskey(check, :result) ? check.result : nothing
+        k0 = check_subtitle(check)
+        push!(
+            trajectories,
+            (;
+                name="Complete :$(check.formulation), :warmstart",
+                physical=isnothing(complete) ? nothing : complete.physical,
+                status=check_status(check),
+                k0,
+                linestyle=check.formulation === :exact ? :dash : :dashdot,
+            ),
+        )
+    end
+
+    maps = CM.GridLayout(figure[4, 1])
+    separation = CM.Axis(
+        maps[1, length(trajectories)+1];
+        title="Vehicle separation",
+        xlabel="time [s]",
+        ylabel="distance [m]",
+    )
+    profiles = CM.GridLayout(figure[5, 1])
+    panels = [
+        CM.Axis(profiles[1, column]; title, xlabel="time [s]", ylabel) for
+        (column, (title, ylabel)) in enumerate((
+            ("Velocity vx", "vx [m/s]"),
+            ("Velocity vy", "vy [m/s]"),
+            ("Acceleration ax", "ax [m/s^2]"),
+            ("Acceleration ay", "ay [m/s^2]"),
+        ))
+    ]
+    for component in 1:2
+        for player in 1:2
+            bounds = Intersection.player_speed_bounds(player; settings.min_speed, settings.max_speed)
+            CM.hlines!(
+                panels[component],
+                [bounds.lower[component], bounds.upper[component]];
+                color=Intersection.player_plot_color(player),
+                linestyle=:dot,
+            )
+        end
+        limits = filter(isfinite, [settings.control_bounds.lb[component], settings.control_bounds.ub[component]])
+        isempty(limits) || CM.hlines!(panels[2+component], limits; color=:black, linestyle=:dot)
+    end
+    for (column, trajectory) in enumerate(trajectories)
+        (; name, physical, status, k0, linestyle) = trajectory
+        # Only the solver status: Scholtes reports :solved exactly when K0 meets the tolerance that
+        # acceptance uses, so an accepted flag would repeat it (the verdict lines still state it).
         ax = CM.Axis(
-            layout[2, column];
-            title="$name | $status | accepted=$accepted",
+            maps[1, column];
+            title="$name | $status",
             subtitle=k0,
             aspect=CM.DataAspect(),
             xlabel="x [m]",
@@ -1431,29 +1674,10 @@ function plot_trial_trajectories!(layout, row, check, settings)
             xgridvisible=false,
             ygridvisible=false,
         )
-        Intersection.draw_intersection_map!(
-            ax;
-            map_end=settings.map_end,
-            lane_width=settings.lane_width,
-        )
-        CM.limits!(
-            ax,
-            -settings.map_end,
-            settings.map_end,
-            -settings.map_end,
-            settings.map_end,
-        )
-        if isnothing(physical)
-            CM.text!(
-                ax,
-                0.5,
-                0.5;
-                text="Skipped: reduced solve failed",
-                space=:relative,
-                align=(:center, :center),
-            )
-            continue
-        end
+        Intersection.draw_intersection_map!(ax; map_end=settings.map_end, lane_width=settings.lane_width)
+        CM.limits!(ax, -settings.map_end, settings.map_end, -settings.map_end, settings.map_end)
+        # A skipped check has no trajectory; its title already says why.
+        isnothing(physical) && continue
         # Same stand-in `dynamics` as in print_kkt_stage.
         strategies = Intersection.extract_player_strategies(
             physical,
@@ -1461,116 +1685,88 @@ function plot_trial_trajectories!(layout, row, check, settings)
             6settings.planning_horizon,
             (; state_dimension=4, control_dimension=2),
         )
+        Intersection.plot_vehicle_separation!(
+            separation,
+            strategies;
+            timestep=settings.time_step,
+            linestyle,
+            label=name,
+        )
         for player in 1:2
-            xs = strategies[player].xs
+            (; xs, us) = strategies[player]
             color = Intersection.player_plot_color(player)
-            CM.scatterlines!(
-                ax,
-                [x[1] for x in xs],
-                [x[2] for x in xs];
-                color,
-                linewidth=3,
-                markersize=10,
-            )
-            CM.scatter!(
-                ax,
-                [xs[1][1]],
-                [xs[1][2]];
-                color,
-                marker=:circle,
-                markersize=16,
-            )
+            CM.scatterlines!(ax, [x[1] for x in xs], [x[2] for x in xs]; color, linewidth=3, markersize=10)
+            CM.scatter!(ax, [xs[1][1]], [xs[1][2]]; color, marker=:circle, markersize=16)
             goal = (settings.goal_position1, settings.goal_position2)[player]
             CM.scatter!(ax, [goal[1]], [goal[2]]; color, marker=:star5, markersize=22)
-        end
-        velocities = CM.GridLayout(layout[3, column])
-        accelerations = CM.GridLayout(layout[4, column])
-        for component in 1:2
-            direction = component == 1 ? "x" : "y"
-            velocity = CM.Axis(
-                velocities[1, component];
-                title="Velocity v$direction",
-                xlabel="time [s]",
-                ylabel="v$direction [m/s]",
-            )
-            acceleration = CM.Axis(
-                accelerations[1, component];
-                title="Acceleration a$direction",
-                xlabel="time [s]",
-                ylabel="a$direction [m/s^2]",
-            )
-            for player in 1:2
-                color = Intersection.player_plot_color(player)
-                xs, us = strategies[player].xs, strategies[player].us
+            for component in 1:2
                 CM.lines!(
-                    velocity,
+                    panels[component],
                     (0:(length(xs)-1)) .* settings.time_step,
                     [x[component+2] for x in xs];
                     color,
+                    linestyle,
                     linewidth=2,
                 )
                 CM.lines!(
-                    acceleration,
+                    panels[2+component],
                     (0:(length(us)-1)) .* settings.time_step,
                     [u[component] for u in us];
                     color,
+                    linestyle,
                     linewidth=2,
                 )
-                bounds = Intersection.player_speed_bounds(
-                    player;
-                    min_speed=settings.min_speed,
-                    max_speed=settings.max_speed,
-                )
-                CM.hlines!(
-                    velocity,
-                    [bounds.lower[component], bounds.upper[component]];
-                    color,
-                    linestyle=:dot,
-                )
             end
-            limits = filter(
-                isfinite,
-                [
-                    settings.control_bounds.lb[component],
-                    settings.control_bounds.ub[component],
-                ],
-            )
-            isempty(limits) ||
-                CM.hlines!(acceleration, limits; color=:black, linestyle=:dot)
         end
     end
+    CM.hlines!(
+        separation,
+        [settings.collision_avoidance];
+        color=:black,
+        linestyle=:dot,
+        label="Collision avoidance, $(settings.collision_avoidance) m",
+    )
+    CM.axislegend(separation; position=:ct, labelsize=13)
     CM.Legend(
-        layout[5, 1:2],
-        [
-            CM.LineElement(color=Intersection.player_plot_color(player), linewidth=3)
-            for player in 1:2
-        ],
-        ["Player 1", "Player 2"];
+        figure[6, 1],
+        vcat(
+            [CM.LineElement(color=Intersection.player_plot_color(player), linewidth=3) for player in 1:2],
+            [CM.LineElement(color=:gray30, linestyle=t.linestyle, linewidth=2) for t in trajectories],
+        ),
+        vcat("Player 1", "Player 2", [t.name for t in trajectories]);
         orientation=:horizontal,
         framevisible=false,
     )
-    CM.rowsize!(layout, 2, 340)
-    CM.rowsize!(layout, 3, 180)
-    CM.rowsize!(layout, 4, 180)
-    CM.rowgap!(layout, 25)
-    CM.colgap!(layout, 35)
+    CM.Label(
+        figure[7, 1],
+        "Circle: start; star: goal. Dotted: speed bounds in each player's colour, control bounds in black.";
+        fontsize=14,
+    )
+    # Fixed page, map (square, as tall as its row) and separation widths, so the maps and their
+    # separation plot stay together however many trajectories a page has.
+    CM.colsize!(figure.layout, 1, CM.Fixed(1540))
+    foreach(column -> CM.colsize!(maps, column, CM.Fixed(380)), eachindex(trajectories))
+    CM.colsize!(maps, length(trajectories)+1, CM.Fixed(480))
+    CM.rowsize!(figure.layout, 3, 320)  # residual plots and their legend
+    CM.rowsize!(figure.layout, 4, 380)
+    CM.rowsize!(figure.layout, 5, 220)
+    CM.rowgap!(figure.layout, 24)
+    CM.resize_to_layout!(figure)
+    figure
 end
 
 """
 Draw report.pdf from results.jls alone, without building or solving any KKT system: a summary
-page, then one page per variant/formulation/mode.
+page, an aggregate page (all trials' residual histories and the acceptance histograms), then one
+page per objective variant and trial.
 """
 function plot_results(directory)
     data = deserialize(joinpath(directory, "results.jls"))
-    (; settings) = data
-    pages = [summary_page(data, directory)]
-    for variant in settings.objective_variants,
-        formulation in settings.complete_formulations,
-        mode in settings.comparison_modes
-
-        println("Plotting $variant, :$formulation, :$mode mode...")
+    pages = [summary_page(data, directory), aggregate_page(data)]
+    for row in data.results
+        println("Plotting $(row.variant) trial $(row.trial)...")
         flush(stdout)
-        push!(pages, comparison_page(data, variant, formulation, mode))
+        push!(pages, trial_page(data, row))
     end
     path = joinpath(directory, "report.pdf")
     Intersection._with_filesystem_retry(description="report save to $path") do
@@ -1613,7 +1809,7 @@ function save_multipage_pdf(path, figures)
     path
 end
 
-"Text page that opens report.pdf: tolerances, pass counts, dimensions, settings, method notes and failures."
+"Text page that opens report.pdf: tolerances, pass counts, system sizes, settings, method notes and failures."
 function summary_page(data, directory)
     (; settings, results) = data
     figure = Intersection.serif_figure(size=(1600, 1200), fontsize=18, figure_padding=40)
@@ -1636,11 +1832,11 @@ function summary_page(data, directory)
     label!("Intersection KKT comparison: $(settings.num_instances) instances per objective variant"; fontsize=32)
     label!("Run $(basename(directory)); Julia $(data.julia), $(data.blas_threads) BLAS threads.")
     monospace!(tolerance_line(settings))
+    paragraph!(
+        "Scaled residual: ‖K0‖/√m, the norm of the unrelaxed KKT residual (ρ = 0) divided by √m, m = number of equations. The scaled relaxed residual ‖R‖/√m is the same at the stage's ρ.",
+    )
 
     heading!("Pass counts")
-    buffer = IOBuffer()
-    print_final_summary(results, settings; io=buffer)
-    monospace!(strip(String(take!(buffer))))
     lines = [@sprintf("%-10s %-11s %-19s %8s %21s %14s", "objective", "complete", "mode", "reduced", "conditional complete", "overall pairs")]
     for variant in settings.objective_variants,
         formulation in settings.complete_formulations,
@@ -1658,15 +1854,15 @@ function summary_page(data, directory)
         n = length(variant_rows)
         push!(lines, @sprintf("%-10s %-11s %-19s %8s %21s %14s", variant, ":$formulation", ":$mode mode", "$nred/$n", "$passed/$nred", "$passed/$n"))
     end
+    push!(
+        lines,
+        "\nreduced: accepted / trials; conditional complete: accepted checks / accepted reduced solves;",
+        "overall pairs: accepted checks / trials. A failed check does not prove incompatibility.",
+    )
     monospace!(join(lines, "\n"))
 
-    heading!("Dimensions")
-    lines = [@sprintf("%-10s %-11s %14s %14s %30s", "objective", "system", "rows retained", "full unknowns", "unknowns with physical fixed")]
-    for metadata in data.metadata, formulation in metadata.complete
-        d = formulation.dimensions
-        push!(lines, @sprintf("%-10s %-11s %14d %14d %30d", metadata.variant, ":$(formulation.name)", d.rows, d.full_columns, d.columns))
-    end
-    monospace!(join(lines, "\n"))
+    heading!("System sizes")
+    monospace!(join(["$(m.variant):\n  " * join(size_lines(m), "\n  ") for m in data.metadata], "\n"))
 
     heading!("Settings")
     entries = ["$k = $v" for (k, v) in pairs(settings) if k !== :output_dir]
@@ -1696,13 +1892,13 @@ function summary_page(data, directory)
         "Both systems use identical physical ordering: player, time knot, [px, py, vx, vy, ax, ay]. Preference slacks map by player/source preference/component, not flat index order. The innermost original equality and inequality multipliers also map by player and original row. All other equality/induced multipliers start at zero; remaining sign-constrained variables use positive_seed, followed by auxiliary-slack initialization from their defining expressions. Full source/destination index maps and labels are saved in results.jls.",
     )
     paragraph!(
-        "Every solve uses Scholtes; each rho stage's inner loop stops at R/sqrt(m) < min(rho, $(settings.inner_ρ_tol)), at max_inner_iters, or on a line-search stall, unless K0 reaches its tolerance first. :fixed_primal recovery solves the complete system with the physical trajectory as a parameter, so only the remaining columns move; nonnegative coordinates stay inside the sign box. Exact complete equations have no epsilon schedule; aggregate uses complete_rho_schedule as legacy epsilon. All complete rows remain after fixing physical columns.",
+        "Every solve uses Scholtes; each ρ stage's inner loop stops once its scaled relaxed residual drops below min(ρ, $(settings.inner_ρ_tol)), at max_inner_iters, or on a line-search stall, unless the scaled residual reaches its tolerance first. :fixed_primal recovery solves the complete system with the physical trajectory as a parameter, so only the remaining columns move; nonnegative coordinates stay inside the sign box. Exact complete equations have no ε schedule; aggregate uses complete_rho_schedule as the legacy ε. All complete rows remain after fixing physical columns.",
     )
     paragraph!(
-        "Residual curves show the full relaxed and unrelaxed L2 residuals divided by sqrt(number of equations) on logarithmic axes, concatenated across stages, against solver-trace samples (Scholtes iterates). Reduced curves include all sampled trials; complete curves include all attempted checks, using each check's kept (best) try. Histograms use accepted pairs only. Curves use available samples only: no padding after a run ends. Lines are geometric means; bands are mean +/- one sample standard deviation in log10 residual, drawn at indices with at least two contributors. Stage endpoints and raw histories are in results.jls. Each comparison page also shows every trial's reduced and complete position, velocity, and acceleration profiles side by side, including failed returned iterates with explicit status labels.",
+        "Residual curves show the scaled relaxed and unrelaxed residuals on logarithmic axes, concatenated across stages, against solver-trace samples (Scholtes iterates). Reduced curves include all sampled trials; complete curves include all attempted checks, using each check's kept (best) try. Histograms use accepted pairs only. Curves use available samples only: no padding after a run ends, and a gap where a sample is not finite. On the aggregate page, lines are geometric means and bands are mean +/- one sample standard deviation in log10 residual, drawn at indices with at least two contributors. Stage endpoints and raw histories are in results.jls. Each trial page shows that trial's own curves (the relaxed-residual plot marks where each reduced ρ stage starts), its reduced and :warmstart complete trajectories next to their vehicle separation, and their velocity and acceleration profiles overlaid (solid: reduced; dashed: complete), including failed returned iterates with explicit status labels.",
     )
     paragraph!(
-        "A solve is accepted iff its unrelaxed KKT residual K0/sqrt(m) is at most $(settings.tol) (reduced) or $(settings.complete_tol) (complete); the solver's exit status is not required. A rho chain runs all its stages and is judged at the stage with the lowest K0, and a complete check keeps its best try (retries restart with the next eta); that iterate is the one kept, compared and plotted. Fixed trajectories retain the reduced solution's finite physical residual; these rows are not removed. The full residual includes stationarity, equality, complementarity, and auxiliary-slack equations. The relaxed residual, largest residual entry, multiplier signs and original physical feasibility are recorded as diagnostics only. Failures do not prove incompatibility.",
+        "A solve is accepted iff its scaled residual is at most $(settings.tol) (reduced) or $(settings.complete_tol) (complete); the solver's exit status is not required. A ρ chain runs all its stages and is judged at the stage with the lowest scaled residual, and a complete check keeps its best try (retries restart with the next η); that iterate is the one kept, compared and plotted. Fixed trajectories retain the reduced solution's finite physical residual; these rows are not removed. The full residual includes stationarity, equality, complementarity, and auxiliary-slack equations. The scaled relaxed residual, largest residual entry, multiplier signs and original physical feasibility are recorded as diagnostics only. Failures do not prove incompatibility.",
     )
     paragraph!(
         ":warmstart complete times are refinement costs. Construction and independent warm-ups are excluded. Reported solve seconds subtract Julia's measured compilation and recompilation time from wall time (clamped at zero); wall and compilation seconds are saved separately, and nonzero measured compilation is flagged below. Both starts and every attempt/stage are saved. No warm-up or previous-trial solution seeds measured trials.",
@@ -1721,7 +1917,7 @@ function summary_page(data, directory)
         )
         reduced.accepted || push!(
             failures,
-            "$(row.variant) trial $(row.trial): reduced rejected; status=$(reduced.output.status), reason=$(reduced.output.termination_reason), R=$(number(reduced.validation.relaxed_rms)), K0=$(number(reduced.validation.unrelaxed_rms)), physical equality=$(number(reduced.validation.primal.equality_max)), inequality=$(number(reduced.validation.primal.inequality_violation))",
+            "$(row.variant) trial $(row.trial): reduced rejected; status=$(reduced.output.status), reason=$(reduced.output.termination_reason), ‖R‖/√m=$(number(reduced.validation.relaxed_rms)), ‖K0‖/√m=$(number(reduced.validation.unrelaxed_rms)), physical equality=$(number(reduced.validation.primal.equality_max)), inequality=$(number(reduced.validation.primal.inequality_violation))",
         )
         for check in row.checks
             haskey(check, :result) || continue
@@ -1729,7 +1925,7 @@ function summary_page(data, directory)
             name = "$(row.variant) trial $(row.trial), :$(check.formulation), :$(check.mode) mode"
             complete.accepted || push!(
                 failures,
-                "$name: $(complete.status), $(complete.reason); R=$(number(complete.validation.relaxed_rms)), K0=$(number(complete.validation.unrelaxed_rms)), physical equality=$(number(complete.validation.primal.equality_max)), inequality=$(number(complete.validation.primal.inequality_violation)), attempts=$(length(complete.attempts))",
+                "$name: $(complete.status), $(complete.reason); ‖R‖/√m=$(number(complete.validation.relaxed_rms)), ‖K0‖/√m=$(number(complete.validation.unrelaxed_rms)), physical equality=$(number(complete.validation.primal.equality_max)), inequality=$(number(complete.validation.primal.inequality_violation)), attempts=$(length(complete.attempts))",
             )
             # The full backtrace stays in results.jls; the page shows its first lines.
             haskey(complete, :error) &&
@@ -1759,81 +1955,38 @@ function summary_page(data, directory)
     figure
 end
 
-"One report page: residual histories, the acceptance histogram, then every trial's trajectories."
-function comparison_page(data, variant, formulation, mode)
+"""
+Report page 2: for each objective variant, every trial's residual histories (geometric mean ±
+band; reduced and each complete check) and the acceptance histograms of each comparison mode.
+"""
+function aggregate_page(data)
     (; settings, results) = data
-    rows = filter(r->r.variant===variant, results)
-    pairs = [
-        (; row, check) for row in rows for check in row.checks if
-                                           check.formulation===formulation && check.mode===mode
-    ]
-    nred = count(r->r.reduced.accepted, rows)
-    successful = filter(p->haskey(p.check, :result) && p.check.result.accepted, pairs)
-    attempted = filter(p -> haskey(p.check, :result) && !isempty(p.check.result.attempts), pairs)
-    figure = Intersection.serif_figure(size=(1600, 480+900length(rows)), fontsize=18, figure_padding=30)
-    CM.Label(figure[1, 1:2], "$variant | :$formulation, :$mode mode"; fontsize=26)
-    convergence = CM.GridLayout(figure[2, 1:2])
-    metadata = only(filter(m->m.variant===variant, data.metadata))
-    complete_rows = only(filter(p->p.name===formulation, metadata.complete)).dimensions.rows
-    for (column, field, title) in ((1, :unrelaxed, "True KKT residual"), (2, :raw, "Relaxed residual"))
-        axis = CM.Axis(
-            convergence[1, column];
-            xlabel="Trace sample (stages concatenated)",
-            ylabel="Residual / sqrt(m)",
-            yscale=log10,
-            title="$title\nReduced n=$(length(rows)); complete n=$(length(attempted))",
-        )
-        histories = [
-            reduce(
-                vcat,
-                (
-                    [getproperty(h, field)/sqrt(complete_rows) for h in s.history] for
-                    s in p.check.result.attempts[p.check.result.best_attempt].stages
-                ),
-            ) for p in attempted
-        ]
-        reduced_histories = [
-            reduce(
-                vcat,
-                ([getproperty(h, field)/sqrt(metadata.reduced.rows) for h in s.history] for s in row.reduced.stages),
-            ) for row in rows
-        ]
-        if isempty(histories) && isempty(reduced_histories)
-            CM.text!(axis, 0.5, 0.5; text="No solver histories", space=:relative, align=(:center, :center))
-        else
-            plot_history!(axis, histories, "Complete", :navy)
-            plot_history!(axis, reduced_histories, "Reduced", :darkorange)
-            CM.hlines!(axis, [settings.tol]; color=:darkorange, linestyle=:dot)
-            CM.hlines!(axis, [settings.complete_tol]; color=:navy, linestyle=:dot)
-            CM.axislegend(axis; position=:rt, labelsize=14)
+    variants = settings.objective_variants
+    figure = Intersection.serif_figure(size=(1600, 100+420length(variants)), fontsize=18, figure_padding=30)
+    CM.Label(figure[1, 1], "All trials: residual histories and acceptance"; fontsize=26)
+    for (index, variant) in enumerate(variants)
+        rows = filter(r -> r.variant === variant, results)
+        metadata = only(filter(m -> m.variant === variant, data.metadata))
+        layout = CM.GridLayout(figure[index+1, 1])
+        for (column, field, title) in ((1, :unrelaxed, "True KKT residual"), (2, :raw, "Relaxed residual"))
+            axis = CM.Axis(
+                layout[1, column];
+                xlabel="Trace sample (stages concatenated)",
+                ylabel="Scaled residual",
+                yscale=log10,
+                title="$variant | $title",
+            )
+            plot_residuals!(axis, rows, metadata, field, settings; counted=true)
+            # Both plots have the same entries, so one legend under the pair serves both.
+            column == 1 && legend_under!(layout[2, 1:2], axis; nbanks=2)
         end
+        for (column, mode) in enumerate(settings.comparison_modes)
+            plot_acceptance_histogram!(layout[1, 2+column], layout[2, 2+column], rows, settings, mode)
+        end
+        CM.rowsize!(layout, 1, 320)
     end
-    # At most 4 x ticks, labelled like the console (9.4e-4): the default labels (9.4×10⁻⁴, ~9 ticks)
-    # overlap whenever the values span less than a decade.
-    second = CM.Axis(
-        convergence[1, 3],
-        xticks=CM.WilkinsonTicks(4),
-        xtickformat=values -> compact.(values),
-        xlabel=mode===:fixed_primal ? "Unrelaxed residual RMS (best stage)" : "Scaled trajectory RMS",
-        ylabel="Accepted pairs",
-        title=mode===:fixed_primal ? "Fixed-primal recovery $(length(successful))/$nred" :
-              "Trajectory adjustment (successful pairs)",
-    )
-    values = [
-        mode===:fixed_primal ? p.check.result.validation.unrelaxed_rms : p.check.metrics.rms for
-        p in successful
-    ]
-    if isempty(values)
-        CM.text!(second, 0.5, 0.5; text="No accepted pairs", space=:relative, align=(:center, :center))
-    else
-        CM.hist!(second, values; bins=max(1, min(10, length(values))), color=:steelblue)
-    end
-    for (index, row) in enumerate(rows)
-        check = only(filter(c -> c.formulation === formulation && c.mode === mode, row.checks))
-        layout = CM.GridLayout(figure[index+2, 1:2])
-        plot_trial_trajectories!(layout, row, check, settings)
-    end
-    CM.rowsize!(figure.layout, 2, 300)
+    # Nothing else fixes the page width, so without this resize_to_layout! shrinks it to the minimum.
+    CM.colsize!(figure.layout, 1, CM.Fixed(1540))
     CM.rowgap!(figure.layout, 30)
     CM.resize_to_layout!(figure)
     figure

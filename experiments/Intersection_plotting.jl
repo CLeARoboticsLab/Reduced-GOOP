@@ -118,10 +118,7 @@ function intersection_report_figure(page)
 
     ax_sep = make_axis(5, 3, "Vehicle separation", "distance [m]")
     for (profiles, style) in ((warm, :dash), (strategy, :solid))
-        n = min(length(profiles[1].xs), length(profiles[2].xs))
-        distances = [sqrt(sum(abs2, profiles[1].xs[t][1:2] - profiles[2].xs[t][1:2])) for t in 1:n]
-        CairoMakie.lines!(ax_sep, (0:(n - 1)) .* page.timestep, distances;
-            color = :gray30, linestyle = style, linewidth = 2)
+        plot_vehicle_separation!(ax_sep, profiles; timestep = page.timestep, linestyle = style)
     end
     CairoMakie.hlines!(ax_sep, [page.collision_avoidance]; color = :black, linestyle = :dot)
     for component in 1:2
@@ -168,6 +165,18 @@ function intersection_report_figure(page)
     CairoMakie.rowgap!(fig.layout, 22)
     CairoMakie.colgap!(fig.layout, 28)
     return fig
+end
+
+"""
+Plot the distance between the two players' positions at each knot against time, in the
+report's separation style (gray line; `linestyle` tells trajectories apart, `label` names it in
+a legend). Callers draw the collision-avoidance distance themselves.
+"""
+function plot_vehicle_separation!(ax, profiles; timestep, linestyle = :solid, label = nothing)
+    n = min(length(profiles[1].xs), length(profiles[2].xs))
+    distances = [sqrt(sum(abs2, profiles[1].xs[t][1:2] - profiles[2].xs[t][1:2])) for t in 1:n]
+    CairoMakie.lines!(ax, (0:(n - 1)) .* timestep, distances;
+        color = :gray30, linestyle, linewidth = 2, label)
 end
 
 function draw_intersection_map!(ax; map_end, lane_width, offset = 0.2)
