@@ -144,6 +144,56 @@ function get_setup(
     (; problem, flatten_parameters)
 end
 
+# Two players with planar double-integrator dynamics: state [px, py, vx, vy] and control [ax, ay] at
+# every knot, so a player's slice of the stacked trajectory z is (4 + 2) × planning_horizon long.
+const NUM_PLAYERS = 2
+const STATE_DIMENSION = 4
+const CONTROL_DIMENSION = 2
+
+"Intersection's planar double-integrator dynamics at the settings' time step."
+function intersection_dynamics(settings)
+    Intersection.build_intersection_dynamics(
+        Intersection.PlanarDoubleIntegrator();
+        Δt=settings.time_step,
+        state_dimension=STATE_DIMENSION,
+        control_dimension=CONTROL_DIMENSION,
+    )
+end
+
+"Each player's states `xs` and controls `us` from a stacked trajectory z."
+function player_strategies(z, settings)
+    # extract_player_strategies reads only these two dimensions from its `dynamics` argument.
+    Intersection.extract_player_strategies(
+        z,
+        NUM_PLAYERS,
+        (STATE_DIMENSION+CONTROL_DIMENSION) * settings.planning_horizon,
+        (; state_dimension=STATE_DIMENSION, control_dimension=CONTROL_DIMENSION),
+    )
+end
+
+"θ and Intersection's yielding initial guess for one sampled instance; the warm-up and every trial start here."
+function instance_inputs(instance, flatten_parameters, dynamics, settings)
+    initial_state1, initial_state2 = instance.states
+    (; θ) = Intersection.build_instance_parameters(
+        flatten_parameters,
+        initial_state1,
+        initial_state2,
+        settings.goal_position1,
+        settings.goal_position2,
+        settings.obstacle_position,
+    )
+    (; warmstart_solution) = Intersection.build_yielding_warmstart(
+        settings.planning_horizon,
+        dynamics,
+        initial_state1,
+        initial_state2,
+        settings.goal_position1;
+        settings.min_speed,
+        settings.max_speed,
+    )
+    (; θ, initial_guess=warmstart_solution)
+end
+
 # ── Settings and experiment driver ─────────────────────────────────────────────
 
 """
@@ -207,7 +257,10 @@ default_settings() = (;
     output_dir=joinpath(dirname(@__DIR__), "output", "intersection_kkt_comparison"),
 )
 
-function run(; overrides=(;))
+# Driver steps, called by `run` in this order; each prints its own console lines.
+
+"Default settings merged with `overrides`, then checked: an unknown name or an empty schedule is an error."
+function validated_settings(overrides)
     defaults = default_settings()
     unknown = setdiff(keys(overrides), keys(defaults))
     isempty(unknown) || error("Unknown setting(s) in overrides: $(join(unknown, ", "))")
@@ -215,21 +268,232 @@ function run(; overrides=(;))
     settings.num_instances > 0 && settings.planning_horizon >= 2 || error("invalid num_instances or planning_horizon")
     schedules = (settings.rho_schedule, settings.complete_rho_schedule)
     all(s -> !isempty(s) && all(ρ -> isfinite(ρ) && ρ > 0, s), schedules) || error("invalid relaxation schedule")
-    mkpath(settings.output_dir)
-    # One directory per run, named by its start time; a second run started in the same second gets
-    # _2, _3, ... so no run overwrites another.
+    settings
+end
+
+"""
+A new directory for this run, named by its start time; a second run started in the same second gets
+_2, _3, ... so no run overwrites another.
+"""
+function new_run_directory(output_dir)
+    mkpath(output_dir)
     stamp = Dates.format(now(), "yyyymmdd_HHMMSS")
-    directory = joinpath(settings.output_dir, stamp)
+    directory = joinpath(output_dir, stamp)
     for suffix in Iterators.countfrom(2)
         ispath(directory) || break
-        directory = joinpath(settings.output_dir, "$(stamp)_$suffix")
+        directory = joinpath(output_dir, "$(stamp)_$suffix")
     end
     mkdir(directory)
-    rng = Xoshiro(settings.rng_seed)
-    instances, sampling = sample_instances(rng, settings)
+end
+
+"""
+One objective variant's problem and systems: the reduced KKT system, then for each complete
+formulation its KKT system, σ targets, fixed-primal system and variable mapping. Prints the system
+sizes, and returns everything with the variant's results.jls metadata (sizes, construction times).
+"""
+function build_systems(variant, builders, dynamics, settings)
+    (; problem, flatten_parameters) = get_setup(
+        NUM_PLAYERS;
+        dynamics,
+        settings.control_bounds,
+        settings.planning_horizon,
+        settings.collision_avoidance,
+        settings.min_speed,
+        settings.max_speed,
+        settings.map_end,
+        settings.lane_width,
+        variant,
+    )
+    println("Building reduced KKT system for $(variant.name) variant...")
+    flush(stdout)
+    reduced_construction = @timed ReducedGOOP.generate_slacked_reduced_kkt_system(
+        problem;
+        complementarity=:scholtes,
+        codegen=:fast_differentiation,
+    )
+    reduced_kkt = reduced_construction.value
+    formulations = map(builders) do builder
+        println("Building :$(builder.name) complete KKT system for $(variant.name) variant...")
+        flush(stdout)
+        complete_construction = @timed builder.build(problem)
+        complete_kkt = complete_construction.value
+        slack_targets = compile_slack_targets(complete_kkt)
+        fixed = fixed_primal_formulation(complete_kkt)
+        mapping = variable_mapping(reduced_kkt, complete_kkt)
+        # The exact system is square; the fixed-primal Jacobian keeps every row but drops the
+        # physical columns.
+        builder.name === :exact && @assert complete_kkt.n == complete_kkt.n_nc
+        @assert size(fixed.system.Jnc_buf) == (complete_kkt.n_nc, complete_kkt.n-length(complete_kkt.primal_dims))
+        (;
+            builder.name,
+            complete_kkt,
+            slack_targets,
+            fixed,
+            mapping,
+            construction_seconds=complete_construction.time,
+        )
+    end
+    metadata = (;
+        variant=variant.name,
+        objective=(; variant.control_scale, variant.goal_scale),
+        # Reduced KKT system: variables y, equations F_nc and complementarity pairs; then the
+        # Scholtes system the solver works on: rows of R(w; ρ), columns of w = [y; s; u].
+        reduced=(;
+            variables=reduced_kkt.n,
+            equations=reduced_kkt.n_nc,
+            complementarity=reduced_kkt.n_comp,
+            rows=reduced_kkt.n_nc+2reduced_kkt.n_comp,
+            columns=reduced_kkt.n+reduced_kkt.n_comp+ReducedGOOP._n_u(reduced_kkt),
+            construction_seconds=reduced_construction.time,
+        ),
+        complete=[(; p.name, p.fixed.dimensions, p.mapping, p.construction_seconds) for p in formulations],
+    )
+    println("KKT system sizes, $(variant.name) variant:")
+    foreach(line -> println("  ", line), size_lines(metadata))
+    (; variant, problem, flatten_parameters, reduced_kkt, formulations, metadata)
+end
+
+"""
+Untimed JIT warm-up on `instance`, so measured trials don't pay first-call compilation: one reduced
+solve and one try of every complete check, results discarded. Not related to the :warmstart mode.
+"""
+function jit_warmup(systems, modes, instance, dynamics, settings)
+    (; variant, problem, flatten_parameters, reduced_kkt, formulations) = systems
+    (; θ, initial_guess) = instance_inputs(instance, flatten_parameters, dynamics, settings)
+    print("Warm-up for $(variant.name) (untimed; compiles every solver path; results discarded)... ")
+    flush(stdout)
+    seconds = @elapsed begin
+        context = "warm-up, $(variant.name)"
+        reduced = solve_scholtes_reduced(reduced_kkt, problem, θ, initial_guess, settings; context, io=devnull)
+        for formulation in formulations, mode in modes
+            start = complete_initialization(formulation, reduced.output, θ, settings)
+            solve_scholtes_complete(
+                formulation,
+                mode,
+                problem,
+                θ,
+                reduced.output.z,
+                start,
+                settings;
+                retry_values=Float64[],
+                context,
+                io=devnull,
+            )
+        end
+    end
+    println("done in $(round(seconds; digits=1)) s")
+end
+
+"""
+One trial's reduced solve: print the trial banner, solve from Intersection's yielding initial guess,
+print the verdict, and return the trial's record. Its `checks` start empty; `run` fills them.
+"""
+function solve_reduced_kkt(systems, trial, instance, dynamics, num_checks, settings)
+    (; variant, problem, flatten_parameters, reduced_kkt) = systems
+    println("\n══ Trial $trial/$(settings.num_instances) · $(variant.name) ══")
+    initial_state1, initial_state2 = instance.states
+    println("  P1 initial state [px, py, vx, vy]: $(round.(initial_state1; digits=3))")
+    println("  P2 initial state [px, py, vx, vy]: $(round.(initial_state2; digits=3))")
+    flush(stdout)
+    (; θ, initial_guess) = instance_inputs(instance, flatten_parameters, dynamics, settings)
+    context = trial_context(trial, variant.name)
+    reduced = solve_scholtes_reduced(reduced_kkt, problem, θ, initial_guess, settings; context)
+    println(
+        reduced_verdict(reduced, settings),
+        reduced.accepted ? " Running its $num_checks complete checks." : " Skipping its $num_checks complete checks.",
+    )
+    flush(stdout)
+    (;
+        trial,
+        variant=variant.name,
+        θ,
+        initial=copy(initial_guess),
+        strategies=player_strategies(reduced.output.z, settings),
+        reduced,
+        checks=Any[],
+    )
+end
+
+"Label naming a trial in the solver tables."
+trial_context(trial, variant_name) = "trial $trial, $variant_name"
+
+"""
+One complete check of a trial: start the complete system from the accepted reduced solution, solve
+it in `mode`, print the verdict and return the check. A rejected reduced solve skips the check.
+"""
+function check_complete_kkt(record, systems, formulation, mode, settings)
+    (; θ, reduced) = record
+    reduced.accepted || return (;
+        formulation=formulation.name,
+        mode=mode.name,
+        category=:reduced_failed,
+        reason="Best reduced stage did not pass acceptance",
+    )
+    start = complete_initialization(formulation, reduced.output, θ, settings)
+    complete = try
+        solve_scholtes_complete(
+            formulation,
+            mode,
+            systems.problem,
+            θ,
+            reduced.output.z,
+            start,
+            settings;
+            context=trial_context(record.trial, record.variant),
+        )
+    catch err
+        validation = merge(
+            reduced.validation,
+            (; accepted=false, relaxed_rms=NaN, unrelaxed_rms=NaN, max_abs_residual=NaN),
+        )
+        (;
+            accepted=false,
+            attempts=Any[],
+            validation,
+            physical=copy(reduced.output.z),
+            solution=start,
+            status=:exception,
+            reason=:exception,
+            error=sprint(showerror, err, catch_backtrace()),
+            iterations=0,
+            seconds=0.0,
+            compile_seconds=0.0,
+        )
+    end
+    metrics = trajectory_metrics(reduced.output.z, complete.physical, settings)
+    # :numerical_failure        complete solve not accepted (no conclusion either way)
+    # :fixed_primal_compatible  fixed-primal solve accepted
+    # :small_adjustment         :warmstart accepted; trajectory moved within small_rms/small_max
+    # :substantial_adjustment   :warmstart accepted; trajectory moved more
+    # (:reduced_failed, above, marks checks skipped because the reduced solve failed.)
+    category =
+        !complete.accepted ? :numerical_failure :
+        mode.name === :fixed_primal ? :fixed_primal_compatible :
+        metrics.small ? :small_adjustment : :substantial_adjustment
+    println(complete_verdict(formulation, mode, complete, metrics, category, settings))
+    (;
+        formulation=formulation.name,
+        mode=mode.name,
+        result=complete,
+        metrics,
+        category,
+    )
+end
+
+"""
+Run the experiment described in the module docstring: sample the instances, then for each objective
+variant build its systems, warm up, and solve every trial's reduced system and complete checks.
+Writes results.jls (after every check) and report.pdf to a new directory under `output_dir`, and
+returns the run's directory, settings, instances, results and metadata.
+"""
+function run(; overrides=(;))
+    settings = validated_settings(overrides)
+    directory = new_run_directory(settings.output_dir)
+    instances, sampling = sample_instances(Xoshiro(settings.rng_seed), settings)
     results, metadata = Any[], Any[]
+    save() = save_results(directory, settings, instances, sampling, metadata, results)
     # Save before checking the sample count, so the rejection records survive a sampling failure.
-    save_results(directory, settings, instances, sampling, metadata, results)
+    save()
     length(instances) == settings.num_instances || error(
         "Sampling exhausted $(settings.max_sampling_attempts) attempts; rejection records saved in $directory",
     )
@@ -238,282 +502,36 @@ function run(; overrides=(;))
         "$((settings.planning_horizon-1)*settings.time_step) seconds. Output: $directory",
     )
     variants = filter(v -> v.name in settings.objective_variants, objective_variants(settings))
-    modes = [
-        (; name=:fixed_primal),
-        (; name=:warmstart),
-    ]
-    modes = filter(m -> m.name in settings.comparison_modes, modes)
+    modes = filter(m -> m.name in settings.comparison_modes, [(; name=:fixed_primal), (; name=:warmstart)])
     builders = [
         (; name=:aggregate, build=ReducedGOOP.generate_scholtes_complete_kkt_system),
         (; name=:exact, build=ReducedGOOP.generated_exact_complete_kkt_system),
     ]
     builders = filter(b -> b.name in settings.complete_formulations, builders)
-    total = length(variants)*length(instances)*length(builders)*length(modes)
-    done = 0
-    (; num_instances, planning_horizon, time_step, control_bounds, collision_avoidance) = settings
-    (; min_speed, max_speed, map_end, lane_width, goal_position1, goal_position2, obstacle_position) = settings
-    num_players = 2
-    dynamics_model = Intersection.PlanarDoubleIntegrator()
-    state_dimension = 4
-    control_dimension = 2
-    Δt = time_step
-    dynamics_dimension = state_dimension + control_dimension
-    primal_dimension = dynamics_dimension * planning_horizon # per player
-    dynamics = Intersection.build_intersection_dynamics(
-        dynamics_model;
-        Δt,
-        state_dimension,
-        control_dimension,
-    )
+    num_checks = length(builders) * length(modes)
+    total, done = length(variants) * length(instances) * num_checks, 0
+    dynamics = intersection_dynamics(settings)
     println(tolerance_line(settings))
     for variant in variants
-        (; problem, flatten_parameters) = get_setup(
-            num_players;
-            dynamics,
-            control_bounds,
-            planning_horizon,
-            collision_avoidance,
-            min_speed,
-            max_speed,
-            map_end,
-            lane_width,
-            variant,
-        )
-        println("Building reduced KKT system for $(variant.name) variant...")
-        flush(stdout)
-        kkt_construction = @timed ReducedGOOP.generate_slacked_reduced_kkt_system(
-            problem;
-            complementarity=:scholtes,
-            codegen=:fast_differentiation,
-        )
-        GOOP_kkt_system = kkt_construction.value
-        formulations = map(builders) do builder
-            println(
-                "Building :$(builder.name) complete KKT system for $(variant.name) variant...",
-            )
-            flush(stdout)
-            built = @timed builder.build(problem)
-            kkt = built.value
-            slack_targets = compile_slack_targets(kkt)
-            fixed = fixed_primal_formulation(kkt)
-            mapping = variable_mapping(GOOP_kkt_system, kkt)
-            # The exact system is square; the fixed-primal Jacobian keeps every row but drops
-            # the physical columns.
-            builder.name === :exact && @assert kkt.n == kkt.n_nc
-            @assert size(fixed.system.Jnc_buf) == (kkt.n_nc, kkt.n-length(kkt.primal_dims))
-            (;
-                builder.name,
-                kkt,
-                slack_targets,
-                fixed,
-                mapping,
-                construction_seconds=built.time,
-            )
-        end
-        push!(
-            metadata,
-            (;
-                variant=variant.name,
-                objective=(; variant.control_scale, variant.goal_scale),
-                # Reduced KKT system: variables y, equations F_nc and complementarity pairs; then the
-                # Scholtes system the solver works on: rows of R(w; ρ), columns of w = [y; s; u].
-                reduced=(;
-                    variables=GOOP_kkt_system.n,
-                    equations=GOOP_kkt_system.n_nc,
-                    complementarity=GOOP_kkt_system.n_comp,
-                    rows=GOOP_kkt_system.n_nc+2GOOP_kkt_system.n_comp,
-                    columns=GOOP_kkt_system.n+GOOP_kkt_system.n_comp+ReducedGOOP._n_u(
-                        GOOP_kkt_system,
-                    ),
-                    construction_seconds=kkt_construction.time,
-                ),
-                complete=[
-                    (; p.name, p.fixed.dimensions, p.mapping, p.construction_seconds) for
-                    p in formulations
-                ],
-            ),
-        )
-        println("KKT system sizes, $(variant.name) variant:")
-        foreach(line -> println("  ", line), size_lines(last(metadata)))
-        # Untimed warm-up on the first instance, so measured trials don't pay first-call (JIT)
-        # costs. Not related to the :warmstart comparison mode.
-        warmup = instances[1]
-        initial_state1, initial_state2 = warmup.states
-        (; θ) = Intersection.build_instance_parameters(
-            flatten_parameters,
-            initial_state1,
-            initial_state2,
-            goal_position1,
-            goal_position2,
-            obstacle_position,
-        )
-        (; warmstart_solution) = Intersection.build_yielding_warmstart(
-            planning_horizon,
-            dynamics,
-            initial_state1,
-            initial_state2,
-            goal_position1;
-            min_speed,
-            max_speed,
-        )
-        print("Warm-up for $(variant.name) (untimed; compiles every solver path; results discarded)... ")
-        flush(stdout)
-        warmup_seconds = @elapsed begin
-            context = "warm-up, $(variant.name)"
-            warm_reduced =
-                solve_reduced(GOOP_kkt_system, problem, θ, warmstart_solution, settings; context, io=devnull)
-            for formulation in formulations, mode in modes
-                initial_complete =
-                    complete_initialization(formulation, warm_reduced.output, θ, settings)
-                solve_complete(
-                    formulation,
-                    mode,
-                    problem,
-                    θ,
-                    warm_reduced.output.z,
-                    initial_complete,
-                    settings;
-                    retry_values=Float64[],
-                    context,
-                    io=devnull,
-                )
-            end
-        end
-        println("done in $(round(warmup_seconds; digits=1)) s")
+        systems = build_systems(variant, builders, dynamics, settings)
+        push!(metadata, systems.metadata)
+        jit_warmup(systems, modes, first(instances), dynamics, settings)
         # Warm-up results are discarded; every measured trial rebuilds its starts.
         for (trial, instance) in enumerate(instances)
-            println("\n══ Trial $trial/$num_instances · $(variant.name) ══")
-            initial_state1, initial_state2 = instance.states
-            println("  P1 initial state [px, py, vx, vy]: $(round.(initial_state1; digits=3))")
-            println("  P2 initial state [px, py, vx, vy]: $(round.(initial_state2; digits=3))")
-            flush(stdout)
-            (; θ) = Intersection.build_instance_parameters(
-                flatten_parameters,
-                initial_state1,
-                initial_state2,
-                goal_position1,
-                goal_position2,
-                obstacle_position,
-            )
-            (; warmstart_solution) = Intersection.build_yielding_warmstart(
-                planning_horizon,
-                dynamics,
-                initial_state1,
-                initial_state2,
-                goal_position1;
-                min_speed,
-                max_speed,
-            )
-            context = "trial $trial, $(variant.name)"
-            reduced_sol =
-                solve_reduced(GOOP_kkt_system, problem, θ, warmstart_solution, settings; context)
-            n_checks = length(formulations) * length(modes)
-            println(
-                reduced_verdict(reduced_sol, settings),
-                reduced_sol.accepted ? " Running its $n_checks complete checks." :
-                " Skipping its $n_checks complete checks.",
-            )
-            flush(stdout)
-
-            strategies = Intersection.extract_player_strategies(
-                reduced_sol.output.z,
-                num_players,
-                primal_dimension,
-                dynamics,
-            )
-            # `checks` is filled in place by the loop below. The record already in `results` sees
-            # each push, so every save_results call stores the progress so far.
-            checks = Any[]
-            record = (;
-                trial,
-                variant=variant.name,
-                θ,
-                initial=copy(warmstart_solution),
-                strategies,
-                reduced=reduced_sol,
-                checks,
-            )
+            record = solve_reduced_kkt(systems, trial, instance, dynamics, num_checks, settings)
+            # `record.checks` is filled in place below. The record already in `results` sees each
+            # push, so every save stores the progress so far.
             push!(results, record)
-            save_results(directory, settings, instances, sampling, metadata, results)
+            save()
             # formulations: :aggregate, :exact; modes: :fixed_primal, :warmstart
-            for formulation in formulations, mode in modes
-                if reduced_sol.accepted
-                    start = complete_initialization(
-                        formulation,
-                        reduced_sol.output,
-                        θ,
-                        settings,
-                    )
-                    result = try
-                        solve_complete(
-                            formulation,
-                            mode,
-                            problem,
-                            θ,
-                            reduced_sol.output.z,
-                            start,
-                            settings;
-                            context,
-                        )
-                    catch err
-                        validation = merge(
-                            reduced_sol.validation,
-                            (; accepted=false, relaxed_rms=NaN, unrelaxed_rms=NaN, max_abs_residual=NaN),
-                        )
-                        (;
-                            accepted=false,
-                            attempts=Any[],
-                            validation,
-                            physical=copy(reduced_sol.output.z),
-                            solution=start,
-                            status=:exception,
-                            reason=:exception,
-                            error=sprint(showerror, err, catch_backtrace()),
-                            iterations=0,
-                            seconds=0.0,
-                            compile_seconds=0.0,
-                        )
-                    end
-                    metrics = trajectory_metrics(
-                        reduced_sol.output.z,
-                        result.physical,
-                        settings,
-                    )
-                    # :numerical_failure        complete solve not accepted (no conclusion either way)
-                    # :fixed_primal_compatible  fixed-primal solve accepted
-                    # :small_adjustment         :warmstart accepted; trajectory moved within small_rms/small_max
-                    # :substantial_adjustment   :warmstart accepted; trajectory moved more
-                    # (:reduced_failed, below, marks checks skipped because the reduced solve failed.)
-                    category =
-                        !result.accepted ? :numerical_failure :
-                        mode.name === :fixed_primal ? :fixed_primal_compatible :
-                        metrics.small ? :small_adjustment : :substantial_adjustment
-                    check = (;
-                        formulation=formulation.name,
-                        mode=mode.name,
-                        result,
-                        metrics,
-                        category,
-                    )
-                    push!(checks, check)
-                    println(complete_verdict(formulation, mode, result, metrics, category, settings))
-                else
-                    push!(
-                        checks,
-                        (;
-                            formulation=formulation.name,
-                            mode=mode.name,
-                            category=:reduced_failed,
-                            reason="Best reduced stage did not pass acceptance",
-                        ),
-                    )
-                end
+            for formulation in systems.formulations, mode in modes
+                push!(record.checks, check_complete_kkt(record, systems, formulation, mode, settings))
                 done += 1
                 # One bar line per complete check that ran; skipped checks advance it once, below.
-                reduced_sol.accepted && print_progress(done, total)
-                save_results(directory, settings, instances, sampling, metadata, results)
+                record.reduced.accepted && print_progress(done, total)
+                save()
             end
-            reduced_sol.accepted || print_progress(done, total)
+            record.reduced.accepted || print_progress(done, total)
         end
     end
     println()
@@ -536,7 +554,7 @@ function sample_instances(rng, settings)
     for attempt in 1:settings.max_sampling_attempts
         # 2rand - 1 is uniform on [-1, 1]; a zero scale keeps that coordinate fixed.
         states = [
-            base .+ scale .* (2rand(rng, 4) .- 1) for
+            base .+ scale .* (2rand(rng, STATE_DIMENSION) .- 1) for
             (base, scale) in zip(base_initial_states, perturbation_scales)
         ]
         # P1 drives along x and P2 along y, so for player i, coordinate i is along-lane
@@ -545,7 +563,7 @@ function sample_instances(rng, settings)
             minimum((
                 settings.map_end-abs(states[i][i]),
                 settings.lane_width-abs(states[i][3-i]),
-            )) for i in 1:2
+            )) for i in 1:NUM_PLAYERS
         ]
         separation_margin = norm(states[1][1:2]-states[2][1:2])-settings.collision_avoidance
         accepted =
@@ -670,16 +688,8 @@ function print_kkt_stage(;
     stop,
     io=stdout,
 )
-    # 2 players with 6 primals per knot; extract_player_strategies reads only these two
-    # dimensions from its `dynamics` argument.
-    strategies = Intersection.extract_player_strategies(
-        physical,
-        2,
-        6settings.planning_horizon,
-        (; state_dimension=4, control_dimension=2),
-    )
     metrics = Intersection.intersection_result_metrics(
-        strategies;
+        player_strategies(physical, settings);
         settings.goal_position1,
         settings.goal_position2,
     )
@@ -699,98 +709,130 @@ function print_kkt_stage(;
     flush(io)
 end
 
-function solve_reduced(GOOP_kkt_system, problem, θ, warmstart_solution, settings; context, io=stdout)
-    solver = ReducedGOOP.Scholtes()
-    (; max_inner_iters, tol, eta_0, linear_solver, rho_schedule, inner_ρ_tol) = settings
-    verbose = false
+"""
+Scholtes options for one ρ stage of any solve, reduced or complete; only ρ, the acceptance
+tolerance `tol` (an RMS) and the initial η differ between solves. Same options as
+Intersection.demo: of the fixed constants, only proj_eps, eta_max and eta_schedule differ from the
+ScholtesOptions defaults; the rest come from settings.
+"""
+function scholtes_options(settings; ρ, tol, eta, residual_scale)
+    ReducedGOOP.ScholtesOptions(;
+        rho_schedule=[Float64(ρ)],
+        max_inner=settings.max_inner_iters,
+        tol=tol * residual_scale,
+        # A stage's inner loop stops at ‖R‖/√m < min(ρ, inner_ρ_tol): coarse stages are solved
+        # more tightly than their ρ.
+        tol_inner=min(ρ, settings.inner_ρ_tol) * residual_scale,
+        projected_step=true,
+        proj_eps=1e-8,
+        linear_solver=settings.linear_solver,
+        eta_schedule=true,
+        eta_init=eta,
+        eta_min=1e-8,
+        eta_max=1e4,
+        gain_low=0.25,
+        gain_high=0.75,
+        tightening_rate=1.2,
+        loosening_rate=3.0,
+    )
+end
+
+"""
+Recorder for one ρ stage's solver trace: `trace` appends (; raw = ‖R‖, unrelaxed = ‖K0‖, eta) for
+each iterate to `history`, and the caller appends the solver's final iterate the same way.
+"""
+function history_recorder(residuals, ρ)
+    history = NamedTuple{(:raw, :unrelaxed, :eta),NTuple{3,Float64}}[]
+    trace =
+        nt -> push!(history, (; raw=norm(nt.r), unrelaxed=ReducedGOOP._norm_K0(residuals, nt.r, nt.w, ρ), eta=nt.eta))
+    (; history, trace)
+end
+
+"""
+One ρ stage's record: the solver's outcome, its timing (`seconds` excludes measured compilation),
+its trace, and the iterate it started from and ended at.
+"""
+function stage_record(; ρ, parameter, timed, history, initial, final)
+    output = timed.value
+    (;
+        ρ,
+        parameter,
+        status=output.status,
+        reason=output.termination_reason,
+        iterations=output.iters,
+        seconds=max(0.0, timed.time-timed.compile_time-timed.recompile_time),
+        wall_seconds=timed.time,
+        compile_seconds=timed.compile_time+timed.recompile_time,
+        history,
+        initial,
+        final,
+    )
+end
+
+"""
+Acceptance and diagnostics of a kept iterate, whose trajectory is `z`. It is accepted iff its scaled
+residual `unrelaxed_rms` is at most `tol`; every other field is a saved diagnostic. `r` is the
+relaxed residual vector at the stage's ρ.
+"""
+function validate_solution(problem, θ, z; r, relaxed_rms, unrelaxed_rms, sign_violation, tol)
+    feasibility = ReducedGOOP.is_feasible(problem, z, θ) # only `worst` is used
+    x = BlockArray(z, problem.primal_dims)
+    θ_blocks = BlockArray(θ, problem.parameter_dims)
+    equality_max = maximum(abs, reduce(vcat, (f(x, θ_blocks) for f in problem.equality_constraints)))
+    (;
+        relaxed_rms,
+        unrelaxed_rms,
+        max_abs_residual=maximum(abs, r),
+        sign_violation,
+        primal=(; equality_max, inequality_violation=max(0.0, -feasibility.worst)),
+        accepted=unrelaxed_rms <= tol,
+    )
+end
+
+function solve_scholtes_reduced(reduced_kkt, problem, θ, initial_guess, settings; context, io=stdout)
     # R(w; ρ) = [F_nc(y); a(y) - s; s ⊙ b(y) + u - ρ] has m = n_nc + 2 n_comp rows
     # (src/scholtes_residual.jl). Settings hold RMS tolerances, so they are scaled by √m.
-    m = GOOP_kkt_system.n_nc + 2GOOP_kkt_system.n_comp
+    m = reduced_kkt.n_nc + 2reduced_kkt.n_comp
     residual_scale = sqrt(m)
     # λ (lam_*) and ψ (psi_*) are unsigned, so they carry over to the next ρ stage.
     # scholtes_warm_start re-centres γ/φ, s and u for the new ρ, and each stage restarts η at
     # eta_0: the same warm-ρ chain as Intersection.demo.
     eq_cols = findall(
         v -> startswith(string(v), "lam_") || startswith(string(v), "psi_"),
-        GOOP_kkt_system.vars,
+        reduced_kkt.vars,
     )
-    residuals = ReducedGOOP.ScholtesResiduals(GOOP_kkt_system)
-    stage_warmstart = warmstart_solution
+    residuals = ReducedGOOP.ScholtesResiduals(reduced_kkt)
+    stage_initial_guess = initial_guess
     previous_w = nothing
     stage_preference_slacks = nothing
     stages = Any[]
-    output = nothing
     best = nothing
-    print_kkt_header("$context | reduced KKT | η₀ = $(compact(eta_0))"; io)
-    for ρ in rho_schedule
+    print_kkt_header("$context | reduced KKT | η₀ = $(compact(settings.eta_0))"; io)
+    for ρ in settings.rho_schedule
         eq = isnothing(previous_w) ? zeros(length(eq_cols)) : previous_w[eq_cols]
         w₀ = ReducedGOOP.scholtes_warm_start(
-            GOOP_kkt_system,
+            reduced_kkt,
             θ,
-            stage_warmstart,
+            stage_initial_guess,
             ρ;
             eq_cols,
             eq,
             preference_slacks=stage_preference_slacks,
         )
-        z₀ = stage_warmstart
-        # Same options as Intersection.demo. Of the fixed constants, only proj_eps, eta_max and
-        # eta_schedule differ from the ScholtesOptions defaults; the rest come from settings.
-        options = ReducedGOOP.ScholtesOptions(;
-            rho_schedule=[Float64(ρ)],
-            max_inner=max_inner_iters,
-            tol=tol * residual_scale,
-            # A stage's inner loop stops at ‖R‖/√m < min(ρ, inner_ρ_tol): coarse stages are solved
-            # more tightly than their ρ.
-            tol_inner=min(ρ, inner_ρ_tol) * residual_scale,
-            projected_step=true,
-            proj_eps=1e-8,
-            linear_solver,
-            eta_schedule=true,
-            eta_init=eta_0,
-            eta_min=1e-8,
-            eta_max=1e4,
-            gain_low=0.25,
-            gain_high=0.75,
-            tightening_rate=1.2,
-            loosening_rate=3.0,
-            verbose,
+        options = scholtes_options(settings; ρ, tol=settings.tol, eta=settings.eta_0, residual_scale)
+        (; history, trace) = history_recorder(residuals, ρ)
+        timed = @timed ReducedGOOP.solve(
+            ReducedGOOP.Scholtes(),
+            reduced_kkt,
+            θ;
+            z₀=stage_initial_guess,
+            w₀,
+            options,
+            trace,
         )
-        kkt_error_history = Float64[]
-        eta_history = Float64[]
-        relaxed_residual_history = Float64[]
-        trace =
-            nt -> begin
-                push!(kkt_error_history, ReducedGOOP._norm_K0(residuals, nt.r, nt.w, nt.rho))
-                push!(eta_history, nt.eta)
-                push!(relaxed_residual_history, norm(nt.r))
-            end
-        timed =
-            @timed ReducedGOOP.solve(solver, GOOP_kkt_system, θ; z₀, w₀, options, trace)
         output = timed.value
-        push!(kkt_error_history, output.residual)
-        push!(eta_history, output.eta)
-        push!(relaxed_residual_history, output.relaxed_residual)
-        history = [
-            (; raw, unrelaxed, eta) for (raw, unrelaxed, eta) in
-                zip(relaxed_residual_history, kkt_error_history, eta_history)
-        ]
-        push!(
-            stages,
-            (;
-                ρ,
-                parameter=:rho_reduced,
-                status=output.status,
-                reason=output.termination_reason,
-                iterations=output.iters,
-                seconds=max(0.0, timed.time-timed.compile_time-timed.recompile_time),
-                wall_seconds=timed.time,
-                compile_seconds=timed.compile_time+timed.recompile_time,
-                history,
-                initial=copy(w₀),
-                final=copy(output.w),
-            ),
-        )
+        push!(history, (; raw=output.relaxed_residual, unrelaxed=output.residual, eta=output.eta))
+        push!(stages, stage_record(; ρ, parameter=:rho_reduced, timed, history, initial=copy(w₀), final=copy(output.w)))
         print_kkt_stage(;
             ρ,
             status=output.status,
@@ -800,14 +842,10 @@ function solve_reduced(GOOP_kkt_system, problem, θ, warmstart_solution, setting
             unrelaxed_rms=output.residual/residual_scale,
             physical=output.z,
             settings,
+            stop=Intersection.solver_stop_reason(output, options; scale=residual_scale),
             io,
-            stop=Intersection.solver_stop_reason(
-                output,
-                options;
-                scale=residual_scale,
-            ),
         )
-        stage_warmstart = output.z
+        stage_initial_guess = output.z
         previous_w = output.w
         stage_preference_slacks = output.preference_slacks
         # Track the stage with the lowest ‖K0‖ (a non-finite residual counts as Inf).
@@ -820,27 +858,18 @@ function solve_reduced(GOOP_kkt_system, problem, θ, warmstart_solution, setting
     # stage can end worse than an earlier, converged one.
     (; output, ρ) = best
     r = zeros(m)
-    b = zeros(GOOP_kkt_system.n_comp)
+    b = zeros(reduced_kkt.n_comp)
     ReducedGOOP._resid!(residuals, r, b, output.w, ρ)
-    relaxed_rms = norm(r)/residual_scale
-    unrelaxed_rms = ReducedGOOP._norm_K0(residuals, r, output.w, ρ)/residual_scale
-    feasibility = ReducedGOOP.is_feasible(problem, output.z, θ) # only `worst` is used
-    x = BlockArray(output.z, problem.primal_dims)
-    θ_blocks = BlockArray(θ, problem.parameter_dims)
-    equality_max =
-        maximum(abs, reduce(vcat, (f(x, θ_blocks) for f in problem.equality_constraints)))
-    sign_violation = max(0.0, -output.sign_min)
-    # Acceptance depends only on the unrelaxed KKT residual ‖K0‖/√m; every other field is a
-    # saved diagnostic.
-    validation = (;
-        relaxed_rms,
-        unrelaxed_rms,
-        max_abs_residual=maximum(abs, r),
-        sign_violation,
-        primal=(; equality_max, inequality_violation=max(0.0, -feasibility.worst)),
-        accepted=unrelaxed_rms <= tol,
+    validation = validate_solution(
+        problem,
+        θ,
+        output.z;
+        r,
+        relaxed_rms=norm(r)/residual_scale,
+        unrelaxed_rms=ReducedGOOP._norm_K0(residuals, r, output.w, ρ)/residual_scale,
+        sign_violation=max(0.0, -output.sign_min),
+        tol=settings.tol,
     )
-
     (;
         accepted=validation.accepted,
         output,
@@ -961,42 +990,31 @@ end
 """
 Index map used to start complete solves: `complete_y[destination] .= reduced_w[source]`.
 Maps every preference slack and, for each player, the innermost level's multipliers of the
-ORIGINAL equalities (λ) and inequalities (γ). Outer-level multipliers belong to different
-rows in the two systems (ψ/φ in reduced, inherited lower-level KKT rows in complete), so
+ORIGINAL equalities (λ) and inequalities (γ). The reduced system names these by player, level
+and index (preference_slack_p1_k2_3, lam_p1_K3, gam_p1_K3; src/scholtes_kkt.jl), so each
+complete variable's counterpart is looked up by that name. Outer-level multipliers belong to
+different rows in the two systems (ψ/φ in reduced, inherited lower-level KKT rows in complete), so
 they start at 0 or positive_seed (see complete_initialization).
 """
 function variable_mapping(reduced, complete)
     reduced_names = Dict(string(v) => j for (j, v) in enumerate(reduced.vars))
     complete_names = Dict(string(v) => j for (j, v) in enumerate(complete.vars))
     source, destination, labels = Int[], Int[], String[]
-    offset = first(reduced.preference_slack_dims)-1
-    for (i, levels) in enumerate(complete.levels), k in eachindex(levels)
-        level = levels[k]
+    function add_pair!(reduced_name, complete_variable, label)
+        push!(source, reduced_names[reduced_name])
+        push!(destination, complete_names[string(complete_variable)])
+        push!(labels, label)
+    end
+    for (i, levels) in enumerate(complete.levels), (k, level) in enumerate(levels)
         for (j, v) in enumerate(level.preference_slack)
-            push!(source, offset+j)
-            push!(destination, complete_names[string(v)])
-            push!(labels, "player $i level $k preference slack $j")
+            add_pair!("preference_slack_p$(i)_k$(k)_$j", v, "player $i level $k preference slack $j")
         end
-        offset += length(level.preference_slack)
         k == length(levels) || continue
         for (j, v) in enumerate(level.lambda)
-            push!(source, reduced_names["lam_p$(i)_K$j"])
-            push!(destination, complete_names[string(v)])
-            push!(labels, "player $i innermost original equality multiplier $j")
+            add_pair!("lam_p$(i)_K$j", v, "player $i innermost original equality multiplier $j")
         end
         for (j, v) in enumerate(level.gamma)
-            row = findfirst(
-                label ->
-                    label.player == i &&
-                        label.level == k &&
-                        label.kind == :gamma &&
-                        label.inequality == j,
-                reduced.labels,
-            )
-            row === nothing && continue
-            push!(source, only(reduced.S_b[2][findall(==(row), reduced.S_b[1])]))
-            push!(destination, complete_names[string(v)])
-            push!(labels, "player $i innermost original inequality multiplier $j")
+            add_pair!("gam_p$(i)_K$j", v, "player $i innermost original inequality multiplier $j")
         end
     end
     (;
@@ -1018,19 +1036,19 @@ Starting point for a complete solve from an accepted reduced solution. The order
     of the solve (0 for exact, first(complete_rho_schedule) for aggregate), floored as in 4.
 """
 function complete_initialization(formulation, output, θ, settings)
-    kkt = formulation.kkt
-    y = zeros(kkt.n)
-    y[kkt.primal_dims] .= output.z
-    y[kkt.nonnegative_dims] .= settings.positive_seed
+    (; complete_kkt) = formulation
+    y = zeros(complete_kkt.n)
+    y[complete_kkt.primal_dims] .= output.z
+    y[complete_kkt.nonnegative_dims] .= settings.positive_seed
     y[formulation.mapping.destination] .= output.w[formulation.mapping.source]
-    y[kkt.nonnegative_dims] .= max.(y[kkt.nonnegative_dims], settings.positive_floor)
+    y[complete_kkt.nonnegative_dims] .= max.(y[complete_kkt.nonnegative_dims], settings.positive_floor)
     ρ = formulation.name === :exact ? 0.0 : first(settings.complete_rho_schedule)
-    y[kkt.interior_point_slack_dims] .=
+    y[complete_kkt.interior_point_slack_dims] .=
         max.(formulation.slack_targets(y, θ, ρ), settings.positive_floor)
     y
 end
 
-function solve_complete(
+function solve_scholtes_complete(
     formulation,
     mode,
     problem,
@@ -1042,7 +1060,7 @@ function solve_complete(
     context,
     io=stdout,
 )
-    kkt = formulation.kkt
+    (; complete_kkt) = formulation
     # exact is unrelaxed: one stage at ρ = 0. aggregate runs down complete_rho_schedule (ρ plays
     # the legacy ε). Each retry restarts from `initial` with the next η.
     schedule = formulation.name === :exact ? [0.0] : settings.complete_rho_schedule
@@ -1052,11 +1070,11 @@ function solve_complete(
     # rank-deficient systems it stopped far from a stationary point (projected gradient ≫ 0) after
     # 1000+ steps, while Scholtes on the fixed-primal system met the tolerance in under 100.
     fixed_mode = mode.name === :fixed_primal
-    system = fixed_mode ? formulation.fixed.system : kkt
+    system = fixed_mode ? formulation.fixed.system : complete_kkt
     parameters = fixed_mode ? [θ; physical] : θ
     unknowns = fixed_mode ? formulation.fixed.free : Colon()
     residuals = ReducedGOOP.ScholtesResiduals(system)
-    residual_scale = sqrt(kkt.n_nc)
+    residual_scale = sqrt(complete_kkt.n_nc)
     attempts = Any[]
     for (attempt, eta) in enumerate([settings.eta_0; retry_values])
         y = copy(initial)
@@ -1071,38 +1089,11 @@ function solve_complete(
         )
         for ρ in schedule
             stage_initial = copy(y)
-            history = Any[]
-            trace =
-                nt -> push!(
-                    history,
-                    (;
-                        raw=norm(nt.r),
-                        unrelaxed=ReducedGOOP._norm_K0(residuals, nt.r, nt.w, ρ),
-                        eta=nt.eta,
-                    ),
-                )
-            # Same options as solve_reduced, with the complete tolerance and this attempt's η.
             # The 1e-12 floor is defensive: exact ignores ρ (its residual is evaluated at ρ = 0)
             # and complete_rho_schedule stays above it, so it changes nothing today; for exact
-            # it only keeps ρ and tol_inner positive. As in solve_reduced, the inner loop stops
-            # at ‖R‖/√m < min(ρ, inner_ρ_tol).
-            options = ReducedGOOP.ScholtesOptions(;
-                rho_schedule=[max(Float64(ρ), 1e-12)],
-                max_inner=settings.max_inner_iters,
-                tol=settings.complete_tol * residual_scale,
-                tol_inner=min(max(ρ, 1e-12), settings.inner_ρ_tol) * residual_scale,
-                projected_step=true,
-                proj_eps=1e-8,
-                linear_solver=settings.linear_solver,
-                eta_schedule=true,
-                eta_init=eta,
-                eta_min=1e-8,
-                eta_max=1e4,
-                gain_low=0.25,
-                gain_high=0.75,
-                tightening_rate=1.2,
-                loosening_rate=3.0,
-            )
+            # it only keeps ρ and tol_inner positive.
+            options = scholtes_options(settings; ρ=max(ρ, 1e-12), tol=settings.complete_tol, eta, residual_scale)
+            (; history, trace) = history_recorder(residuals, ρ)
             timed = @timed ReducedGOOP.solve(
                 ReducedGOOP.Scholtes(),
                 system,
@@ -1113,47 +1104,21 @@ function solve_complete(
             )
             output = timed.value
             y[unknowns] .= output.w
-            push!(
-                history,
-                (;
-                    raw=output.relaxed_residual,
-                    unrelaxed=output.residual,
-                    eta=output.eta,
-                ),
-            )
-            push!(
-                stages,
-                (;
-                    ρ,
-                    parameter=formulation.name===:exact ? :unrelaxed :
-                              :epsilon_complete,
-                    status=output.status,
-                    reason=output.termination_reason,
-                    iterations=output.iters,
-                    status_ok=output.status === :solved,
-                    seconds=max(
-                        0.0,
-                        timed.time-timed.compile_time-timed.recompile_time,
-                    ),
-                    wall_seconds=timed.time,
-                    compile_seconds=timed.compile_time+timed.recompile_time,
-                    history,
-                    initial=stage_initial,
-                    final=copy(y),
-                ),
-            )
+            push!(history, (; raw=output.relaxed_residual, unrelaxed=output.residual, eta=output.eta))
+            parameter = formulation.name === :exact ? :unrelaxed : :epsilon_complete
+            push!(stages, stage_record(; ρ, parameter, timed, history, initial=stage_initial, final=copy(y)))
             # Residuals of the full complete iterate, for the table and the best-stage choice.
-            r, r0 = zeros(kkt.n_nc), zeros(kkt.n_nc)
-            kkt.F_nc!(r, y, θ, ρ)
-            kkt.F_nc!(r0, y, θ, 0.0)
+            r, r0 = zeros(complete_kkt.n_nc), zeros(complete_kkt.n_nc)
+            complete_kkt.F_nc!(r, y, θ, ρ)
+            complete_kkt.F_nc!(r0, y, θ, 0.0)
             print_kkt_stage(;
                 ρ,
                 status=output.status,
                 iterations=output.iters,
                 seconds=last(stages).seconds,
-                relaxed_rms=norm(r)/sqrt(kkt.n_nc),
-                unrelaxed_rms=norm(r0)/sqrt(kkt.n_nc),
-                physical=y[kkt.primal_dims],
+                relaxed_rms=norm(r)/residual_scale,
+                unrelaxed_rms=norm(r0)/residual_scale,
+                physical=y[complete_kkt.primal_dims],
                 settings,
                 stop=Intersection.solver_stop_reason(output, options; scale=residual_scale),
                 io,
@@ -1164,35 +1129,22 @@ function solve_complete(
                 best = (; y=copy(y), ρ, k0, index=length(stages))
             end
         end
-        # Judge and keep the best stage, not the last, as in solve_reduced.
+        # Judge and keep the best stage, not the last, as in solve_scholtes_reduced. The full residual
+        # retains stationarity, equality, complementarity, and slack equations.
         y = best.y
-        r, r0 = zeros(kkt.n_nc), zeros(kkt.n_nc)
-        kkt.F_nc!(r, y, θ, best.ρ)
-        kkt.F_nc!(r0, y, θ, 0.0)
-        relaxed_rms, unrelaxed_rms = norm(r)/sqrt(kkt.n_nc), norm(r0)/sqrt(kkt.n_nc)
-        feasibility = ReducedGOOP.is_feasible(problem, y[kkt.primal_dims], θ) # only `worst` is used
-        x = BlockArray(y[kkt.primal_dims], problem.primal_dims)
-        θ_blocks = BlockArray(θ, problem.parameter_dims)
-        equality_max = maximum(
-            abs,
-            reduce(vcat, (f(x, θ_blocks) for f in problem.equality_constraints)),
+        r, r0 = zeros(complete_kkt.n_nc), zeros(complete_kkt.n_nc)
+        complete_kkt.F_nc!(r, y, θ, best.ρ)
+        complete_kkt.F_nc!(r0, y, θ, 0.0)
+        validation = validate_solution(
+            problem,
+            θ,
+            y[complete_kkt.primal_dims];
+            r,
+            relaxed_rms=norm(r)/residual_scale,
+            unrelaxed_rms=norm(r0)/residual_scale,
+            sign_violation=max(0.0, -minimum(y[complete_kkt.nonnegative_dims]; init=Inf)),
+            tol=settings.complete_tol,
         )
-        sign_violation = max(0.0, -minimum(y[kkt.nonnegative_dims]; init=Inf))
-        # The full residual retains stationarity, equality, complementarity, and slack equations.
-        # Acceptance depends only on its unrelaxed (ρ = 0) RMS, not on the solver's exit status;
-        # every other field is a saved diagnostic.
-        validation = (;
-            relaxed_rms,
-            unrelaxed_rms,
-            max_abs_residual=maximum(abs, r),
-            sign_violation,
-            primal=(;
-                equality_max,
-                inequality_violation=max(0.0, -feasibility.worst),
-            ),
-            accepted=unrelaxed_rms <= settings.complete_tol,
-        )
-
         accepted = validation.accepted
         push!(
             attempts,
@@ -1213,13 +1165,13 @@ function solve_complete(
     # end worse than an earlier try. An accepted try is the last and has the lowest ‖K0‖.
     best_attempt = argmin([isfinite(a.validation.unrelaxed_rms) ? a.validation.unrelaxed_rms : Inf for a in attempts])
     final = attempts[best_attempt]
-    mode.name === :fixed_primal && @assert final.solution[kkt.primal_dims] == physical
+    mode.name === :fixed_primal && @assert final.solution[complete_kkt.primal_dims] == physical
     (;
         accepted=final.accepted,
         attempts,
         best_attempt,
         validation=final.validation,
-        physical=final.solution[kkt.primal_dims],
+        physical=final.solution[complete_kkt.primal_dims],
         solution=final.solution,
         status=final.stages[final.best_stage].status,
         reason=final.stages[final.best_stage].reason,
@@ -1238,7 +1190,9 @@ and a substantial adjustment. In fixed-primal mode the trajectories are identica
 metric is 0.
 """
 function trajectory_metrics(reduced, complete, settings)
-    reduced_columns, complete_columns = reshape(reduced, 6, :), reshape(complete, 6, :)
+    # One column per player and knot: [px, py, vx, vy, ax, ay].
+    knot_size = STATE_DIMENSION + CONTROL_DIMENSION
+    reduced_columns, complete_columns = reshape(reduced, knot_size, :), reshape(complete, knot_size, :)
     groups = ((:position, 1:2), (:velocity, 3:4), (:control, 5:6))
     errors = map(groups) do (name, rows)
         reference = vec(reduced_columns[rows, :])
@@ -1249,7 +1203,7 @@ function trajectory_metrics(reduced, complete, settings)
             absolute=norm(δ),
             relative=norm(δ)/max(norm(reference), 1e-12scale*sqrt(length(δ))),
             rms=norm(δ)/sqrt(length(δ)),
-            maximum=maximum(abs, δ),
+            max_abs=maximum(abs, δ),
             scaled=δ/scale,
         )
     end
@@ -1261,15 +1215,15 @@ function trajectory_metrics(reduced, complete, settings)
             (name, rows) in groups
         ),
     )
-    rms, maximum_error = norm(δ)/sqrt(length(δ)), maximum(abs, δ)
+    rms, max_abs = norm(δ)/sqrt(length(δ)), maximum(abs, δ)
     (;
         rms,
-        maximum=maximum_error,
+        max_abs,
         relative=norm(δ)/max(norm(reference), 1e-12sqrt(length(δ))),
         groups=errors,
         small=all(
             norm(g.scaled)/sqrt(length(g.scaled))<=settings.small_rms for g in errors
-        ) && maximum_error<=settings.small_max,
+        ) && max_abs<=settings.small_max,
     )
 end
 
@@ -1289,80 +1243,58 @@ function save_results(directory, settings, instances, sampling, metadata, result
     mv(temporary, joinpath(directory, "results.jls"); force=true)
 end
 
+"""
+Pass counts, one line per objective, complete formulation and mode, then a key: printed at the end
+of a run and on the report's summary page.
+"""
+function pass_count_lines(results, settings)
+    lines = [
+        @sprintf(
+            "%-10s %-11s %-19s %8s %21s %14s",
+            "objective",
+            "complete",
+            "mode",
+            "reduced",
+            "conditional complete",
+            "overall pairs",
+        ),
+    ]
+    for variant_name in settings.objective_variants,
+        formulation_name in settings.complete_formulations,
+        mode_name in settings.comparison_modes
+
+        rows = filter(r -> r.variant === variant_name, results)
+        num_reduced_accepted = count(r -> r.reduced.accepted, rows)
+        passed_check(c) =
+            c.formulation === formulation_name && c.mode === mode_name && haskey(c, :result) && c.result.accepted
+        passed = count(r -> any(passed_check, r.checks), rows)
+        n = length(rows)
+        push!(
+            lines,
+            @sprintf(
+                "%-10s %-11s %-19s %8s %21s %14s",
+                variant_name,
+                ":$formulation_name",
+                ":$mode_name mode",
+                "$num_reduced_accepted/$n",
+                "$passed/$num_reduced_accepted",
+                "$passed/$n",
+            ),
+        )
+    end
+    push!(
+        lines,
+        "",
+        "reduced: accepted / trials; conditional complete: accepted checks / accepted reduced solves;",
+        "overall pairs: accepted checks / trials. A failed check does not prove incompatibility.",
+    )
+    lines
+end
+
+"Final console summary: the pass counts, as on the report's summary page."
 function print_final_summary(results, settings; io=stdout)
-    passed(row, formulation, mode) = any(
-        check ->
-            check.formulation === formulation &&
-                check.mode === mode &&
-                haskey(check, :result) &&
-                check.result.accepted,
-        row.checks,
-    )
-    fixed_enabled = :fixed_primal in settings.comparison_modes
-    aggregate_enabled = :aggregate in settings.complete_formulations
-    exact_enabled = :exact in settings.complete_formulations
-    println(io, "\n[final summary] Reduced convergence and complete KKT compatibility")
-    println(
-        io,
-        "Reduced: accepted / trials. Fixed-primal: passed / accepted reduced solves.",
-    )
-    @printf(
-        io,
-        "%-12s %12s %16s %16s %16s\n",
-        "objective",
-        "reduced",
-        "aggregate fixed",
-        "exact fixed",
-        "both fixed"
-    )
-    for variant in settings.objective_variants
-        rows = filter(row -> row.variant === variant, results)
-        converged = filter(row -> row.reduced.accepted, rows)
-        nred = length(converged)
-        aggregate = count(row -> passed(row, :aggregate, :fixed_primal), converged)
-        exact = count(row -> passed(row, :exact, :fixed_primal), converged)
-        both = count(
-            row ->
-                passed(row, :aggregate, :fixed_primal) &&
-                    passed(row, :exact, :fixed_primal),
-            converged,
-        )
-        @printf(
-            io,
-            "%-12s %12s %16s %16s %16s\n",
-            string(variant),
-            "$nred/$(length(rows))",
-            fixed_enabled && aggregate_enabled ? "$aggregate/$nred" : "n/a",
-            fixed_enabled && exact_enabled ? "$exact/$nred" : "n/a",
-            fixed_enabled && aggregate_enabled && exact_enabled ? "$both/$nred" : "n/a"
-        )
-    end
-    println(io, "Fixed-primal passes verify compatibility to the configured tolerances.")
-    println(
-        io,
-        "0/0 means no accepted reduced solves; a failed check does not prove incompatibility.",
-    )
-    if :warmstart in settings.comparison_modes
-        println(
-            io,
-            "\nWarm-started complete solves (trajectory may change; not a fixed-primal certificate):",
-        )
-        @printf(io, "%-12s %16s %16s\n", "objective", "aggregate warm", "exact warm")
-        for variant in settings.objective_variants
-            converged =
-                filter(row -> row.variant === variant && row.reduced.accepted, results)
-            nred = length(converged)
-            aggregate = count(row -> passed(row, :aggregate, :warmstart), converged)
-            exact = count(row -> passed(row, :exact, :warmstart), converged)
-            @printf(
-                io,
-                "%-12s %16s %16s\n",
-                string(variant),
-                aggregate_enabled ? "$aggregate/$nred" : "n/a",
-                exact_enabled ? "$exact/$nred" : "n/a"
-            )
-        end
-    end
+    println(io, "\n[final summary] Pass counts")
+    foreach(line -> println(io, line), pass_count_lines(results, settings))
     flush(io)
     nothing
 end
@@ -1440,19 +1372,20 @@ function plot_residuals!(axis, rows, metadata, field, settings; counted=false)
     label(name, n) = counted ? "$name (n=$n)" : name
     reduced = [stage_history(r.reduced.stages, field, metadata.reduced.rows) for r in rows]
     plot_history!(axis, reduced, label("Reduced", length(reduced)), :darkorange)
-    for formulation in settings.complete_formulations, mode in settings.comparison_modes
-        equations = only(filter(c -> c.name === formulation, metadata.complete)).dimensions.rows
+    for formulation_name in settings.complete_formulations, mode_name in settings.comparison_modes
+        equations = only(filter(c -> c.name === formulation_name, metadata.complete)).dimensions.rows
         # Skipped checks have no result, and a check that threw has no tries.
         kept = [
             c.result for r in rows for c in r.checks if
-            c.formulation === formulation && c.mode === mode && haskey(c, :result) && !isempty(c.result.attempts)
+            c.formulation === formulation_name && c.mode === mode_name && haskey(c, :result) &&
+                !isempty(c.result.attempts)
         ]
         histories = [stage_history(k.attempts[k.best_attempt].stages, field, equations) for k in kept]
         plot_history!(
             axis,
             histories,
-            label(":$formulation, :$mode", length(histories)),
-            CHECK_COLORS[(formulation, mode)],
+            label(":$formulation_name, :$mode_name", length(histories)),
+            CHECK_COLORS[(formulation_name, mode_name)],
         )
     end
     CM.hlines!(
@@ -1482,8 +1415,8 @@ Aggregate-page histogram of one comparison mode over the accepted checks, one co
 formulation: the fixed-primal scaled residual, or how far :warmstart moved the trajectory. Its
 legend goes at `legend_position`, under the plot.
 """
-function plot_acceptance_histogram!(position, legend_position, rows, settings, mode)
-    fixed = mode === :fixed_primal
+function plot_acceptance_histogram!(position, legend_position, rows, settings, mode_name)
+    fixed = mode_name === :fixed_primal
     # At most 4 x ticks, labelled like the console (9.4e-4): the default labels (9.4×10⁻⁴, ~9 ticks)
     # overlap whenever the values span less than a decade.
     axis = CM.Axis(
@@ -1494,12 +1427,12 @@ function plot_acceptance_histogram!(position, legend_position, rows, settings, m
         ylabel="Accepted pairs",
         title=fixed ? "Fixed-primal recovery" : "Trajectory adjustment (:warmstart)",
     )
-    nred = count(r -> r.reduced.accepted, rows)
+    num_reduced_accepted = count(r -> r.reduced.accepted, rows)
     plotted = false
-    for formulation in settings.complete_formulations
+    for formulation_name in settings.complete_formulations
         accepted = [
             c for r in rows for c in r.checks if
-            c.formulation === formulation && c.mode === mode && haskey(c, :result) && c.result.accepted
+            c.formulation === formulation_name && c.mode === mode_name && haskey(c, :result) && c.result.accepted
         ]
         isempty(accepted) && continue
         values = [fixed ? c.result.validation.unrelaxed_rms : c.metrics.rms for c in accepted]
@@ -1507,8 +1440,8 @@ function plot_acceptance_histogram!(position, legend_position, rows, settings, m
             axis,
             values;
             bins=max(1, min(10, length(values))),
-            color=(CHECK_COLORS[(formulation, mode)], 0.6),
-            label=":$formulation, $(length(values))/$nred accepted",
+            color=(CHECK_COLORS[(formulation_name, mode_name)], 0.6),
+            label=":$formulation_name, $(length(values))/$num_reduced_accepted accepted",
         )
         plotted = true
     end
@@ -1648,7 +1581,7 @@ function trial_page(data, row)
         ))
     ]
     for component in 1:2
-        for player in 1:2
+        for player in 1:NUM_PLAYERS
             bounds = Intersection.player_speed_bounds(player; settings.min_speed, settings.max_speed)
             CM.hlines!(
                 panels[component],
@@ -1678,13 +1611,7 @@ function trial_page(data, row)
         CM.limits!(ax, -settings.map_end, settings.map_end, -settings.map_end, settings.map_end)
         # A skipped check has no trajectory; its title already says why.
         isnothing(physical) && continue
-        # Same stand-in `dynamics` as in print_kkt_stage.
-        strategies = Intersection.extract_player_strategies(
-            physical,
-            2,
-            6settings.planning_horizon,
-            (; state_dimension=4, control_dimension=2),
-        )
+        strategies = player_strategies(physical, settings)
         Intersection.plot_vehicle_separation!(
             separation,
             strategies;
@@ -1692,7 +1619,7 @@ function trial_page(data, row)
             linestyle,
             label=name,
         )
-        for player in 1:2
+        for player in 1:NUM_PLAYERS
             (; xs, us) = strategies[player]
             color = Intersection.player_plot_color(player)
             CM.scatterlines!(ax, [x[1] for x in xs], [x[2] for x in xs]; color, linewidth=3, markersize=10)
@@ -1730,7 +1657,7 @@ function trial_page(data, row)
     CM.Legend(
         figure[6, 1],
         vcat(
-            [CM.LineElement(color=Intersection.player_plot_color(player), linewidth=3) for player in 1:2],
+            [CM.LineElement(color=Intersection.player_plot_color(player), linewidth=3) for player in 1:NUM_PLAYERS],
             [CM.LineElement(color=:gray30, linestyle=t.linestyle, linewidth=2) for t in trajectories],
         ),
         vcat("Player 1", "Player 2", [t.name for t in trajectories]);
@@ -1837,29 +1764,7 @@ function summary_page(data, directory)
     )
 
     heading!("Pass counts")
-    lines = [@sprintf("%-10s %-11s %-19s %8s %21s %14s", "objective", "complete", "mode", "reduced", "conditional complete", "overall pairs")]
-    for variant in settings.objective_variants,
-        formulation in settings.complete_formulations,
-        mode in settings.comparison_modes
-
-        variant_rows = filter(r -> r.variant === variant, results)
-        nred = count(r -> r.reduced.accepted, variant_rows)
-        passed = count(
-            r -> any(
-                c -> c.formulation === formulation && c.mode === mode && haskey(c, :result) && c.result.accepted,
-                r.checks,
-            ),
-            variant_rows,
-        )
-        n = length(variant_rows)
-        push!(lines, @sprintf("%-10s %-11s %-19s %8s %21s %14s", variant, ":$formulation", ":$mode mode", "$nred/$n", "$passed/$nred", "$passed/$n"))
-    end
-    push!(
-        lines,
-        "\nreduced: accepted / trials; conditional complete: accepted checks / accepted reduced solves;",
-        "overall pairs: accepted checks / trials. A failed check does not prove incompatibility.",
-    )
-    monospace!(join(lines, "\n"))
+    monospace!(join(pass_count_lines(results, settings), "\n"))
 
     heading!("System sizes")
     monospace!(join(["$(m.variant):\n  " * join(size_lines(m), "\n  ") for m in data.metadata], "\n"))
@@ -1961,12 +1866,12 @@ band; reduced and each complete check) and the acceptance histograms of each com
 """
 function aggregate_page(data)
     (; settings, results) = data
-    variants = settings.objective_variants
-    figure = Intersection.serif_figure(size=(1600, 100+420length(variants)), fontsize=18, figure_padding=30)
+    variant_names = settings.objective_variants
+    figure = Intersection.serif_figure(size=(1600, 100+420length(variant_names)), fontsize=18, figure_padding=30)
     CM.Label(figure[1, 1], "All trials: residual histories and acceptance"; fontsize=26)
-    for (index, variant) in enumerate(variants)
-        rows = filter(r -> r.variant === variant, results)
-        metadata = only(filter(m -> m.variant === variant, data.metadata))
+    for (index, variant_name) in enumerate(variant_names)
+        rows = filter(r -> r.variant === variant_name, results)
+        metadata = only(filter(m -> m.variant === variant_name, data.metadata))
         layout = CM.GridLayout(figure[index+1, 1])
         for (column, field, title) in ((1, :unrelaxed, "True KKT residual"), (2, :raw, "Relaxed residual"))
             axis = CM.Axis(
@@ -1974,14 +1879,14 @@ function aggregate_page(data)
                 xlabel="Trace sample (stages concatenated)",
                 ylabel="Scaled residual",
                 yscale=log10,
-                title="$variant | $title",
+                title="$variant_name | $title",
             )
             plot_residuals!(axis, rows, metadata, field, settings; counted=true)
             # Both plots have the same entries, so one legend under the pair serves both.
             column == 1 && legend_under!(layout[2, 1:2], axis; nbanks=2)
         end
-        for (column, mode) in enumerate(settings.comparison_modes)
-            plot_acceptance_histogram!(layout[1, 2+column], layout[2, 2+column], rows, settings, mode)
+        for (column, mode_name) in enumerate(settings.comparison_modes)
+            plot_acceptance_histogram!(layout[1, 2+column], layout[2, 2+column], rows, settings, mode_name)
         end
         CM.rowsize!(layout, 1, 320)
     end
