@@ -4,7 +4,8 @@ on the two-player intersection game from Intersection.jl.
 
 For every objective variant and every sampled initial state:
  1. Solve the REDUCED KKT system with Scholtes down `rho_schedule`, starting from
-    Intersection's yielding initial guess. Every solve, reduced or complete, is accepted iff
+    Intersection's yielding initial guess (with :unicycle, the double integrator's solution of
+    the same instance). Every solve, reduced or complete, is accepted iff
     its unrelaxed KKT residual ‖K₀‖/√m is at most `tol` (reduced) or `complete_tol`. A ρ chain
     runs all its stages and is judged, and kept, at the stage with the lowest ‖K₀‖; a complete
     check likewise keeps its best try.
@@ -23,10 +24,13 @@ Terms
              relaxation, so it is solved once at ρ = 0.
   R, K₀      residual norm at the stage's ρ, and at ρ = 0; always reported as RMS,
              norm / √(number of equations).
-  physical   the stacked trajectory z, ordered player, knot, [px, py, vx, vy, ax, ay].
+  physical   the stacked trajectory z, ordered player, knot, [px, py, vx, vy, ax, ay];
+             [px, py, v, ψ, a, ω] with dynamics_model = :unicycle.
 
     julia --project=experiments -e 'include("experiments/MonteCarlo_Intersection.jl");
         MonteCarlo_Intersection.run(overrides = (; num_instances = 50))'
+
+Unicycle dynamics instead of the planar double integrator: overrides = (; dynamics_model = :unicycle).
 """
 module MonteCarlo_Intersection
 
@@ -56,6 +60,11 @@ function objective_variants(settings)
         ),
     ]
 end
+
+# The unicycle's control cost also charges its yaw rate as if it moved at least this fast,
+# φ(YAW_COST_SPEED·ω) in m/s², so turning is never free: with φ(v·ω) alone the heading is
+# unpinned whenever v ≈ 0, and flips between its hard limits.
+const YAW_COST_SPEED = 1.0 # m/s
 
 """
 Intersection.get_setup.
@@ -105,7 +114,11 @@ function get_setup(
     function control_objective(; player)
         function (z, _)
             (; xs, us) = trajectory(z; player)
-            sum(variant.objective(u[j], variant.control_scale) for u in us for j in 1:2)
+            # The physical acceleration in m/s² for both models: the unicycle's [a, v·ω], not [a, ω].
+            accelerations = (Intersection.physical_acceleration(dynamics.model, x, u) for (x, u) in zip(xs, us))
+            cost = sum(variant.objective(a[j], variant.control_scale) for a in accelerations for j in 1:2)
+            dynamics.model isa Intersection.Unicycle || return cost
+            cost + sum(variant.objective(YAW_COST_SPEED * u[2], variant.control_scale) for u in us)
         end
     end
     function goal_objective(; player)
@@ -138,21 +151,28 @@ function get_setup(
     (; problem, flatten_parameters)
 end
 
-# Two players with planar double-integrator dynamics: state [px, py, vx, vy] and control [ax, ay] at
-# every knot, so a player's slice of the stacked trajectory z is (4 + 2) × planning_horizon long.
+# Two players with planar double-integrator dynamics, state [px, py, vx, vy] and control [ax, ay], or
+# unicycle dynamics, state [px, py, v, ψ] and control [a, ω], at every knot (settings.dynamics_model),
+# so a player's slice of the stacked trajectory z is (4 + 2) × planning_horizon long.
 const NUM_PLAYERS = 2
 const STATE_DIMENSION = 4
 const CONTROL_DIMENSION = 2
 
-"Intersection's planar double-integrator dynamics at the settings' time step."
+"Whether `settings` pick the unicycle; results saved before dynamics_model existed are double-integrator runs."
+is_unicycle(settings) = get(settings, :dynamics_model, :planar_double_integrator) === :unicycle
+
+"Intersection's dynamics for settings.dynamics_model, at the settings' time step."
 function intersection_dynamics(settings)
     Intersection.build_intersection_dynamics(
-        Intersection.PlanarDoubleIntegrator();
+        is_unicycle(settings) ? Intersection.Unicycle() : Intersection.PlanarDoubleIntegrator();
         Δt=settings.time_step,
         state_dimension=STATE_DIMENSION,
         control_dimension=CONTROL_DIMENSION,
     )
 end
+
+"How a state reads in printouts: [px, py, vx, vy] (planar double integrator) or [px, py, v, ψ] (unicycle)."
+state_label(settings) = is_unicycle(settings) ? "[px, py, v, ψ]" : "[px, py, vx, vy]"
 
 "Each player's states `xs` and controls `us` from a stacked trajectory z."
 function player_strategies(z, settings)
@@ -165,8 +185,12 @@ function player_strategies(z, settings)
     )
 end
 
-"θ and Intersection's yielding initial guess for one sampled instance; the warm-up and every trial start here."
-function instance_inputs(instance, flatten_parameters, dynamics, settings)
+"""
+θ and the initial guess for one sampled instance; the warm-up and every trial start here. The guess is
+Intersection's yielding guess, or, given the `double_integrator` systems (:unicycle runs), the double
+integrator's solution of the same instance, with that solve as `double_integrator_solve`.
+"""
+function instance_inputs(instance, flatten_parameters, dynamics, settings; double_integrator=nothing)
     initial_state1, initial_state2 = instance.states
     (; θ) = Intersection.build_instance_parameters(
         flatten_parameters,
@@ -176,6 +200,10 @@ function instance_inputs(instance, flatten_parameters, dynamics, settings)
         settings.goal_position2,
         settings.obstacle_position,
     )
+    if !isnothing(double_integrator)
+        (; guess, reduced) = double_integrator_guess(double_integrator, instance, settings)
+        return (; θ, initial_guess=guess, double_integrator_solve=reduced)
+    end
     (; warmstart_solution) = Intersection.build_yielding_warmstart(
         settings.planning_horizon,
         dynamics,
@@ -185,7 +213,51 @@ function instance_inputs(instance, flatten_parameters, dynamics, settings)
         settings.min_speed,
         settings.max_speed,
     )
-    (; θ, initial_guess=warmstart_solution)
+    (; θ, initial_guess=warmstart_solution, double_integrator_solve=nothing)
+end
+
+"""
+A :unicycle instance's initial guess: solve the same instance with the planar double integrator, from
+its yielding guess, and read each knot of its best stage as a unicycle state. ψ is the direction of
+travel, clamped to the hard heading limit, or the lane heading where the car is nearly stopped; v is
+the velocity along ψ; a and ω are the changes between knots. Positions stay the double integrator's,
+so the guess need not satisfy the unicycle dynamics. Returns the guess and the double-integrator solve.
+"""
+function double_integrator_guess(double_integrator, instance, settings)
+    (; dynamics, problem, flatten_parameters, reduced_kkt) = double_integrator
+    # The sampled unicycle states [px, py, v, ψ] as double-integrator states [px, py, vx, vy].
+    states = [[s[1], s[2], s[3] * cos(s[4]), s[3] * sin(s[4])] for s in instance.states]
+    (; θ, initial_guess) = instance_inputs((; states), flatten_parameters, dynamics, settings)
+    reduced = solve_scholtes_reduced(
+        reduced_kkt,
+        problem,
+        θ,
+        initial_guess,
+        settings;
+        context="double integrator",
+        io=devnull,
+    )
+    Δt = settings.time_step
+    trajectories = map(enumerate(player_strategies(reduced.output.z, settings))) do (player, (; xs))
+        (; lower, upper) = Intersection.unicycle_heading_bounds(player)
+        # Below 0.1 m/s the direction of travel is noise; the lane heading is the guess there.
+        ψ = [hypot(x[3], x[4]) < 0.1 ? (lower + upper) / 2 : clamp(atan(x[4], x[3]), lower, upper) for x in xs]
+        v = [x[3] * cos(h) + x[4] * sin(h) for (x, h) in zip(xs, ψ)]
+        # Knot 1 is the sampled state exactly; the solve meets it only to its tolerance.
+        v[1], ψ[1] = instance.states[player][3], instance.states[player][4]
+        unicycle_xs = [[x[1], x[2], v[t], ψ[t]] for (t, x) in enumerate(xs)]
+        unicycle_xs[1] = copy(instance.states[player])
+        unicycle_us = [
+            t < length(xs) ? [(v[t+1] - v[t]) / Δt, (ψ[t+1] - ψ[t]) / Δt] : [0.0, 0.0] for t in eachindex(xs)
+        ]
+        (; xs=unicycle_xs, us=unicycle_us)
+    end
+    guess = Intersection.flatten_warmstart_solution(
+        settings.planning_horizon,
+        [t.xs for t in trajectories],
+        [t.us for t in trajectories],
+    )
+    (; guess, reduced)
 end
 
 # ── Settings and experiment driver ─────────────────────────────────────────────
@@ -202,7 +274,9 @@ default_settings() = (;
     objective_variants=(:cosh,),                 # names in objective_variants(settings); (:quadratic, :cosh)
     complete_formulations=(:exact,),             # names in `builders` (run)            ; (:exact, :aggregate)
     comparison_modes=(:fixed_primal,),           # names in `modes` (run)               ; (:fixed_primal, :warmstart)
-    # Scenario (Intersection.jl). Units m, s; state [px, py, vx, vy]; P1 drives along x, P2 along y.
+    # Scenario (Intersection.jl). Units m, s; state [px, py, vx, vy], or [px, py, v, ψ] for the unicycle;
+    # P1 drives along x, P2 along y.
+    dynamics_model=:planar_double_integrator,    # or :unicycle, which replaces the unicycle_defaults() entries
     planning_horizon=7,                          # state knots; horizon (planning_horizon - 1) * time_step = 3 s
     time_step=0.5,
     base_initial_state1=[-6.0, -1.0, 1.5, 0.0],  # unperturbed initial states; sampling perturbs them
@@ -215,7 +289,7 @@ default_settings() = (;
     collision_avoidance=1.3,                     # hard: distance between players >= this, from knot 2
     min_speed=0.7,                               # preference: |transverse velocity| <= min_speed (a CAP)
     max_speed=3.0,                               # preference: |forward velocity| <= max_speed
-    control_bounds=(; lb=[-3.0, -3.0], ub=[3.0, 3.0]), # hard, m/s²
+    control_bounds=(; lb=[-3.0, -3.0], ub=[3.0, 3.0]), # hard, m/s²: [ax, ay]; :unicycle [a, v·ω]
     # Initial-state sampling: uniform in base ± perturbation_scale (zero scale = fixed), then rejection.
     sampling_distribution=:uniform,              # the only sampler implemented
     perturbation_scale1=[0.3, 0.3, 0.15, 0.0],   # per coordinate of base_initial_state1
@@ -224,14 +298,14 @@ default_settings() = (;
     initial_separation_margin=0.05,              # m, strict clearance beyond collision_avoidance at knot 1
     max_sampling_attempts=1000,                  # draws before giving up; rejections are saved
     # Objective shape, cosh variant: a in 2a²(cosh(d/a) - 1). Not the error scales below.
-    control_shape_scale=1.5,                     # m/s²
+    control_shape_scale=1.5,                     # m/s²; :unicycle [a, v·ω] too
     goal_shape_scale=6.0,                        # m
     # Solvers
     #! format: off
-    rho_schedule          = [1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8], # reduced system
-    complete_rho_schedule = [1.0,  1e-1, 1e-2, 1e-3, 1e-4, 1e-5], # aggregate complete system; exact runs at ρ = 0
+    rho_schedule          = [1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9], # reduced system
+    complete_rho_schedule = [1.0,  1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6], # aggregate complete system; exact runs at ρ = 0
     #! format: on
-    max_inner_iters=500,                         # Scholtes Newton steps per ρ stage
+    max_inner_iters=1000,                        # Scholtes Newton steps per ρ stage
     linear_solver=:normal,                       # ScholtesOptions.linear_solver
     eta_0=1e-5,                                  # initial regularization η
     # One complete-solve retry per entry, with that η.
@@ -245,20 +319,34 @@ default_settings() = (;
     positive_seed=1.0,                           # unmapped nonnegative variables
     positive_floor=1e-10,                        # floor for every nonnegative variable
     # Trajectory comparison, :warmstart mode
-    error_scales=(; position=1.0, velocity=1.0, control=1.0), # m, m/s, m/s²
+    error_scales=(; position=1.0, velocity=1.0, control=1.0), # m, m/s, m/s²; :unicycle, see trajectory_metrics
     small_rms=0.01,                              # "small adjustment": every group's scaled RMS <= small_rms
     small_max=0.05,                              #   and every |scaled entry| <= small_max
     output_dir=joinpath(dirname(@__DIR__), "output", "intersection_kkt_comparison"),
 )
 
+"""
+Defaults that dynamics_model = :unicycle replaces, since it reads a state as [px, py, v, ψ]: P2 starts at
+2 m/s heading along its lane (+y), as the double integrator's vy = 2, and only its speed is perturbed.
+P1's defaults read the same in both models: 1.5 m/s heading along +x. Everything else is shared,
+control_bounds included: they bound the unicycle's accelerations [a, v·ω] in m/s².
+"""
+unicycle_defaults() = (; base_initial_state2=[1.0, -5.0, 2.0, π/2], perturbation_scale2=[0.3, 0.3, 0.15, 0.0])
+
 # Driver steps, called by `run` in this order; each prints its own console lines.
 
-"Default settings merged with `overrides`, then checked: an unknown name or an empty schedule is an error."
+"""
+Default settings (with unicycle_defaults() for :unicycle) merged with `overrides`, then checked: an
+unknown name, an unknown dynamics model or an empty schedule is an error.
+"""
 function validated_settings(overrides)
     defaults = default_settings()
     unknown = setdiff(keys(overrides), keys(defaults))
     isempty(unknown) || error("Unknown setting(s) in overrides: $(join(unknown, ", "))")
+    is_unicycle(overrides) && (defaults = merge(defaults, unicycle_defaults()))
     settings = merge(defaults, overrides)
+    settings.dynamics_model in (:planar_double_integrator, :unicycle) ||
+        error("dynamics_model must be :planar_double_integrator or :unicycle")
     settings.num_instances > 0 && settings.planning_horizon >= 2 || error("invalid num_instances or planning_horizon")
     schedules = (settings.rho_schedule, settings.complete_rho_schedule)
     all(s -> !isempty(s) && all(ρ -> isfinite(ρ) && ρ > 0, s), schedules) || error("invalid relaxation schedule")
@@ -280,24 +368,45 @@ function run_directory(output_dir)
     mkdir(directory)
 end
 
+"The game for `variant` with `dynamics` and the settings' scenario."
+variant_problem(variant, dynamics, settings) = get_setup(
+    NUM_PLAYERS;
+    dynamics,
+    settings.control_bounds,
+    settings.planning_horizon,
+    settings.collision_avoidance,
+    settings.min_speed,
+    settings.max_speed,
+    settings.map_end,
+    settings.lane_width,
+    variant,
+)
+
+"""
+The planar double integrator's problem and reduced KKT system for `variant`: a :unicycle run solves
+each instance with it first, for the unicycle's initial guess (double_integrator_guess).
+"""
+function build_double_integrator(variant, settings)
+    dynamics = intersection_dynamics(merge(settings, (; dynamics_model=:planar_double_integrator)))
+    (; problem, flatten_parameters) = variant_problem(variant, dynamics, settings)
+    println("Building the double integrator's reduced KKT system for $(variant.name), for the initial guesses...")
+    flush(stdout)
+    reduced_kkt = ReducedGOOP.generate_slacked_reduced_kkt_system(
+        problem;
+        complementarity=:scholtes,
+        codegen=:fast_differentiation,
+    )
+    (; dynamics, problem, flatten_parameters, reduced_kkt)
+end
+
 """
 One objective variant's problem and systems: the reduced KKT system, then for each complete
-formulation its KKT system, σ targets, fixed-primal system and variable mapping. Prints the system
-sizes, and returns everything with the variant's results.jls metadata (sizes, construction times).
+formulation its KKT system, σ targets, fixed-primal system and variable mapping, and for :unicycle the
+double integrator's systems (build_double_integrator). Prints the system sizes, and returns everything
+with the variant's results.jls metadata (sizes, construction times).
 """
 function build_systems(variant, builders, dynamics, settings)
-    (; problem, flatten_parameters) = get_setup(
-        NUM_PLAYERS;
-        dynamics,
-        settings.control_bounds,
-        settings.planning_horizon,
-        settings.collision_avoidance,
-        settings.min_speed,
-        settings.max_speed,
-        settings.map_end,
-        settings.lane_width,
-        variant,
-    )
+    (; problem, flatten_parameters) = variant_problem(variant, dynamics, settings)
     println("Building reduced KKT system for $(variant.name) variant...")
     flush(stdout)
     reduced_construction = @timed ReducedGOOP.generate_slacked_reduced_kkt_system(
@@ -344,7 +453,8 @@ function build_systems(variant, builders, dynamics, settings)
     )
     println("KKT system sizes, $(variant.name) variant:")
     foreach(line -> println("  ", line), size_lines(metadata))
-    (; variant, problem, flatten_parameters, reduced_kkt, formulations, metadata)
+    double_integrator = is_unicycle(settings) ? build_double_integrator(variant, settings) : nothing
+    (; variant, problem, flatten_parameters, reduced_kkt, formulations, metadata, double_integrator)
 end
 
 """
@@ -352,8 +462,8 @@ Untimed JIT warm-up on `instance`, so measured trials don't pay first-call compi
 solve and one try of every complete check, results discarded. Not related to the :warmstart mode.
 """
 function jit_warmup(systems, modes, instance, dynamics, settings)
-    (; variant, problem, flatten_parameters, reduced_kkt, formulations) = systems
-    (; θ, initial_guess) = instance_inputs(instance, flatten_parameters, dynamics, settings)
+    (; variant, problem, flatten_parameters, reduced_kkt, formulations, double_integrator) = systems
+    (; θ, initial_guess) = instance_inputs(instance, flatten_parameters, dynamics, settings; double_integrator)
     print("Warm-up for $(variant.name) (untimed; compiles every solver path; results discarded)... ")
     flush(stdout)
     seconds = @elapsed begin
@@ -379,17 +489,24 @@ function jit_warmup(systems, modes, instance, dynamics, settings)
 end
 
 """
-One trial's reduced solve: print the trial banner, solve from Intersection's yielding initial guess,
-print the verdict, and return the trial's record. Its `checks` start empty; `run` fills them.
+One trial's reduced solve: print the trial banner, solve from the instance's initial guess
+(instance_inputs), print the verdict, and return the trial's record. Its `checks` start empty; `run`
+fills them.
 """
 function solve_reduced_kkt(systems, trial, instance, dynamics, num_checks, settings)
-    (; variant, problem, flatten_parameters, reduced_kkt) = systems
+    (; variant, problem, flatten_parameters, reduced_kkt, double_integrator) = systems
     println("\n══ Trial $trial/$(settings.num_instances) · $(variant.name) ══")
     initial_state1, initial_state2 = instance.states
-    println("  P1 initial state [px, py, vx, vy]: $(round.(initial_state1; digits=3))")
-    println("  P2 initial state [px, py, vx, vy]: $(round.(initial_state2; digits=3))")
+    println("  P1 initial state $(state_label(settings)): $(round.(initial_state1; digits=3))")
+    println("  P2 initial state $(state_label(settings)): $(round.(initial_state2; digits=3))")
     flush(stdout)
-    (; θ, initial_guess) = instance_inputs(instance, flatten_parameters, dynamics, settings)
+    (; θ, initial_guess, double_integrator_solve) =
+        instance_inputs(instance, flatten_parameters, dynamics, settings; double_integrator)
+    isnothing(double_integrator_solve) || println(
+        "  Initial guess: the double integrator's solution of this instance, ‖K₀‖/√m = ",
+        compact(double_integrator_solve.validation.unrelaxed_rms),
+        double_integrator_solve.accepted ? " (accepted)" : " (rejected; its best stage)",
+    )
     context = trial_context(trial, variant.name)
     reduced = solve_scholtes_reduced(reduced_kkt, problem, θ, initial_guess, settings; context)
     println(
@@ -482,6 +599,8 @@ returns the run's directory, settings, instances, results and metadata.
 """
 function run(; overrides=(;))
     settings = validated_settings(overrides)
+    # Every :unicycle run repeats this; the report's method notes carry it too.
+    is_unicycle(settings) && @warn UNICYCLE_METRICS_NOTE
     directory = run_directory(settings.output_dir)
     instances, sampling = sample_instances(Xoshiro(settings.rng_seed), settings)
     results, metadata = Any[], Any[]
@@ -612,6 +731,65 @@ function size_lines(metadata)
         push!(lines, @sprintf("%-18s %5d variables · %d equations", "complete :$(complete.name)", full_columns, rows))
         push!(lines, @sprintf("%-18s (fixed-primal: %d equations × %d unknowns)", "", rows, columns))
     end
+    lines
+end
+
+"""
+The game each player solves, for the report's summary page: dynamics, hard constraints, the speed
+preference's rows and the preference order (Intersection.get_setup, get_setup), written from
+`settings`, so it matches the run's dynamics model and overrides.
+"""
+function dynamics_lines(settings)
+    (; time_step, map_end, lane_width, collision_avoidance, min_speed, max_speed) = settings
+    (; lb, ub) = settings.control_bounds
+    unicycle = is_unicycle(settings)
+    # The control bounds and cost apply to each knot's physical acceleration (physical_acceleration).
+    acceleration = unicycle ? "[a, v·ω]" : "[ax, ay]"
+    lines = if unicycle
+        [
+            "Unicycle, forward Euler, time_step = $time_step s",
+            "  state    [px, py, v, ψ]  (m, m, m/s, rad)",
+            "  control  [a, ω]          (m/s², rad/s)",
+            "  p⁺ = p + Δt·v·[cos ψ, sin ψ],  v⁺ = v + Δt·a,  ψ⁺ = ψ + Δt·ω",
+        ]
+    else
+        [
+            "Planar double integrator, exact for piecewise-constant acceleration, time_step = $time_step s",
+            "  state    [px, py, vx, vy]  (m, m, m/s, m/s)",
+            "  control  [ax, ay]          (m/s², m/s²)",
+            "  p⁺ = p + Δt·v + ½Δt²·a,  v⁺ = v + Δt·a",
+        ]
+    end
+    append!(lines, [
+        "Hard constraints, each player; lane rows scaled by their bound ranges",
+        "  lane       |along-lane position| ≤ map_end = $map_end m, |cross-lane position| ≤ lane_width = $lane_width m",
+    ])
+    unicycle && push!(
+        lines,
+        "  heading    |ψ − lane heading| ≤ $(compact(Intersection.UNICYCLE_HEADING_LIMIT)) rad, " *
+        "lane heading 0 (P1), π/2 (P2)",
+    )
+    append!(lines, [
+        "  control    $acceleration ∈ " * join(("[$(lb[j]), $(ub[j])]" for j in 1:2), " × ") * " m/s²",
+        "  collision  distance between players ≥ $collision_avoidance m, from knot 2",
+        "Speed preference (a prioritized constraint) at every knot; rows scaled by their bound ranges",
+        "  |along-lane velocity| ≤ max_speed = $max_speed m/s, |cross-lane velocity| ≤ min_speed = $min_speed m/s",
+    ])
+    unicycle && push!(lines, "  on the unicycle's velocity (v·cos ψ, v·sin ψ)")
+    objectives = Dict(
+        :quadratic => "d² (:quadratic)",
+        :cosh => "2a²(cosh(d/a) − 1) (:cosh; a = $(settings.control_shape_scale) for each control, " *
+                 "$(settings.goal_shape_scale) m for the goal)",
+    )
+    append!(lines, [
+        "Preferences, lowest → highest priority",
+        "  P1  control, speed, goal",
+        "  P2  control, goal, speed",
+        "  control: Σ φ over every knot's acceleration $acceleration" *
+        (unicycle ? ", plus φ($(YAW_COST_SPEED) m/s·ω) so turning is never free" : ""),
+        "  goal: Σ φ(final position − goal) over x and y",
+        "  φ(d) = " * join((get(objectives, name, ":$name") for name in settings.objective_variants), " or "),
+    ])
     lines
 end
 
@@ -1177,6 +1355,13 @@ end
 
 # ── Metrics, saved results and final summary ───────────────────────────────────
 
+# Printed at the start of every :unicycle run and added to its report's method notes.
+const UNICYCLE_METRICS_NOTE =
+    "dynamics_model = :unicycle: in :warmstart mode, trajectory_metrics groups rows 3:4 as \"velocity\" " *
+    "and rows 5:6 as \"control\", the double integrator's [vx, vy] and [ax, ay]. For the unicycle they are " *
+    "[v, ψ] (m/s, rad) and [a, ω] (m/s², rad/s), so those two groups, their error_scales and the " *
+    "small-adjustment test mix units."
+
 """
 Differences between the reduced and complete trajectories, per group (position, velocity,
 control) and overall after dividing by settings.error_scales. `small` decides between a small
@@ -1184,9 +1369,11 @@ and a substantial adjustment. In fixed-primal mode the trajectories are identica
 metric is 0.
 """
 function trajectory_metrics(reduced, complete, settings)
-    # One column per player and knot: [px, py, vx, vy, ax, ay].
+    # One column per player and knot: [px, py, vx, vy, ax, ay], or [px, py, v, ψ, a, ω] for the unicycle.
     knot_size = STATE_DIMENSION + CONTROL_DIMENSION
     reduced_columns, complete_columns = reshape(reduced, knot_size, :), reshape(complete, knot_size, :)
+    # NOTE: the groups are the double integrator's. For :unicycle, rows 3:4 are [v, ψ] and rows 5:6
+    # are [a, ω], so "velocity" and "control" mix units (UNICYCLE_METRICS_NOTE).
     groups = ((:position, 1:2), (:velocity, 3:4), (:control, 5:6))
     errors = map(groups) do (name, rows)
         reference = vec(reduced_columns[rows, :])
@@ -1461,8 +1648,8 @@ function trial_page(data, row)
     # The one wording, used once per check, for a check that never ran.
     skipped = "skipped (reduced solve rejected)"
     verdicts = [
-        "P1 initial state [px, py, vx, vy]: $(round.(s1; digits=3))",
-        "P2 initial state [px, py, vx, vy]: $(round.(s2; digits=3))",
+        "P1 initial state $(state_label(settings)): $(round.(s1; digits=3))",
+        "P2 initial state $(state_label(settings)): $(round.(s2; digits=3))",
         reduced_verdict(row.reduced, settings),
     ]
     for check in row.checks
@@ -1568,24 +1755,42 @@ function trial_page(data, row)
         ylabel="distance [m]",
     )
     profiles = CM.GridLayout(figure[5, 1])
+    unicycle = is_unicycle(settings)
+    model = intersection_dynamics(settings).model # the control panels plot its bounded accelerations
     panels = [
         CM.Axis(profiles[1, column]; title, xlabel="time [s]", ylabel) for
         (column, (title, ylabel)) in enumerate((
-            ("Velocity vx", "vx [m/s]"),
-            ("Velocity vy", "vy [m/s]"),
-            ("Acceleration ax", "ax [m/s^2]"),
-            ("Acceleration ay", "ay [m/s^2]"),
+            unicycle ? ("Speed v", "v [m/s]") : ("Velocity vx", "vx [m/s]"),
+            unicycle ? ("Heading ψ", "ψ [rad]") : ("Velocity vy", "vy [m/s]"),
+            unicycle ? ("Acceleration a", "a [m/s^2]") : ("Acceleration ax", "ax [m/s^2]"),
+            unicycle ? ("Sideways acceleration v·ω", "v·ω [m/s^2]") : ("Acceleration ay", "ay [m/s^2]"),
         ))
     ]
     for component in 1:2
-        for player in 1:NUM_PLAYERS
-            bounds = Intersection.player_speed_bounds(player; settings.min_speed, settings.max_speed)
-            CM.hlines!(
-                panels[component],
-                [bounds.lower[component], bounds.upper[component]];
-                color=Intersection.player_plot_color(player),
-                linestyle=:dot,
-            )
+        if unicycle && component == 1
+            # The along-lane speed cap, the same for both players (the preference caps v·cos(ψ - lane heading)).
+            CM.hlines!(panels[1], [-settings.max_speed, settings.max_speed]; color=:black, linestyle=:dot)
+        elseif unicycle
+            # Each player's hard heading limit around its lane.
+            for player in 1:NUM_PLAYERS
+                bounds = Intersection.unicycle_heading_bounds(player)
+                CM.hlines!(
+                    panels[2],
+                    [bounds.lower, bounds.upper];
+                    color=Intersection.player_plot_color(player),
+                    linestyle=:dot,
+                )
+            end
+        else
+            for player in 1:NUM_PLAYERS
+                bounds = Intersection.player_speed_bounds(player; settings.min_speed, settings.max_speed)
+                CM.hlines!(
+                    panels[component],
+                    [bounds.lower[component], bounds.upper[component]];
+                    color=Intersection.player_plot_color(player),
+                    linestyle=:dot,
+                )
+            end
         end
         limits = filter(isfinite, [settings.control_bounds.lb[component], settings.control_bounds.ub[component]])
         isempty(limits) || CM.hlines!(panels[2+component], limits; color=:black, linestyle=:dot)
@@ -1635,7 +1840,7 @@ function trial_page(data, row)
                 CM.lines!(
                     panels[2+component],
                     (0:(length(us)-1)) .* settings.time_step,
-                    [u[component] for u in us];
+                    [Intersection.physical_acceleration(model, x, u)[component] for (x, u) in zip(xs, us)];
                     color,
                     linestyle,
                     linewidth=2,
@@ -1663,6 +1868,9 @@ function trial_page(data, row)
     )
     CM.Label(
         figure[7, 1],
+        unicycle ?
+        "Circle: start; star: goal. Dotted: heading limits in each player's colour; " *
+        "the along-lane speed cap and the acceleration bounds in black." :
         "Circle: start; star: goal. Dotted: speed bounds in each player's colour, control bounds in black.";
         fontsize=14,
     )
@@ -1733,7 +1941,10 @@ function save_multipage_pdf(path, figures)
     path
 end
 
-"Text page that opens report.pdf: tolerances, pass counts, system sizes, settings, method notes and failures."
+"""
+Text page that opens report.pdf: tolerances, pass counts, system sizes, dynamics and constraints,
+settings, method notes and failures.
+"""
 function summary_page(data, directory)
     (; settings, results) = data
     figure = Intersection.serif_figure(size=(1600, 1200), fontsize=18, figure_padding=40)
@@ -1766,6 +1977,9 @@ function summary_page(data, directory)
     heading!("System sizes")
     monospace!(join(["$(m.variant):\n  " * join(size_lines(m), "\n  ") for m in data.metadata], "\n"))
 
+    heading!("Dynamics and constraints")
+    monospace!(join(dynamics_lines(settings), "\n"))
+
     heading!("Settings")
     entries = ["$k = $v" for (k, v) in pairs(settings) if k !== :output_dir]
     half = cld(length(entries), 2)
@@ -1791,13 +2005,13 @@ function summary_page(data, directory)
         "Initial-state sampling uses independent uniform deviations within base_initial_state +/- perturbation_scale, per player; zero-scale coordinates remain fixed. Initial lane and separation margins are checked in metres and saved for every draw, including rejections. The original hard collision inequalities apply from knot 2; initial separation is additionally checked at knot 1. No continuous-time safety claim is made.",
     )
     paragraph!(
-        "Both systems use identical physical ordering: player, time knot, [px, py, vx, vy, ax, ay]. Preference slacks map by player/source preference/component, not flat index order. The innermost original equality and inequality multipliers also map by player and original row. All other equality/induced multipliers start at zero; remaining sign-constrained variables use positive_seed, followed by auxiliary-slack initialization from their defining expressions. Full source/destination index maps and labels are saved in results.jls.",
+        "Both systems use identical physical ordering: player, time knot, $(is_unicycle(settings) ? "[px, py, v, ψ, a, ω]" : "[px, py, vx, vy, ax, ay]"). Preference slacks map by player/source preference/component, not flat index order. The innermost original equality and inequality multipliers also map by player and original row. All other equality/induced multipliers start at zero; remaining sign-constrained variables use positive_seed, followed by auxiliary-slack initialization from their defining expressions. Full source/destination index maps and labels are saved in results.jls.",
     )
     paragraph!(
         "Every solve uses Scholtes; each ρ stage's inner loop stops once its scaled relaxed residual drops below min(ρ, $(settings.inner_ρ_tol)), at max_inner_iters, or on a line-search stall, unless the scaled residual reaches its tolerance first. :fixed_primal recovery solves the complete system with the physical trajectory as a parameter, so only the remaining columns move; nonnegative coordinates stay inside the sign box. Exact complete equations have no ε schedule; aggregate uses complete_rho_schedule as the legacy ε. All complete rows remain after fixing physical columns.",
     )
     paragraph!(
-        "Residual curves show the scaled relaxed and unrelaxed residuals on logarithmic axes, concatenated across stages, against solver-trace samples (Scholtes iterates). Reduced curves include all sampled trials; complete curves include all attempted checks, using each check's kept (best) try. Histograms use accepted pairs only. Curves use available samples only: no padding after a run ends, and a gap where a sample is not finite. On the aggregate page, lines are geometric means and bands are mean +/- one sample standard deviation in log10 residual, drawn at indices with at least two contributors. Stage endpoints and raw histories are in results.jls. Each trial page shows that trial's own curves (the relaxed-residual plot marks where each reduced ρ stage starts), its reduced and :warmstart complete trajectories next to their vehicle separation, and their velocity and acceleration profiles overlaid (solid: reduced; dashed: complete), including failed returned iterates with explicit status labels.",
+        "Residual curves show the scaled relaxed and unrelaxed residuals on logarithmic axes, concatenated across stages, against solver-trace samples (Scholtes iterates). Reduced curves include all sampled trials; complete curves include all attempted checks, using each check's kept (best) try. Histograms use accepted pairs only. Curves use available samples only: no padding after a run ends, and a gap where a sample is not finite. On the aggregate page, lines are geometric means and bands are mean +/- one sample standard deviation in log10 residual, drawn at indices with at least two contributors. Stage endpoints and raw histories are in results.jls. Each trial page shows that trial's own curves (the relaxed-residual plot marks where each reduced ρ stage starts), its reduced and :warmstart complete trajectories next to their vehicle separation, and their $(is_unicycle(settings) ? "speed, heading, acceleration and yaw-rate" : "velocity and acceleration") profiles overlaid (solid: reduced; dashed: complete), including failed returned iterates with explicit status labels.",
     )
     paragraph!(
         "A solve is accepted iff its scaled residual is at most $(settings.tol) (reduced) or $(settings.complete_tol) (complete); the solver's exit status is not required. A ρ chain runs all its stages and is judged at the stage with the lowest scaled residual, and a complete check keeps its best try (retries restart with the next η); that iterate is the one kept, compared and plotted. Fixed trajectories retain the reduced solution's finite physical residual; these rows are not removed. The full residual includes stationarity, equality, complementarity, and auxiliary-slack equations. The scaled relaxed residual, largest residual entry, multiplier signs and original physical feasibility are recorded as diagnostics only. Failures do not prove incompatibility.",
@@ -1807,6 +2021,12 @@ function summary_page(data, directory)
     )
     paragraph!(
         "Trajectory normalization: position = $(settings.error_scales.position) m, velocity = $(settings.error_scales.velocity) m/s, control = $(settings.error_scales.control) m/s^2. Small adjustment requires each group's scaled RMS <= $(settings.small_rms) and max scaled component <= $(settings.small_max). Relative norms use a 1e-12 RMS denominator floor. Statistics here are descriptive, not evidence of theoretical equivalence.",
+    )
+    is_unicycle(settings) && paragraph!(UNICYCLE_METRICS_NOTE)
+    is_unicycle(settings) && paragraph!(
+        "dynamics_model = :unicycle: the warm-up and every trial start from the double integrator's solution " *
+        "of the same instance (its best stage, accepted or not), read as unicycle states " *
+        "(double_integrator_guess); that solve is not part of the trial's time.",
     )
 
     heading!("Failures and measured compilation")

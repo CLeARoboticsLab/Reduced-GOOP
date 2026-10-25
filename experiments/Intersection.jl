@@ -110,12 +110,17 @@ function get_setup(
         end
         xmin, ymin = -xmax, -ymax
         xscale, yscale = xmax - xmin, ymax - ymin
-        return [
+        rows = [
             (px - xmin) / xscale,
             (xmax - px) / xscale,
             (py - ymin) / yscale,
             (ymax - py) / yscale,
         ]
+        dynamics.model isa Unicycle || return rows
+        # The unicycle also keeps within UNICYCLE_HEADING_LIMIT of its lane heading (no turning
+        # around), scaled like the lane rows.
+        (; lower, upper) = unicycle_heading_bounds(player)
+        vcat(rows, [(x[4] - lower) / (upper - lower), (upper - x[4]) / (upper - lower)])
     end
 
     function lane_bound_inequality(z; player)
@@ -143,7 +148,7 @@ function get_setup(
         function (z, _)
             (; xs) = trajectory(z; player)
             mapreduce(vcat, 1:length(xs)) do t
-                if dynamics.model isa PlanarDoubleIntegrator
+                if dynamics.model isa Union{PlanarDoubleIntegrator, Unicycle}
                     speed_limit_constraints(dynamics.model, xs[t];
                         player, min_speed, max_speed)
                 else
@@ -159,8 +164,10 @@ function get_setup(
         lb_mask = findall(!isinf, lb)
         ub_mask = findall(!isinf, ub)
         (; xs, us) = trajectory(z; player = i)
-        mapreduce(vcat, us) do u
-            vcat(u[lb_mask] - lb[lb_mask], ub[ub_mask] - u[ub_mask])
+        # Bounds on each knot's physical acceleration: for the unicycle [a, v·ω], not [a, ω].
+        mapreduce(vcat, zip(xs, us)) do (x, u)
+            acceleration = physical_acceleration(dynamics.model, x, u)
+            vcat(acceleration[lb_mask] - lb[lb_mask], ub[ub_mask] - acceleration[ub_mask])
         end
     end
 
@@ -912,10 +919,34 @@ function speed_limit_constraints(::PlanarDoubleIntegrator, x;
     ]
 end
 
-function speed_limit_constraints(::Unicycle, x; speed_limit = 1.5)
-    speed = x[3]
-    return vcat(speed, -speed + speed_limit) # 0 ≤ speed ≤ speed_limit
+"The unicycle's hard limit on turning away from its lane heading: no turning around or into the cross street."
+const UNICYCLE_HEADING_LIMIT = π / 3
+
+"The unicycle's hard heading band: within `limit` of its lane heading, 0 for P1 (+x) and π/2 for P2 (+y)."
+function unicycle_heading_bounds(player; limit = UNICYCLE_HEADING_LIMIT)
+    player in (1, 2) || throw(ArgumentError("Heading bounds are defined for players 1 and 2"))
+    lane_heading = player == 1 ? 0.0 : π / 2
+    (; lower = lane_heading - limit, upper = lane_heading + limit)
 end
+
+"""
+The unicycle's speed preference is the double integrator's, on its velocity (v cos ψ, v sin ψ):
+the same along-lane and cross-lane caps, scaled the same way.
+"""
+function speed_limit_constraints(::Unicycle, x;
+    player = 1, min_speed = 1.0, max_speed = 3.0,
+)
+    speed, heading = x[3], x[4]
+    velocity_state = [x[1], x[2], speed * cos(heading), speed * sin(heading)]
+    speed_limit_constraints(PlanarDoubleIntegrator(), velocity_state; player, min_speed, max_speed)
+end
+
+"""
+A knot's acceleration in m/s², which the control bounds limit: the double integrator's control
+[ax, ay]; the unicycle's along-path and sideways acceleration [a, v·ω].
+"""
+physical_acceleration(::DynamicsModel, _, u) = u
+physical_acceleration(::Unicycle, x, u) = [u[1], x[3] * u[2]]
 
 function speed_limit_constraints(::Bicycle, x; speed_limit = 1.5)
     speed = x[3]

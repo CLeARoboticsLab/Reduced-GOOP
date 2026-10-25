@@ -112,7 +112,7 @@ function intersection_report_figure(page)
                 color = player_plot_color(player), linestyle = :dot)
         end
     else
-        CairoMakie.hlines!(ax_vx, [0, page.max_speed];
+        CairoMakie.hlines!(ax_vx, [-page.max_speed, page.max_speed];
             color = :black, linestyle = :dot)
     end
 
