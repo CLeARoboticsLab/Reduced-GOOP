@@ -133,12 +133,12 @@ function create_planner_from_context(
     t = Ref(0)
     z = Ref{Union{Nothing,Vector{Float64}}}(nothing)
     scale = sqrt(ctx.arm.m)
-    k0(r) = r.residual / scale
+    k₀(r) = r.residual / scale
     goal_dist(zz) = norm(Core_.pot_centre(sc, zz, sc.horizon) .- sc.pot_goal)
 
     function solved_z()
         z[] === nothing || return z[]
-        @printf("[Robotic_arm_receding] T = %d, residual rows m = %d, sqrt(m) = %.3f\n",
+        @printf("[Robotic_arm_receding] T = %d, residual rows m = %d, √m = %.3f\n",
                 ctx.planning_horizon, ctx.arm.m, scale)
         θ = Core_.scenario_parameters(ctx.x_init)
         plotting = get(ENV, "GOOP_PLOT", "1") != "0"
@@ -147,21 +147,21 @@ function create_planner_from_context(
             linear_solver = ctx.linear_solver, proj_eps = ctx.proj_eps,
             max_inner = ctx.max_inner, tol = ctx.tol, stop_at_tol, collect_traces = plotting,
             on_result = (tag, ρ, r, elapsed, tr) -> begin
-                @printf("[Robotic_arm_receding]   rho=%.0e %-10s ||K_0||/sqrt(m)=%.3e %-10s goal_dist=%.5f  %4d iters %.2f s\n",
-                        ρ, tag, k0(r), k0(r) < ctx.tol ? "converged" : "", goal_dist(r.z), r.iters, elapsed)
+                @printf("[Robotic_arm_receding]   rho=%.0e %-10s ‖K₀‖/√m=%.3e %-10s goal_dist=%.5f  %4d iters %.2f s\n",
+                        ρ, tag, k₀(r), k₀(r) < ctx.tol ? "converged" : "", goal_dist(r.z), r.iters, elapsed)
                 tag == "cold" && tr !== nothing && (cold_traces[ρ] = tr)
             end)
         cold, warm = st.value
         @printf("[Robotic_arm_receding] sweep: %.2f s -- JIT %.2f s, solves %.2f s\n",
                 st.time, st.compile_time, st.time - st.compile_time)
         candidates = vcat([("cold", r) for (_, r) in cold], [(tag, r) for (tag, _, r, _) in warm])
-        ok = filter(c -> k0(c[2]) < ctx.tol, candidates)
+        ok = filter(c -> k₀(c[2]) < ctx.tol, candidates)
         scheme, result = select_by_goal_distance ?
                          argmin(c -> goal_dist(c[2].z), candidates) :
-                         argmin(c -> k0(c[2]), isempty(ok) ? candidates : ok)
-        isempty(ok) && @warn "create_planner_from_context: no candidate reached tol (best ||K_0||/sqrt(m) = $(k0(result)), tol = $(ctx.tol))"
-        @printf("[Robotic_arm_receding] solved: %s, rho=%.0e, ||K_0||/sqrt(m)=%.3e, goal_dist=%.5f\n",
-                scheme, result.rho, k0(result), goal_dist(result.z))
+                         argmin(c -> k₀(c[2]), isempty(ok) ? candidates : ok)
+        isempty(ok) && @warn "create_planner_from_context: no candidate reached tol (best ‖K₀‖/√m = $(k₀(result)), tol = $(ctx.tol))"
+        @printf("[Robotic_arm_receding] solved: %s, rho=%.0e, ‖K₀‖/√m=%.3e, goal_dist=%.5f\n",
+                scheme, result.rho, k₀(result), goal_dist(result.z))
         # As the source's planner: every row's figures, after the plan is chosen.
         if plotting
                 tp = @elapsed plot_count = Base.invokelatest(plotting(:write_robotic_arm_plots), sc, cold, warm,

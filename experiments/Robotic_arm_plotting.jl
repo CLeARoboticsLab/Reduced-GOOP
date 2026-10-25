@@ -10,7 +10,9 @@
 # identically). The only changes: this is a module over `experiments/robotic_arm_core.jl`
 # (the adapter below binds a `ScenarioConfig` to the source's global names), `mkpath`
 # makes the file's own directory instead of the source's fixed `examples/figures/robot_arm`,
-# and `new_traces` comes from the core, where the sweep collects the traces.
+# `new_traces` comes from the core, where the sweep collects the traces, and `stop_reason`
+# writes the residuals as ‖K₀‖ and ‖R‖₂ (scaled: /√m) where the source writes `||K_0||` and
+# `||R||_2` (/sqrt(m)).
 #
 # Loaded by the robotic-arm scripts only when figures are drawn, after the solves.
 module RoboticArmPlotting
@@ -689,7 +691,7 @@ function _decade_axis(y; include = nothing, pad = false)
             ylims  = (10.0^(e0 - padding), 10.0^(e1 + padding)))
 end
 
-# The rho-PERTURBED residual the solve actually minimises, NOT `||K_0||`: at a
+# The rho-PERTURBED residual the solve actually minimises, NOT `||K₀||`: at a
 # fixed rho the complementarity products converge to rho, so the true KKT
 # residual has a floor of O(rho) however far this curve falls.
 #
@@ -1068,9 +1070,9 @@ end
 # Which break ended a single-level run, in the solver's own order of precedence.
 # `scale` affects only how the bar is PRINTED.
 function stop_reason(rr, tol_inner, max_inner, tol; scale = 1.0)
-    r_name  = scale == 1 ? "||R||_2" : "||R||_2/sqrt(m)"
-    k0_name = scale == 1 ? "||K_0||" : "||K_0||/sqrt(m)"
-    rr.converged && return @sprintf("%s < %.0e", k0_name, tol / scale)
+    r_name  = scale == 1 ? "‖R‖₂" : "‖R‖₂/√m"
+    k₀_name = scale == 1 ? "‖K₀‖" : "‖K₀‖/√m"
+    rr.converged && return @sprintf("%s < %.0e", k₀_name, tol / scale)
     isempty(rr.history) && return "no iterations"
     isfinite(rr.history[end]) || return "non-finite residual"
     rr.history[end] < tol_inner &&

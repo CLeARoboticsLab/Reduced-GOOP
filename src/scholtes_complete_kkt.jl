@@ -25,7 +25,7 @@ function _initialize_direct_signs!(kkt::CompleteKKTSystem, y)
     y
 end
 
-function _norm_K0(R::ScholtesResiduals{<:CompleteKKTSystem}, r, w, rho)
+function _norm_K₀(R::ScholtesResiduals{<:CompleteKKTSystem}, r, w, rho)
     R.kkt.formulation === :exact && return norm(r)
     R.kkt.complete_residual!(R.Fb, view(w, 1:R.n), R.kkt.θ, 0.0)
     norm(R.Fb)

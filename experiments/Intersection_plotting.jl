@@ -56,7 +56,7 @@ function intersection_report_figure(page)
         fontsize = 26, color = status == :solved ? :darkgreen : :firebrick)
     error_text = round(row["kkt_error_per_equation"]; sigdigits = 4)
     CairoMakie.Label(fig[2, 1:3],
-        "$(get(row, "stop_reason", string(status))) | KKT residual/sqrt(m)=$(error_text) | iterations=$(row["total_iters"])";
+        "$(get(row, "stop_reason", string(status))) | KKT residual/√m=$(error_text) | iterations=$(row["total_iters"])";
         fontsize = 18)
 
     top = CairoMakie.GridLayout(fig[3, 1:3])
@@ -143,8 +143,8 @@ function intersection_report_figure(page)
     relaxed_history = vcat(get(row, "residual_history", Float64[]), row["relaxed_residual"]) ./ scale
     eta_history = get(row, "eta_history", Float64[])
     for (column, title, ylabel, values, threshold) in (
-        (1, "True KKT residual", "log10(||K0|| / sqrt(m))", kkt_history, page.tol),
-        (2, "Relaxed residual", "log10(||R|| / sqrt(m))", relaxed_history, page.rho),
+        (1, "True KKT residual", "log10(‖K₀‖/√m)", kkt_history, page.tol),
+        (2, "Relaxed residual", "log10(‖R‖/√m)", relaxed_history, page.rho),
         (3, "Regularization", "log10(eta)", eta_history, nothing),
     )
         ax = make_axis(7, column, title, ylabel; xlabel = "iteration snapshot")

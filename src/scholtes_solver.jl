@@ -336,7 +336,7 @@ function _solve(
     model_change = adaptive_eta ? zeros(m) : Float64[]
     recent = fill(-Inf, nonmonotone)
     history = Float64[]
-    iters, best_k0, ρ = 0, Inf, schedule[1]
+    iters, best_k₀, ρ = 0, Inf, schedule[1]
     residual_valid = false
     termination_reason = :no_iterations
 
@@ -364,9 +364,9 @@ function _solve(
                 break
             end
 
-            k0 = _norm_K0(res, r, w, ρ)
-            k0 < best_k0 && (best_k0 = k0)
-            k0 < tol && @goto done
+            k₀ = _norm_K₀(res, r, w, ρ)
+            k₀ < best_k₀ && (best_k₀ = k₀)
+            k₀ < tol && @goto done
             if nr < tol_inner
                 termination_reason = :inner_tolerance_reached
                 break
@@ -460,16 +460,16 @@ function _solve(
             residual_valid = true
         end
         verbose && println(
-            "  rho = $ρ  iters = $iters  ||R|| = $(isempty(history) ? NaN : history[end])  ||K_0|| = $best_k0",
+            "  rho = $ρ  iters = $iters  ‖R‖ = $(isempty(history) ? NaN : history[end])  ‖K₀‖ = $best_k₀",
         )
     end
     @label done
 
     residual_valid || _resid!(res, r_cur, b_cur, w, ρ)
-    k0 = _norm_K0(res, r_cur, w, ρ)
+    k₀ = _norm_K₀(res, r_cur, w, ρ)
     s = nc == 0 ? Float64[] : w[(n + 1):(n + nc)]
     u = nc > 0 ? w[(n + nc + 1):end] : Float64[]
-    converged = k0 < tol
+    converged = k₀ < tol
     converged && (termination_reason = :tolerance_reached)
     return (;
         status = converged ? :solved : :failed,
@@ -480,7 +480,7 @@ function _solve(
         s,
         u,
         rho = ρ,
-        residual = k0,
+        residual = k₀,
         relaxed_residual = norm(r_cur),
         converged,
         sign_min = _sign_min(res, w, b_cur),

@@ -61,13 +61,13 @@ function _resid!(R::ScholtesResiduals, dst, bbuf, w, ρ; fill_b::Bool = true)
 end
 
 """
-    _norm_K0(R, Rvec, w, ρ) -> Float64
+    _norm_K₀(R, Rvec, w, ρ) -> Float64
 
 `‖K₀(w)‖`, the unperturbed KKT residual, recovered from `Rvec = R(w; ρ)`: every ρ
 offset is removed, both in the relaxed product rows and in the φ slack-definition
 rows (whose `a` contains ρ).
 """
-function _norm_K0(R::ScholtesResiduals, Rvec, w, ρ)
+function _norm_K₀(R::ScholtesResiduals, Rvec, w, ρ)
     n, nc, n_nc = R.n, R.nc, R.n_nc
     unshifted_end = n_nc + R.kkt.original_nc
     u_index = R.kkt.u_index

@@ -903,7 +903,7 @@ end
         res = RG.ScholtesResiduals(k)
         Rv = zeros(res.m); bv = zeros(res.nc)
         RG._resid!(res, Rv, bv, r.w, r.rho)
-        @test r.residual ≈ RG._norm_K0(res, Rv, r.w, r.rho) atol = 0 rtol = 1e-12
+        @test r.residual ≈ RG._norm_K₀(res, Rv, r.w, r.rho) atol = 0 rtol = 1e-12
         @test r.sign_min ≈ RG._sign_min(res, r.w, bv) atol = 0 rtol = 1e-12
         @test r.z == r.w[1:prob.np]
         k.n_comp == 0 || @test r.shortfall ≈ maximum(abs, r.s .* bv) atol = 0 rtol = 1e-12
@@ -966,9 +966,9 @@ end
     rp = copy(RG._resid!(res, rv, bv, w + h * v, rho)); rm = copy(RG._resid!(res, rv, bv, w - h * v, rho))
     @test norm((rp - rm) / (2h) - J * v) < 1e-8
     RG._resid!(res, rv, bv, w, rho)
-    k0 = RG._norm_K0(res, rv, w, rho)
+    k₀ = RG._norm_K₀(res, rv, w, rho)
     wzero = copy(w); wzero[(k.n + k.n_comp + 1):end] .= 0
-    @test k0 ≈ norm(RG._resid!(res, rv, bv, wzero, 0.0))
+    @test k₀ ≈ norm(RG._resid!(res, rv, bv, wzero, 0.0))
     RG._set_rho!(k, rho)
     RG._resid!(res, rv, bv, w, rho)
     for backend in (:normal, :klu_eta, :klu_sqrt_eta, :svd)

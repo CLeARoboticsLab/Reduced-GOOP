@@ -15,7 +15,7 @@
 # Warm rho chain: blue-first guess, then previous primals, preference slacks, lambda/psi.
 # Gamma/phi, solver slacks, relaxation variables, and eta restart at each rho.
 # Defaults: rho=1e-4,...,1e-8, max_inner_iters=500, tol=1e-4, solver=:normal.
-# KKT convergence: ||K0||/sqrt(m)<tol; inner convergence: ||R||/sqrt(m)<rho.
+# KKT convergence: ||K₀||/sqrt(m)<tol; inner convergence: ||R||/sqrt(m)<rho.
 # [solver exit] table reports residuals, goal errors, separation, and stop reasons.
 # Output: data/Intersection_open_loop/{debug|runs}/<run_id>/plots/.
 # One combined PDF per rho includes the trajectory, diagnostics, and warm start.
@@ -464,7 +464,7 @@ function demo(;
         kkt_error_history = Float64[]
         eta_history = Float64[]
         trace = nt -> begin
-            push!(kkt_error_history, ReducedGOOP._norm_K0(residuals, nt.r, nt.w, nt.rho))
+            push!(kkt_error_history, ReducedGOOP._norm_K₀(residuals, nt.r, nt.w, nt.rho))
             push!(eta_history, nt.eta)
         end
         elapsed_time = @elapsed begin
@@ -783,9 +783,9 @@ function print_intersection_results(rho_results; instance, attempt, residual_sca
     io = stdout,
 )
     println(io, "\n[solver exit] instance $(instance), attempt $(attempt): warm rho chain")
-    println(io, "Residuals /sqrt(m); goal errors and minimum separation in m.")
+    println(io, "Residuals /√m; goal errors and minimum separation in m.")
     @printf(io, "%-9s %-7s %6s %8s %12s %12s %8s %8s %8s  %s\n",
-        "rho", "status", "iters", "time_s", "R/sqrt(m)", "K0/sqrt(m)",
+        "rho", "status", "iters", "time_s", "‖R‖/√m", "‖K₀‖/√m",
         "goal1", "goal2", "min_sep", "stop")
     for (ρ, result) in rho_results
         row = result.solution_dict
@@ -803,11 +803,11 @@ function print_intersection_results(rho_results; instance, attempt, residual_sca
 end
 
 function solver_stop_reason(output, options; scale = 1.0)
-    k0_name = scale == 1 ? "||K₀||" : "||K₀||/√m"
-    r_name = scale == 1 ? "||R||₂" : "||R||₂/√m"
+    k₀_name = scale == 1 ? "‖K₀‖" : "‖K₀‖/√m"
+    r_name = scale == 1 ? "‖R‖₂" : "‖R‖₂/√m"
     reason = output.termination_reason
     reason == :tolerance_reached &&
-        return "KKT tolerance reached ($(k0_name) < $(round(options.tol / scale; sigdigits = 3)))"
+        return "KKT tolerance reached ($(k₀_name) < $(round(options.tol / scale; sigdigits = 3)))"
     reason == :inner_tolerance_reached &&
         return "relaxed-system tolerance reached ($(r_name) < $(round(options.tol_inner / scale; sigdigits = 3)))"
     reason == :max_inner && return "iteration limit reached (max_inner=$(options.max_inner))"

@@ -402,7 +402,7 @@ function solve_rho_sweep(ctx::RoboticArmContext, θ = scenario_parameters(ctx.sc
                          stop_at_tol = false, collect_traces = false, on_result = nothing)
     kkt = ctx.kkt
     scale = sqrt(ctx.m)
-    k0(r) = r.residual / scale
+    k₀(r) = r.residual / scale
     new_trace() = collect_traces ? new_traces() : nothing
     solve_at(ρ; w₀ = nothing, tr = nothing, eta_init = ETA_OPTIONS.eta_init) =
         ReducedGOOP.solve(ReducedGOOP.Scholtes(), kkt, θ; z₀ = z0, w₀,
@@ -417,16 +417,16 @@ function solve_rho_sweep(ctx::RoboticArmContext, θ = scenario_parameters(ctx.sc
         t = @elapsed r = solve_at(ρ; tr)
         report("cold", ρ, r, t, tr)
         push!(cold, ρ => r)
-        stop_at_tol && k0(r) < tol && return cold, warm
+        stop_at_tol && k₀(r) < tol && return cold, warm
     end
     isempty(cold) && return cold, warm
 
-    seed_idx = argmin(i -> k0(cold[i].second), eachindex(cold))
+    seed_idx = argmin(i -> k₀(cold[i].second), eachindex(cold))
     seed, seed_rho = cold[seed_idx].second, cold[seed_idx].first
     remaining = rho_schedule[(findfirst(==(seed_rho), rho_schedule) + 1):end]
-    k0(seed) < tol || @warn @sprintf(
-        "solve_rho_sweep: the best cold row (ρ = %.0e) did not converge (||K_0||/sqrt(m) = %.3e > %.0e)",
-        seed_rho, k0(seed), tol)
+    k₀(seed) < tol || @warn @sprintf(
+        "solve_rho_sweep: the best cold row (ρ = %.0e) did not converge (‖K₀‖/√m = %.3e > %.0e)",
+        seed_rho, k₀(seed), tol)
     eq_cols = eq_columns(kkt)
     prev = seed
     for ρ in remaining
@@ -435,7 +435,7 @@ function solve_rho_sweep(ctx::RoboticArmContext, θ = scenario_parameters(ctx.sc
         t = @elapsed r = solve_at(ρ; w₀, tr, eta_init = CONTINUE_ETA ? prev.eta : ETA_OPTIONS.eta_init)
         report("warm-z+eq", ρ, r, t, tr)
         push!(warm, ("warm-z+eq", ρ, r, tr))
-        stop_at_tol && k0(r) < tol && return cold, warm
+        stop_at_tol && k₀(r) < tol && return cold, warm
         prev = r
     end
     return cold, warm

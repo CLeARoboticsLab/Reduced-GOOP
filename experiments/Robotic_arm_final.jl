@@ -153,8 +153,8 @@ function demo(; receding_horizon::Integer = 1, plot_fig::Bool = true, output_dir
     # ── step 1: the source's open-loop demo ─────────────────────────────────────────────
     ctx = Core_.build_context(sc)
     scale = sqrt(ctx.m)
-    k0(r) = r.residual / scale
-    @printf("\n%d primal variables, residual rows m = %d (n_nc = %d, n_c = %d), sqrt(m) = %.3f\n",
+    k₀(r) = r.residual / scale
+    @printf("\n%d primal variables, residual rows m = %d (n_nc = %d, n_c = %d), √m = %.3f\n",
             length(ctx.kkt.primal_dims), ctx.m, ctx.kkt.n_nc, ctx.kkt.n_comp, scale)
     @printf("KKT build + codegen %.1f s; linear_solver = %s, projected step\n\n",
             ctx.build_time, linear_solver)
@@ -170,7 +170,7 @@ function demo(; receding_horizon::Integer = 1, plot_fig::Bool = true, output_dir
     end
     @printf("solver specialization compiled in %.1fs (once per session)\n\n", tj)
 
-    @printf("%-22s %-6s %-7s %-16s %-9s %-8s %-8s\n", "", "iters", "time_s", "||K_0||/sqrt(m)",
+    @printf("%-22s %-6s %-7s %-16s %-9s %-8s %-8s\n", "", "iters", "time_s", "‖K₀‖/√m",
             "goal_err", "min_gap", "tilt")
     rows = Any[]
     cold_traces = Dict{Float64,NamedTuple}()
@@ -180,18 +180,18 @@ function demo(; receding_horizon::Integer = 1, plot_fig::Bool = true, output_dir
             tag == "cold" && tr !== nothing && (cold_traces[ρ] = tr)
             m = Core_.plan_metrics(sc, r.z, θ)
             @printf("%-22s %-6d %-7.2f %-16.3e %-9.4f %-8.3f %-8.3f\n", @sprintf("rho = %.0e, %s", ρ, tag),
-                    r.iters, t, k0(r), m.goal_error, m.min_gap, m.max_tilt)
+                    r.iters, t, k₀(r), m.goal_error, m.min_gap, m.max_tilt)
             push!(rows, (; tag, rho = ρ, result = r, metrics = m))
         end)
 
     # Converged rows ranked by goal error (the source's demo) or by ‖K₀‖ (its planner);
     # if none converged, the cold RHO_REF row, or the smallest residual.
-    converged = filter(row -> k0(row.result) < Core_.TOL, rows)
+    converged = filter(row -> k₀(row.result) < Core_.TOL, rows)
     ref_rows = filter(row -> row.tag == "cold" && row.rho == Core_.RHO_REF, rows)
     best = !isempty(converged) ?
            argmin(row -> select === :goal_error ? row.metrics.goal_error : row.result.residual, converged) :
            !isempty(ref_rows) ? first(ref_rows) : argmin(row -> row.result.residual, rows)
-    isempty(converged) && @warn "no row met ||K_0||/sqrt(m) < $(Core_.TOL); the plan need not be feasible"
+    isempty(converged) && @warn "no row met ‖K₀‖/√m < $(Core_.TOL); the plan need not be feasible"
     m = best.metrics
     @printf("\nplan: rho = %.0e (%s), goal error %.4f, min gap %.3f (d_min %.2f), max tilt %.3f, handle drift %.1e, worst g %.1e\n",
             best.rho, best.tag, m.goal_error, m.min_gap, sc.d_min, m.max_tilt, m.max_handle_drift,
@@ -239,20 +239,20 @@ function demo(; receding_horizon::Integer = 1, plot_fig::Bool = true, output_dir
                     c, w = Core_.solve_rho_sweep(ctx, θk; z0 = cold_start, linear_solver,
                                                  stop_at_tol = true)
                     append!(attempts, vcat([r for (_, r) in c], [r for (_, _, r, _) in w]))
-                    r = argmin(k0, attempts)
-                    if k0(r) < Core_.TOL
+                    r = argmin(k₀, attempts)
+                    if k₀(r) < Core_.TOL
                         mode = cold_start === z0 ? "sweep (zero control)" : "sweep (shifted plan)"
                         result = r
                     end
                 end
                 if result === nothing
-                    mode, result = "best attempt (not converged)", argmin(k0, attempts)
+                    mode, result = "best attempt (not converged)", argmin(k₀, attempts)
                 end
             end
             mk = Core_.plan_metrics(sc, result.z, θk)
             t = st.time
-            @printf("step %2d  %-22s rho %.0e  %4d iters  %.3f s (JIT %.3f, GC %.3f)  ||K_0||/sqrt(m) %.2e  gap %.3f  goal %.4f\n",
-                    k, mode, result.rho, result.iters, t, st.compile_time, st.gctime, k0(result),
+            @printf("step %2d  %-22s rho %.0e  %4d iters  %.3f s (JIT %.3f, GC %.3f)  ‖K₀‖/√m %.2e  gap %.3f  goal %.4f\n",
+                    k, mode, result.rho, result.iters, t, st.compile_time, st.gctime, k₀(result),
                     mk.min_gap, mk.goal_error)
             push!(steps, (; k, mode, result, time = t))
             execute!(result.z)
