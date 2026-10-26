@@ -31,6 +31,12 @@ function _norm_K₀(R::ScholtesResiduals{<:CompleteKKTSystem}, r, w, rho)
     norm(R.Fb)
 end
 
+function _K₀!(out, R::ScholtesResiduals{<:CompleteKKTSystem}, r, w, rho)
+    R.kkt.formulation === :exact && return copyto!(out, r)
+    R.kkt.complete_residual!(out, view(w, 1:R.n), R.kkt.θ, 0.0)
+    out
+end
+
 """
     generated_exact_complete_kkt_system(goop; codegen = :fast_differentiation, ...)
 

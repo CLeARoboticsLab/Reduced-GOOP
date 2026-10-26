@@ -61,28 +61,40 @@ function _resid!(R::ScholtesResiduals, dst, bbuf, w, ρ; fill_b::Bool = true)
 end
 
 """
+    _K₀_entry(R, Rvec, w, ρ, i) -> Float64
+
+Entry `i` of `K₀(w)`, the unperturbed KKT residual, recovered from `Rvec = R(w; ρ)`:
+every ρ offset is removed, both in the relaxed product rows and in the φ
+slack-definition rows (whose `a` contains ρ).
+"""
+Base.@propagate_inbounds function _K₀_entry(R::ScholtesResiduals, Rvec, w, ρ, i)
+    n, nc, n_nc = R.n, R.nc, R.n_nc
+    i <= n_nc + nc && return i > n_nc + R.kkt.original_nc ? Rvec[i] - ρ : Rvec[i]
+    uj = R.kkt.u_index[i - n_nc - nc]
+    return uj == 0 ? Rvec[i] : Rvec[i] + ρ - (R.scholtes ? w[n + nc + uj] : 0.0)
+end
+
+"""
+    _K₀!(out, R, Rvec, w, ρ) -> out
+
+The vector `K₀(w)` (see `_K₀_entry`), of length `R.m`.
+"""
+function _K₀!(out, R::ScholtesResiduals, Rvec, w, ρ)
+    @inbounds for i in 1:R.m
+        out[i] = _K₀_entry(R, Rvec, w, ρ, i)
+    end
+    return out
+end
+
+"""
     _norm_K₀(R, Rvec, w, ρ) -> Float64
 
-`‖K₀(w)‖`, the unperturbed KKT residual, recovered from `Rvec = R(w; ρ)`: every ρ
-offset is removed, both in the relaxed product rows and in the φ slack-definition
-rows (whose `a` contains ρ).
+`‖K₀(w)‖`, without allocating: the entries of `_K₀!`, squared and summed in order.
 """
 function _norm_K₀(R::ScholtesResiduals, Rvec, w, ρ)
-    n, nc, n_nc = R.n, R.nc, R.n_nc
-    unshifted_end = n_nc + R.kkt.original_nc
-    u_index = R.kkt.u_index
     acc = 0.0
-    @inbounds for i in 1:(n_nc + nc)
-        v = Rvec[i]
-        i > unshifted_end && (v -= ρ)
-        acc += v^2
-    end
-    @inbounds for j in 1:nc
-        uj = u_index[j]
-        v =
-            uj == 0 ? Rvec[n_nc + nc + j] :
-            Rvec[n_nc + nc + j] + ρ - (R.scholtes ? w[n + nc + uj] : 0.0)
-        acc += v^2
+    @inbounds for i in 1:R.m
+        acc += _K₀_entry(R, Rvec, w, ρ, i)^2
     end
     return sqrt(acc)
 end

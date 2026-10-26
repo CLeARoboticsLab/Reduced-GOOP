@@ -218,7 +218,8 @@ end
 
 """
 A :unicycle instance's initial guess: solve the same instance with the planar double integrator, from
-its yielding guess, and read each knot of its best stage as a unicycle state. ψ is the direction of
+its yielding guess and at η₀ = guess_eta_0 (the double integrator's own best η₀, not the unicycle's),
+and read each knot of its best stage as a unicycle state. ψ is the direction of
 travel, clamped to the hard heading limit, or the lane heading where the car is nearly stopped; v is
 the velocity along ψ; a and ω are the changes between knots. Positions stay the double integrator's,
 so the guess need not satisfy the unicycle dynamics. Returns the guess and the double-integrator solve.
@@ -233,7 +234,7 @@ function double_integrator_guess(double_integrator, instance, settings)
         problem,
         θ,
         initial_guess,
-        settings;
+        merge(settings, (; eta_0=settings.guess_eta_0));
         context="double integrator",
         io=devnull,
     )
@@ -277,8 +278,8 @@ default_settings() = (;
     # Scenario (Intersection.jl). Units m, s; state [px, py, vx, vy], or [px, py, v, ψ] for the unicycle;
     # P1 drives along x, P2 along y.
     dynamics_model=:planar_double_integrator,    # or :unicycle, which replaces the unicycle_defaults() entries
-    planning_horizon=7,                          # state knots; horizon (planning_horizon - 1) * time_step = 3 s
-    time_step=0.5,
+    planning_horizon=10,                          # state knots; horizon (planning_horizon - 1) * time_step = 3 s
+    time_step=0.3,
     base_initial_state1=[-6.0, -1.0, 1.5, 0.0],  # unperturbed initial states; sampling perturbs them
     base_initial_state2=[1.0, -5.0, 0.0, 2.0],
     goal_position1=[6.0, -1.0],
@@ -302,14 +303,15 @@ default_settings() = (;
     goal_shape_scale=6.0,                        # m
     # Solvers
     #! format: off
-    rho_schedule          = [1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9], # reduced system
+    rho_schedule          = [1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9], # reduced system
     complete_rho_schedule = [1.0,  1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6], # aggregate complete system; exact runs at ρ = 0
     #! format: on
     max_inner_iters=1000,                        # Scholtes Newton steps per ρ stage
     linear_solver=:normal,                       # ScholtesOptions.linear_solver
-    eta_0=1e-5,                                  # initial regularization η
-    # One complete-solve retry per entry, with that η.
-    retry_eta=[1e-4, 1e-3, 1e-2],
+    eta_0=1e-2,                                  # initial regularization η: every ρ stage, and a complete solve's first try
+    # One complete-solve retry per entry, with that η; all below eta_0, so no retry repeats the first try.
+    retry_eta=[1e-3, 1e-4, 1e-5],
+    guess_eta_0=1e-2,                            # eta_0 of a :unicycle run's double-integrator guess solve
     # Acceptance: a solve is accepted iff its unrelaxed KKT residual ‖K₀‖ / √(number of equations) <= tol,
     # at the best stage of its ρ chain (and, for a complete check, its best try).
     tol=2e-4,                                    # reduced system
@@ -331,7 +333,12 @@ Defaults that dynamics_model = :unicycle replaces, since it reads a state as [px
 P1's defaults read the same in both models: 1.5 m/s heading along +x. Everything else is shared,
 control_bounds included: they bound the unicycle's accelerations [a, v·ω] in m/s².
 """
-unicycle_defaults() = (; base_initial_state2=[1.0, -5.0, 2.0, π/2], perturbation_scale2=[0.3, 0.3, 0.15, 0.0])
+unicycle_defaults() = (; 
+    base_initial_state2=[1.0, -5.0, 2.0, π/2], 
+    perturbation_scale2=[0.3, 0.3, 0.15, 0.0],
+    eta_0 = 3e-5,
+    retry_eta=[1e-6, 1e-5, 1e-4],
+)
 
 # Driver steps, called by `run` in this order; each prints its own console lines.
 
@@ -506,6 +513,8 @@ function solve_reduced_kkt(systems, trial, instance, dynamics, num_checks, setti
         "  Initial guess: the double integrator's solution of this instance, ‖K₀‖/√m = ",
         compact(double_integrator_solve.validation.unrelaxed_rms),
         double_integrator_solve.accepted ? " (accepted)" : " (rejected; its best stage)",
+        "; ",
+        k₀_range(double_integrator_solve.validation),
     )
     context = trial_context(trial, variant.name)
     reduced = solve_scholtes_reduced(reduced_kkt, problem, θ, initial_guess, settings; context)
@@ -555,7 +564,7 @@ function check_complete_kkt(record, systems, formulation, mode, settings)
     catch err
         validation = merge(
             reduced.validation,
-            (; accepted=false, relaxed_rms=NaN, unrelaxed_rms=NaN, max_abs_residual=NaN),
+            (; accepted=false, relaxed_rms=NaN, unrelaxed_rms=NaN, unrelaxed_min=NaN, unrelaxed_max=NaN, max_abs_residual=NaN),
         )
         (;
             accepted=false,
@@ -803,12 +812,16 @@ function print_progress(done, total; width=24)
     flush(stdout)
 end
 
+"The smallest and largest unscaled K₀ rows of a validated iterate, for the verdicts."
+k₀_range(validation) = "K₀ rows from $(compact(validation.unrelaxed_min)) to $(compact(validation.unrelaxed_max))"
+
 "One-line outcome of a reduced solve, printed under its stage table."
 function reduced_verdict(reduced, settings)
     k₀, tol = compact(reduced.validation.unrelaxed_rms), compact(settings.tol)
     stage = "ρ = $(compact(reduced.stages[reduced.best_stage].ρ)), stage $(reduced.best_stage) of $(length(reduced.stages))"
-    reduced.accepted ? "→ reduced accepted at $stage: ‖K₀‖/√m = $k₀ ≤ $tol." :
-    "→ reduced REJECTED: best ‖K₀‖/√m = $k₀ ($stage) > $tol."
+    range = k₀_range(reduced.validation)
+    reduced.accepted ? "→ reduced accepted at $stage: ‖K₀‖/√m = $k₀ ≤ $tol; $range." :
+    "→ reduced REJECTED: best ‖K₀‖/√m = $k₀ ($stage) > $tol; $range."
 end
 
 "One-line outcome of a complete check, printed under its stage tables."
@@ -819,27 +832,30 @@ function complete_verdict(formulation, mode, result, metrics, category, settings
     tries = length(result.attempts) == 1 ? "1 try" : "$(length(result.attempts)) tries"
     stage = "ρ = $(compact(final.stages[final.best_stage].ρ))"
     k₀, tol = compact(result.validation.unrelaxed_rms), compact(settings.complete_tol)
+    range = k₀_range(result.validation)
     result.accepted ||
-        return "→ $name REJECTED after $tries: best ‖K₀‖/√m = $k₀ (try $(result.best_attempt), $stage) > $tol"
+        return "→ $name REJECTED after $tries: best ‖K₀‖/√m = $k₀ (try $(result.best_attempt), $stage) > $tol; $range"
     moved =
         mode.name === :fixed_primal ? "trajectory held fixed" :
         "trajectory moved RMS $(compact(metrics.rms)) ($(replace(string(category), '_' => ' ')))"
-    "→ $name accepted after $tries at $stage: ‖K₀‖/√m = $k₀ ≤ $tol; $moved"
+    "→ $name accepted after $tries at $stage: ‖K₀‖/√m = $k₀ ≤ $tol; $range; $moved"
 end
 
 "Header above each solve's ρ-stage table; `label` names the solve and the η₀ this try uses."
 function print_kkt_header(label; io=stdout)
     println(io, "\n[solver exit] $label")
-    println(io, "Residuals are scaled, ‖·‖/√m; goal errors and minimum separation in m.")
+    println(io, "Residuals are scaled, ‖·‖/√m; K₀ min/max are its smallest and largest unscaled rows; goal errors and minimum separation in m.")
     @printf(
         io,
-        "%-9s %-7s %6s %8s %12s %12s %8s %8s %8s  %s\n",
+        "%-9s %-7s %6s %8s %12s %12s %10s %10s %8s %8s %8s  %s\n",
         "ρ",
         "status",
         "iters",
         "time_s",
         "‖R‖/√m",
         "‖K₀‖/√m",
+        "K₀ min",
+        "K₀ max",
         "goal1",
         "goal2",
         "min_sep",
@@ -855,6 +871,8 @@ function print_kkt_stage(;
     seconds,
     relaxed_rms,
     unrelaxed_rms,
+    unrelaxed_min,
+    unrelaxed_max,
     physical,
     settings,
     stop,
@@ -867,13 +885,15 @@ function print_kkt_stage(;
     )
     @printf(
         io,
-        "%-9.0e %-7s %6d %8.3f %12.2e %12.2e %8.3f %8.3f %8.3f  %s\n",
+        "%-9.0e %-7s %6d %8.3f %12.2e %12.2e %10.2e %10.2e %8.3f %8.3f %8.3f  %s\n",
         ρ,
         string(status),
         iterations,
         seconds,
         relaxed_rms,
         unrelaxed_rms,
+        unrelaxed_min,
+        unrelaxed_max,
         metrics.goal...,
         metrics.min_sep,
         stop
@@ -944,9 +964,9 @@ end
 """
 Acceptance and diagnostics of a kept iterate, whose trajectory is `z`. It is accepted iff its scaled
 residual `unrelaxed_rms` is at most `tol`; every other field is a saved diagnostic. `r` is the
-relaxed residual vector at the stage's ρ.
+relaxed residual vector at the stage's ρ and `k₀` the unscaled unrelaxed one, K₀.
 """
-function validate_solution(problem, θ, z; r, relaxed_rms, unrelaxed_rms, sign_violation, tol)
+function validate_solution(problem, θ, z; r, k₀, relaxed_rms, unrelaxed_rms, sign_violation, tol)
     feasibility = ReducedGOOP.is_feasible(problem, z, θ) # only `worst` is used
     x = BlockArray(z, problem.primal_dims)
     θ_blocks = BlockArray(θ, problem.parameter_dims)
@@ -954,6 +974,8 @@ function validate_solution(problem, θ, z; r, relaxed_rms, unrelaxed_rms, sign_v
     (;
         relaxed_rms,
         unrelaxed_rms,
+        unrelaxed_min=minimum(k₀),
+        unrelaxed_max=maximum(k₀),
         max_abs_residual=maximum(abs, r),
         sign_violation,
         primal=(; equality_max, inequality_violation=max(0.0, -feasibility.worst)),
@@ -974,6 +996,8 @@ function solve_scholtes_reduced(reduced_kkt, problem, θ, initial_guess, setting
         reduced_kkt.vars,
     )
     residuals = ReducedGOOP.ScholtesResiduals(reduced_kkt)
+    # R(w; ρ), b(y) and K₀ at each stage's final iterate, for the table and the validation.
+    r, b, k₀_rows = zeros(m), zeros(reduced_kkt.n_comp), zeros(m)
     stage_initial_guess = initial_guess
     previous_w = nothing
     stage_preference_slacks = nothing
@@ -1005,6 +1029,8 @@ function solve_scholtes_reduced(reduced_kkt, problem, θ, initial_guess, setting
         output = timed.value
         push!(history, (; raw=output.relaxed_residual, unrelaxed=output.residual, eta=output.eta))
         push!(stages, stage_record(; ρ, parameter=:rho_reduced, timed, history, initial=copy(w₀), final=copy(output.w)))
+        ReducedGOOP._resid!(residuals, r, b, output.w, ρ)
+        ReducedGOOP._K₀!(k₀_rows, residuals, r, output.w, ρ)
         print_kkt_stage(;
             ρ,
             status=output.status,
@@ -1012,6 +1038,8 @@ function solve_scholtes_reduced(reduced_kkt, problem, θ, initial_guess, setting
             seconds=last(stages).seconds,
             relaxed_rms=output.relaxed_residual/residual_scale,
             unrelaxed_rms=output.residual/residual_scale,
+            unrelaxed_min=minimum(k₀_rows),
+            unrelaxed_max=maximum(k₀_rows),
             physical=output.z,
             settings,
             stop=Intersection.solver_stop_reason(output, options; scale=residual_scale),
@@ -1029,14 +1057,14 @@ function solve_scholtes_reduced(reduced_kkt, problem, θ, initial_guess, setting
     # Judge and keep the best stage, not the last: each stage restarts γ/φ, s and u, so a later
     # stage can end worse than an earlier, converged one.
     (; output, ρ) = best
-    r = zeros(m)
-    b = zeros(reduced_kkt.n_comp)
     ReducedGOOP._resid!(residuals, r, b, output.w, ρ)
+    ReducedGOOP._K₀!(k₀_rows, residuals, r, output.w, ρ)
     validation = validate_solution(
         problem,
         θ,
         output.z;
         r,
+        k₀=k₀_rows,
         relaxed_rms=norm(r)/residual_scale,
         unrelaxed_rms=ReducedGOOP._norm_K₀(residuals, r, output.w, ρ)/residual_scale,
         sign_violation=max(0.0, -output.sign_min),
@@ -1290,6 +1318,8 @@ function solve_scholtes_complete(
                 seconds=last(stages).seconds,
                 relaxed_rms=norm(r)/residual_scale,
                 unrelaxed_rms=norm(r0)/residual_scale,
+                unrelaxed_min=minimum(r0),
+                unrelaxed_max=maximum(r0),
                 physical=y[complete_kkt.primal_dims],
                 settings,
                 stop=Intersection.solver_stop_reason(output, options; scale=residual_scale),
@@ -1312,6 +1342,7 @@ function solve_scholtes_complete(
             θ,
             y[complete_kkt.primal_dims];
             r,
+            k₀=r0,
             relaxed_rms=norm(r)/residual_scale,
             unrelaxed_rms=norm(r0)/residual_scale,
             sign_violation=max(0.0, -minimum(y[complete_kkt.nonnegative_dims]; init=Inf)),
@@ -1895,8 +1926,8 @@ page per objective variant and trial.
 function plot_results(directory)
     data = deserialize(joinpath(directory, "results.jls"))
     pages = [summary_page(data, directory), aggregate_page(data)]
+    println("Plotting...")
     for row in data.results
-        println("Plotting $(row.variant) trial $(row.trial)...")
         flush(stdout)
         push!(pages, trial_page(data, row))
     end
