@@ -54,6 +54,20 @@ generated_exact_complete_kkt_system(goop::ParametricGOOP; kwargs...) =
     _generate_complete_kkt_system(goop, :exact; kwargs...)
 
 """
+    generated_perturbed_complete_kkt_system(goop; codegen = :fast_differentiation, ...)
+
+The rho-perturbed complete KKT system, the complete counterpart of the perturbed reduced system
+(5.2) of manuscript/main.pdf. It keeps the recursion of `generated_exact_complete_kkt_system`, so
+its stationarity rows are the exact system's (rho is a constant there). At the top level, each
+level k gets its own nonnegative slacks with g - σ_k = 0, as s_k in (5.2); the level's products
+with g become σ_k ⊙ γ_{k,1}, and every complementarity product, including those between
+multipliers, equals rho. At rho = 0 and σ_k = g its residual is the exact system's. Solve it down
+a rho schedule.
+"""
+generated_perturbed_complete_kkt_system(goop::ParametricGOOP; kwargs...) =
+    _generate_complete_kkt_system(goop, :perturbed; kwargs...)
+
+"""
     generate_scholtes_complete_kkt_system(goop; rho = 1e-9, ...)
 
 Build the existing slacked complete formulation directly for `Scholtes()`'s
@@ -67,6 +81,43 @@ the unrelaxed aggregate residual at rho=0 and the relaxed residual separately.
 generate_scholtes_complete_kkt_system(goop::ParametricGOOP; kwargs...) =
     _generate_complete_kkt_system(goop, :aggregate; kwargs...)
 
+"""
+    generate_interior_point_scholtes_kkt_system(goop; codegen = :fast_differentiation, ...)
+
+The perturbed reduced KKT system, equation (5.2) of manuscript/main.pdf, exactly as
+`generate_slacked_reduced_kkt_system(goop; complementarity = :interior_point)` builds it:
+level-indexed slacks with g - σ = 0 and σ ⊙ γ = ϵ, and unsigned lifted multipliers ϕ. Its
+compiled residual and sparse Jacobian are handed to `Scholtes()`'s projected Newton engine in
+the complete systems' container, at ϵ = rho and η = 0 (so the interior-point solver's η-term
+vanishes), with the slacks σ and the inequality duals γ nonnegative. Solve it down a rho
+schedule, like the :aggregate complete system.
+"""
+function generate_interior_point_scholtes_kkt_system(
+    goop::ParametricGOOP;
+    codegen = :fast_differentiation,
+    fd_codegen_chunk_size = SCHOLTES_FD_CHUNK_SIZE,
+)
+    kkt = generate_slacked_reduced_kkt_system(goop; complementarity = :interior_point, codegen, fd_codegen_chunk_size)
+    n, m, p = kkt.variable_dimension, kkt.kkt_dimension, sum(goop.parameter_dims)
+    F! = (out, y, θ, rho) -> (kkt.F!(out, y; θ, ϵ = rho, η = 0.0); out)
+    J! = (out, y, θ, rho) -> (kkt.∇F_z!(out, y; θ, ϵ = rho, η = 0.0); out)
+    J = SymbolicTracingUtils.get_result_buffer(kkt.∇F_z!)
+    rows, cols, _ = SparseArrays.findnz(J)
+    empty_F!, empty_J!, empty_buffer = (out, y, θ, rho) -> out, (out, y, θ, rho) -> out, SparseArrays.spzeros(0, n)
+    system = ScholtesKKTSystem(n, m, 0, kkt.primal_dims, kkt.preference_slack_dims, Int[], p,
+        F!, empty_F!, empty_F!, J!, empty_J!, empty_J!, J, empty_buffer, copy(empty_buffer),
+        (rows, cols), (Int[], Int[]), (Int[], Int[]), Int[], 0, NamedTuple[], kkt.z_symbolic,
+        zeros(p), Ref(0.0), zeros(n), Ref(false))
+    CompleteKKTSystem(system, (; formulation = :interior_point, complete_residual! = F!,
+        F_symbolic = kkt.F_symbolic, z_symbolic = kkt.z_symbolic,
+        nonnegative_dims = [collect(kkt.preference_slack_dims); kkt.interior_point_slack_dims;
+            kkt.inequality_constraint_dual_dims],
+        interior_point_slack_dims = kkt.interior_point_slack_dims,
+        inequality_constraint_dual_dims = kkt.inequality_constraint_dual_dims,
+        equality_constraint_dual_dims = kkt.equality_constraint_dual_dims,
+        kkt_dimension = m, variable_dimension = n))
+end
+
 function _generate_complete_kkt_system(
     goop::ParametricGOOP, formulation::Symbol;
     rho = formulation === :exact ? 0.0 : 1e-9,
@@ -74,10 +125,11 @@ function _generate_complete_kkt_system(
     fd_codegen_chunk_size = SCHOLTES_FD_CHUNK_SIZE,
     backend_options = (;),
 )
-    formulation in (:exact, :aggregate) || throw(ArgumentError("unknown complete formulation"))
-    exact = formulation === :exact
+    formulation in (:exact, :perturbed, :aggregate) || throw(ArgumentError("unknown complete formulation"))
+    # :perturbed follows the exact recursion; only its top-level product rows and slacks differ.
+    exact, perturbed = formulation in (:exact, :perturbed), formulation === :perturbed
     isfinite(rho) && rho >= 0 || throw(ArgumentError("rho must be finite and nonnegative"))
-    exact && rho != 0 && throw(ArgumentError("the exact complete system has no rho relaxation"))
+    formulation === :exact && rho != 0 && throw(ArgumentError("the exact complete system has no rho relaxation"))
     codegen in (:native, :fast_differentiation) || throw(ArgumentError("unknown codegen option: $codegen"))
     for (i, preferences) in enumerate(goop.preferences)
         length(preferences) >= 2 || throw(ArgumentError(
@@ -105,6 +157,11 @@ function _generate_complete_kkt_system(
         F, G, z = copy(f), copy(g), copy(xi)
         inherited_gammas, preference_inequalities = T[], T[]
         slack_G = copy(g)
+        # F's rows as the residual holds them: :perturbed writes level k's products with g as
+        # σ_k ⊙ γ_{k,1} - rho (slacks σ_k, levels 1..K); otherwise the same rows as F.
+        m = length(g)
+        level_slacks = perturbed ? [sym("bar_sigma_$(i)_$(k)", m) for k in 1:K] : nothing
+        residual_F = copy(f)
         groups = (; stationarity = Int[], equality = collect(eachindex(f)), complementarity = Int[])
         levels = Vector{Any}(undef, K)
 
@@ -139,15 +196,19 @@ function _generate_complete_kkt_system(
 
             if exact
                 products = current_G .* current_gamma
+                residual_products = perturbed ?
+                    [level_slacks[k]; current_G[(m+1):end]] .* current_gamma .- rho_symbol : products
                 nstat, ncomp = length(stationarity), length(products)
                 if k == K
                     Fnew = [stationarity; F; products]
+                    residual_F = [stationarity; residual_F; residual_products]
                     groups = (; stationarity = collect(1:nstat),
                         equality = collect((nstat+1):(nstat+length(F))),
                         complementarity = collect((nstat+length(F)+1):(nstat+length(F)+ncomp)))
                 else
                     offset = nstat + ncomp
                     Fnew = [stationarity; products; F]
+                    residual_F = [stationarity; residual_products; residual_F]
                     groups = (; stationarity = [collect(1:nstat); offset .+ groups.stationarity],
                         equality = offset .+ groups.equality,
                         complementarity = [collect((nstat+1):offset); offset .+ groups.complementarity])
@@ -173,10 +234,14 @@ function _generate_complete_kkt_system(
             if k == 1
                 if exact
                     # Coordinate bounds on multipliers and preference slacks are already explicit.
-                    sigma = sym("bar_sigma_$(i)_1", length(slack_G))
+                    # :perturbed holds g once per level, each copy with its own slacks σ_k.
+                    expressions = perturbed ? [repeat(g, K); slack_G[(m+1):end]] : slack_G
+                    sigma = perturbed ?
+                        [reduce(vcat, level_slacks); sym("bar_sigma_preference_$(i)_1", length(slack_G) - m)] :
+                        sym("bar_sigma_$(i)_1", length(slack_G))
                     append!(inequality_slacks, sigma)
-                    push!(residuals, [Fnew; slack_G .- sigma])
-                    push!(slack_expressions, copy(slack_G))
+                    push!(residuals, [residual_F; expressions .- sigma])
+                    push!(slack_expressions, copy(expressions))
                 else
                     sigma = sym("σ_g_$(i)_1", length(G))
                     sp = sym("σₚ_$(i)_1", length(e))
@@ -209,8 +274,8 @@ function _generate_complete_kkt_system(
     block = _compile_scholtes_block(F, y, theta, rho_symbol, eta;
         codegen, fd_codegen_chunk_size, backend_options)
     f_raw!, j_raw!, J, pattern = block
-    F! = (out, y, theta, rho) -> f_raw!(out, y, theta, exact ? 0.0 : rho)
-    J! = (out, y, theta, rho) -> j_raw!(out, y, theta, exact ? 0.0 : rho)
+    F! = (out, y, theta, rho) -> f_raw!(out, y, theta, formulation === :exact ? 0.0 : rho)
+    J! = (out, y, theta, rho) -> j_raw!(out, y, theta, formulation === :exact ? 0.0 : rho)
     empty_F!, empty_J!, empty_buffer, empty_pattern = _compile_scholtes_block(
         T[], y, theta, rho_symbol, eta; codegen, fd_codegen_chunk_size, backend_options)
     system = ScholtesKKTSystem(length(y), length(F), 0, 1:nx,
