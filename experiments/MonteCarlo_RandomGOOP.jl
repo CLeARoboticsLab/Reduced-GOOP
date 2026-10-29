@@ -199,6 +199,33 @@ instance_inputs(instance, settings) =
 """
 Default experiment settings, grouped by purpose; a setting that MonteCarlo_Intersection also has uses
 its name. Replace entries with `run(overrides = (; num_instances = 10))`. Saved verbatim in results.jls.
+
+Solver, formulation and comparison options, and whether each works with either Newton method (✗: an
+error in validated_settings or ScholtesOptions):
+
+    setting                value            what it is                                         :pdip  :scholtes
+    newton_method          :pdip            Algorithm 5.1: step −J⁺K_ρ, backtracking that
+                                            keeps s, γ > 0; one try per solve
+                           :scholtes        projected, η-regularized Newton: bound rule,
+                                            η schedule (eta_0, eta_tightening_rate) and
+                                            complete-solve retries (retry_eta)
+    linear_solver          :svd             dense pinv, the exact J⁺; cost grows as n³         ✓      ✓ (η unused)
+                           :normal          sparse Cholesky of J Jᵀ + η²I; under :pdip,        ✓      ✓
+                                            η = eta_pdip = 1e-6, the Tikhonov limit of J⁺
+                           :klu_eta         sparse LU of [ηI J; Jᵀ −ηI]                        ✗      ✓
+                           :klu_sqrt_eta    the same with √η                                   ✗      ✓
+    reduced_formulations   :interior_point  the paper's (5.2)                                  ✓      ✓
+                           :scholtes        the Scholtes-relaxed reduced system                ✗      ✓
+    complete_formulations  :perturbed       ρ-perturbed complete system, down the ρ chain      ✓      ✓
+                           :exact           complete system (2.12)–(2.17), one stage at ρ = 0  ✓¹     ✓
+                           :aggregate       legacy aggregate system, down the ρ chain          ✓¹     ✓
+    comparison_modes       :cold            complete solve from z = 0; z compared              ✓      ✓
+                           :fixed_primal    complete solve with z held at the reduced z;       ✗      ✓
+                                            needs :scholtes as the first reduced formulation
+
+¹ Allowed but never run; at ρ = 0, :exact lies outside Theorem 5.1, which needs ρ > 0. Under :pdip,
+eta_0, eta_tightening_rate and retry_eta are unused. The defaults are the paper's setting: :pdip, :svd,
+(:interior_point,), (:perturbed,), (:cold,).
 """
 default_settings() = (;
     # Monte Carlo
@@ -210,8 +237,10 @@ default_settings() = (;
     num_levels=(; quadratic=2:6, nonquadratic=2:4),
     # K whose complete systems are built, per class and, optionally, per formulation (levels_for); other K
     # solve only the reduced system. Cosh K = 4 builds :exact and :perturbed only: :exact's build and
-    # compile took ≈ 40 min, and the cosh :aggregate build is several times slower.
-    complete_levels=(; quadratic=2:6, nonquadratic=(; exact=2:4, perturbed=2:4, aggregate=2:3)),
+    # compile took ≈ 40 min, and the cosh :aggregate build is several times slower. Quadratic K = 6 builds
+    # no complete system: under linear_solver = :svd each :perturbed step there is a dense pinv of a
+    # 3248 × 3248 Jacobian (8–15 s), ≈ 13–24 h for the 100 instances.
+    complete_levels=(; quadratic=2:5, nonquadratic=(; exact=2:4, perturbed=2:4, aggregate=2:3)),
     complete_formulations=(:perturbed,),         # names in `builders` (run): :perturbed, :exact, and optionally the legacy :aggregate
     # :interior_point = the paper's (5.2), and/or :scholtes (build_systems). The first is each trial's
     # reduced solve, which every other solve is compared with (solve_reference_reduced).
@@ -234,7 +263,13 @@ default_settings() = (;
     complete_rho_schedule = [1.0, 1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9, 1e-10, 1e-11, 1e-12, 1e-13, 1e-14], # perturbed and aggregate complete systems; exact runs at ρ = 0
     #! format: on
     max_inner_iters=1000,                        # Scholtes Newton steps per ρ stage
-    linear_solver=:normal,                       # ScholtesOptions.linear_solver
+    linear_solver=:svd,                          # ScholtesOptions.linear_solver
+    # ScholtesOptions.method: :scholtes (projected bound rule, η schedule) or :pdip, the manuscript's
+    # Algorithm 5.1 (step −J⁺K_ρ, backtracking that keeps s, γ > 0), the paper's setting. Under :pdip,
+    # linear_solver = :svd takes J⁺ as the exact dense pinv, and :normal its Tikhonov limit at
+    # η = ScholtesOptions.eta_pdip = 1e-6. Under :pdip the η settings below are unused, every solve gets
+    # one try, and :scholtes cannot be a reduced formulation.
+    newton_method=:pdip,
     eta_0=1e-2,                                  # initial regularization η: every ρ stage, and a complete solve's first try
     # η shrinks by 1 − e^(−rate) after each step whose gain ratio exceeds 0.75 (ScholtesOptions.tightening_rate).
     # At 1.2 (×0.70) η is still ≈ 1e-3 when the residual reaches 1e-14, so the local rate is linear; at
@@ -293,6 +328,10 @@ function validated_settings(overrides)
         error("reduced_formulations must be :scholtes and/or :interior_point")
     :fixed_primal in settings.comparison_modes && first(settings.reduced_formulations) !== :scholtes &&
         error("the :fixed_primal mode needs :scholtes as the first reduced formulation")
+    # Algorithm 5.1 has no rule for the :scholtes reduced system's complementarity pairs.
+    settings.newton_method in (:scholtes, :pdip) || error("newton_method must be :scholtes or :pdip")
+    settings.newton_method === :pdip && :scholtes in settings.reduced_formulations &&
+        error("newton_method = :pdip needs reduced_formulations without :scholtes")
     # The complete system needs two levels.
     for name in (:num_levels, :complete_levels)
         setting = settings[name]
@@ -869,13 +908,13 @@ end
 
 """
 Scholtes options of one ρ stage: MonteCarlo_Intersection's scholtes_options, with η's tightening rate
-from `eta_tightening_rate`, and the stages in `tight_rhos` (Fig 2's) stopping at ‖R‖/√m <
-tight_inner_tol instead of min(ρ, inner_ρ_tol), so their Newton iterations show full convergence, as
-in the manuscript's Fig 2.
+from `eta_tightening_rate`, the Newton method from `newton_method`, and the stages in `tight_rhos`
+(Fig 2's) stopping at ‖R‖/√m < tight_inner_tol instead of min(ρ, inner_ρ_tol), so their Newton
+iterations show full convergence, as in the manuscript's Fig 2.
 """
 function scholtes_options(settings; ρ, tol, eta, residual_scale)
     options = MCI.scholtes_options(settings; ρ, tol, eta, residual_scale)
-    options = ReducedGOOP._with_options(options; tightening_rate=settings.eta_tightening_rate)
+    options = ReducedGOOP._with_options(options; tightening_rate=settings.eta_tightening_rate, method=settings.newton_method)
     any(r -> isapprox(r, ρ; rtol=1e-9), settings.tight_rhos) || return options
     ReducedGOOP._with_options(options; tol_inner=settings.tight_inner_tol * residual_scale)
 end
@@ -991,7 +1030,8 @@ function solve_scholtes_projected(
     physical,
     initial,
     settings;
-    retry_values=settings.retry_eta,
+    # :pdip ignores η₀, so a retry would repeat the first try.
+    retry_values=settings.newton_method === :pdip ? Float64[] : settings.retry_eta,
     context,
     io=stdout,
 )
@@ -1018,8 +1058,9 @@ function solve_scholtes_projected(
         try_label =
             attempt == 1 ? "first try" :
             attempt == 2 ? "retry (first try rejected)" : "retry $(attempt - 1) (earlier tries rejected)"
+        method = settings.newton_method === :pdip ? "Algorithm 5.1 (:pdip)" : "η₀ = $(MCI.compact(eta))"
         print_kkt_header(
-            "$context | $(reduced_system ? "reduced" : "complete") :$(formulation.name), :$(mode.name) mode | $try_label: η₀ = $(MCI.compact(eta))";
+            "$context | $(reduced_system ? "reduced" : "complete") :$(formulation.name), :$(mode.name) mode | $try_label: $method";
             io,
         )
         for ρ in schedule

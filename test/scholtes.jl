@@ -1058,3 +1058,58 @@ end
         @test minimum(w[k.nonnegative_dims]) >= 0
     end
 end
+
+@testset "method = :pdip (Algorithm 5.1) on the perturbed reduced and complete systems" begin
+    # Two players, three levels: ‖z‖² on top, (b_i − 0.3)²/2, and the innermost φ(a_i − 1), with the coupled
+    # constraint a_i + 0.1 a_j <= 0.5, whose normal lies in the innermost objective's column space. The
+    # equilibrium is unique, z* = (5/11, 0.3, 5/11, 0.3), and the constraint is active with γ_i = 6/11 > 0.
+    # The lifted multipliers are not, so J is rank-deficient and J⁺ is taken through its Tikhonov limit.
+    # (The benchmark problems violate the column-space rule, and Algorithm 5.1 jams on them.)
+    expected = [5 / 11, 0.3, 5 / 11, 0.3]
+    for innermost in (d -> d^2 / 2, d -> cosh(d) - 1)
+        goop = RG.ParametricGOOP(BlockArray(zeros(4), [2, 2]), BlockArray(Float64[], [0]);
+            preferences = [Function[(x, t) -> sum(abs2, x), (x, t) -> (x[2i] - 0.3)^2 / 2, (x, t) -> innermost(x[2i - 1] - 1)]
+                           for i in 1:2],
+            is_prioritized_constraint = [[false, false, false] for _ in 1:2],
+            equality_constraints = [nothing, nothing],
+            inequality_constraints = [(x, t) -> [0.5 - x[1] - 0.1x[3]], (x, t) -> [0.5 - x[3] - 0.1x[1]]])
+        for k in (RG.generate_interior_point_scholtes_kkt_system(goop), RG.generated_perturbed_complete_kkt_system(goop))
+            θ, w, scale, steps, fallbacks = zeros(k.parameter_dimension), nothing, sqrt(k.n_nc), [], 0
+            step_trace = nt -> push!(steps, (; nt.rho, w = copy(nt.w), r = copy(nt.r), dw = copy(nt.dw),
+                nt.alpha, nt.accepted, nt.trial_norm, w_trial = copy(nt.w_trial), nt.eta))
+            # Down a ρ chain from z = 0, one solve per stage, as experiments/MonteCarlo_RandomGOOP.jl does.
+            for ρ in 10.0 .^ (0:-1:-10)
+                options = RG.ScholtesOptions(; rho_schedule = [ρ], max_inner = 1000, tol = 0.0,
+                    tol_inner = min(ρ, 1e-2) * scale, method = :pdip, linear_solver = :normal)
+                output = isnothing(w) ? RG.solve(RG.Scholtes(), k, θ; z₀ = zeros(4), options, step_trace) :
+                         RG.solve(RG.Scholtes(), k, θ; w₀ = w, options, step_trace)
+                w, fallbacks = output.w, fallbacks + output.klu_fallbacks
+            end
+            accepted = filter(s -> s.accepted, steps)
+            @test length(accepted) == length(steps)
+            @test fallbacks == 0
+            @test all(s -> any(j -> s.eta == 1e-6 * 100.0^j, 0:5), steps)
+            @test all(s -> s.w_trial ≈ s.w + s.alpha * s.dw, accepted)
+            @test all(s -> s.trial_norm <= norm(s.r), accepted)
+            @test all(s -> minimum(s.w_trial[k.nonnegative_dims]) > 0, accepted)
+            # Every step of the first stage is the pseudoinverse step of Algorithm 5.1, though J is rank-deficient.
+            for s in filter(s -> s.rho == 1.0, steps)
+                J = Matrix(k.J_nc!(copy(k.Jnc_buf), s.w, θ, s.rho))
+                @test rank(J) < size(J, 1)
+                @test s.dw ≈ -pinv(J) * s.r rtol = 1e-8
+            end
+            @test norm(w[k.primal_dims] - expected) < 1e-8
+            @test minimum(w[k.nonnegative_dims]) > 0
+        end
+    end
+    # Algorithm 5.1 has no rule for the Scholtes pairs, and the KLU backends always shift by η.
+    @test_throws ArgumentError ssolve(prob_A, prob_A.z0; method = :pdip, linear_solver = :normal)
+    case = build_benchmark_problem(; num_players = 1, levels = 2, kind = :quadratic)
+    k = RG.generated_perturbed_complete_kkt_system(case.problem)
+    for options in (RG.ScholtesOptions(; method = :pdip, linear_solver = :klu_eta),
+                    RG.ScholtesOptions(; method = :newton), RG.ScholtesOptions(; method = :pdip, beta = 1.0),
+                    RG.ScholtesOptions(; method = :pdip, eta_pdip = 0.0))
+        @test_throws ArgumentError RG.solve(RG.Scholtes(), k, zeros(k.parameter_dimension);
+            z₀ = zeros(length(case.expected)), options)
+    end
+end

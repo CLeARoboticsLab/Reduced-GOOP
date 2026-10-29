@@ -17,6 +17,10 @@
 #
 # `P` is the projected rule's arc and the merit is ∞ outside the sign box, so
 # positivity is a property of the direction, never a test on the step length.
+#
+# `method = :pdip` is Algorithm 5.1 of manuscript/main.pdf instead: d = −J⁺r through its
+# Tikhonov limit (no projection), and α ← β α while merit(w + αd) > ‖r‖, so a step that
+# leaves the open sign box is shortened; α < min_step ends the level, as above.
 
 """
     Scholtes()
@@ -37,12 +41,24 @@ except `linear_solver`, which defaults to `:normal` (the robotic-arm setting).
   - `max_inner = 200`: Newton steps per ρ level.
   - `tol = 1e-8`: bar on the true residual ‖K₀‖ (converged). `tol_inner = 1e-11`: bar on
     ‖R(w; ρ)‖ (this level solved).
+  - `method = :scholtes`: the Newton step and line search. `:scholtes` is the scheme below
+    (projected bound rule, Armijo, optional η schedule). `:pdip` is Algorithm 5.1 of
+    manuscript/main.pdf: the step −J⁺R(w; ρ) and a backtracking line search, α ← `beta`·α while
+    ‖R‖ would increase or a sign-constrained coordinate would be ≤ 0, failing at α < `min_step`
+    = 1e-14. J is rank-deficient when the multipliers are not unique, so J⁺R is computed through
+    its Tikhonov limit −Jᵀ(JJᵀ + η²I)⁻¹R, at the smallest η in `eta_pdip`, 100·`eta_pdip`, … whose
+    Cholesky succeeds, restarting at `eta_pdip` every step (`:svd` takes the exact dense `pinv`).
+    `:pdip` needs a system without Scholtes pairs (`n_comp = 0`, e.g. the complete containers)
+    and `linear_solver` `:normal` or `:svd`, and ignores the projection options and the other η options.
   - `projected_step::Bool = true`: the two-metric projected bound rule. It is REQUIRED:
     the exact φ/σ rows are only handled by the projected step, and this package
     supports only φ = true, so `false` throws.
   - `tau = 0.99`: projection floor `(1 − τ)·c_k(w)`. `proj_eps = 1e-12`: the projected
     rule's active-set radius.
   - `nonmonotone = 1`: Armijo against the worst of the last M residual norms.
+  - `beta = 0.5`, `min_step = 1e-14`, `eta_pdip = 1e-6`: `:pdip`'s backtracking factor β, its
+    smallest step and the first η of its ladder. At η = 1e-8 the shift η² = 1e-16 is below the
+    round-off of JJᵀ, so that Cholesky fails whenever J is rank-deficient.
   - `linear_solver`: `:normal` (Cholesky of `JJᵀ + η²I`; default), `:klu_eta` (LU of
     `[ηI J; Jᵀ −ηI]`, the source's `:klu`), `:klu_sqrt_eta` (LU of `[√η I J; Jᵀ −√η I]`,
     this package's interior-point `:klu` convention, where η is the Tikhonov shift) or
@@ -62,10 +78,14 @@ Base.@kwdef struct ScholtesOptions
     max_inner::Int = 200
     tol::Float64 = 1e-8
     tol_inner::Float64 = 1e-11
+    method::Symbol = :scholtes
     projected_step::Bool = true
     tau::Float64 = 0.99
     proj_eps::Float64 = 1e-12
     nonmonotone::Int = 1
+    beta::Float64 = 0.5
+    min_step::Float64 = 1e-14
+    eta_pdip::Float64 = 1e-6
     linear_solver::Symbol = :normal
     refine::Int = 0
     eta_init::Float64 = 1e-8
@@ -269,8 +289,18 @@ function _solve(
     (; rho_init, rho_min, rho_schedule, max_inner, tol, tol_inner, tau, proj_eps) = options
     (; nonmonotone, linear_solver, refine, eta_init, eta_schedule, eta_min, eta_max) = options
     (; gain_low, gain_high, tightening_rate, loosening_rate, verbose) = options
+    (; method, beta, min_step, eta_pdip) = options
 
-    options.projected_step || throw(
+    method in (:scholtes, :pdip) || throw(ArgumentError("method must be :scholtes or :pdip, got $method"))
+    pdip = method === :pdip
+    pdip && kkt.n_comp > 0 && throw(
+        ArgumentError("method = :pdip (Algorithm 5.1) needs a system without Scholtes pairs (n_comp = 0)"),
+    )
+    pdip && linear_solver ∉ (:normal, :svd) &&
+        throw(ArgumentError("method = :pdip needs linear_solver = :normal or :svd, got $linear_solver"))
+    0 < beta < 1 && 0 < min_step < 1 ||
+        throw(ArgumentError("beta and min_step must lie in (0, 1), got $beta and $min_step"))
+    pdip || options.projected_step || throw(
         ArgumentError(
             "phi = true requires projected_step = true (exact φ/σ rows); set projected_step = true.",
         ),
@@ -285,6 +315,8 @@ function _solve(
     solver = _scholtes_step_solver(linear_solver)
     isfinite(eta_init) && eta_init > 0 ||
         throw(ArgumentError("eta_init must be finite and positive"))
+    isfinite(eta_pdip) && eta_pdip > 0 ||
+        throw(ArgumentError("eta_pdip must be finite and positive"))
     all(isfinite, (eta_min, eta_max)) && 0 < eta_min <= eta_max ||
         throw(ArgumentError("eta bounds must be finite and satisfy 0 < eta_min <= eta_max"))
     all(isfinite, (gain_low, gain_high)) && 0 <= gain_low < gain_high || throw(
@@ -294,8 +326,9 @@ function _solve(
         tightening_rate >= 0 &&
         loosening_rate >= 0 ||
         throw(ArgumentError("tightening_rate and loosening_rate must be finite and nonnegative"))
-    adaptive_eta = eta_schedule && linear_solver !== :svd
-    initial_eta = adaptive_eta ? clamp(float(eta_init), eta_min, eta_max) : float(eta_init)
+    # :pdip: every step starts the η ladder at eta_pdip, the Tikhonov limit of J⁺ within round-off (not sticky).
+    adaptive_eta = !pdip && eta_schedule && linear_solver !== :svd
+    initial_eta = pdip ? float(eta_pdip) : adaptive_eta ? clamp(float(eta_init), eta_min, eta_max) : float(eta_init)
 
     schedule =
         isnothing(rho_schedule) ? geometric_schedule(rho_init; stop = rho_min) :
@@ -315,7 +348,7 @@ function _solve(
         gamma_cols,
         eta_init = initial_eta,
         eta_max,
-        eta_sticky = !adaptive_eta,
+        eta_sticky = !pdip && !adaptive_eta,
         refine,
     )
     rule = _ProjectedRule(ctx.nw; tau, eps = proj_eps)
@@ -377,7 +410,7 @@ function _solve(
             slot = slot % length(recent) + 1
             @inbounds recent[slot] = nr
 
-            dw = _bounded_step!(rule, ctx, w, b_cur, r)
+            dw = pdip ? ctx.solve(w, b_cur, r) : _bounded_step!(rule, ctx, w, b_cur, r)
             if length(dw) != length(w) || !all(isfinite, dw)
                 termination_reason = :invalid_step
                 break
@@ -395,15 +428,29 @@ function _solve(
 
             alpha, ok = 1.0, false
             backtracks, trial_norm = 0, Inf
-            while alpha > 1e-14
-                _project!(rule, w_try, w, alpha, dw)
-                trial_norm = _merit!(res, r_try, b_try, w_try, ρ)
-                if trial_norm <= (1 - 1e-4 * alpha) * nr
-                    ok = true
-                    break
+            if pdip
+                # Algorithm 5.1: the merit is ∞ unless every sign-constrained coordinate is > 0.
+                while alpha >= min_step
+                    @. w_try = w + alpha * dw
+                    trial_norm = _merit!(res, r_try, b_try, w_try, ρ)
+                    if trial_norm <= nr
+                        ok = true
+                        break
+                    end
+                    alpha *= beta
+                    backtracks += 1
                 end
-                alpha /= 2
-                backtracks += 1
+            else
+                while alpha > 1e-14
+                    _project!(rule, w_try, w, alpha, dw)
+                    trial_norm = _merit!(res, r_try, b_try, w_try, ρ)
+                    if trial_norm <= (1 - 1e-4 * alpha) * nr
+                        ok = true
+                        break
+                    end
+                    alpha /= 2
+                    backtracks += 1
+                end
             end
             pred_reduction, actual_reduction, gain_ratio = NaN, NaN, NaN
             if adaptive_eta
