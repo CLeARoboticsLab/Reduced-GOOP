@@ -660,7 +660,341 @@ function generate_slacked_quasi_kkt_system(
     )
 end
 
+"""
+Construct the complete KKT system corresponding to a ParametricGOOP, equations (2.12)–(2.17)
+of manuscript/main.pdf: each level keeps the KKT conditions of every level below it, with
+their multipliers. Every player needs at least two levels. As in the manuscript, the
+complete system's variables carry a bar (s̄, σ̄, λ̄, γ̄, γ̄ₚ, μ̄ₛ).
+
+For player i, levels k = Kⁱ (innermost) … 1 (outermost); below the innermost level, F = f,
+G = g and z = xⁱ. Level k is stationary in [zₖ₊₁; sₖ] for
+
+    Lₖ = cₖ − λₖᵀFₖ₊₁ − γₖᵀGₖ₊₁ − γₚₖᵀ(hₖ + sₖ) − μₛₖᵀsₖ
+
+and passes up, with Cₖ = [Gₖ₊₁ ⊙ γₖ; (hₖ + sₖ) ⊙ γₚₖ; sₖ ⊙ μₛₖ] its complementary slackness rows,
+
+    Fₖ = [∇Lₖ; Cₖ; Fₖ₊₁]        (innermost: [∇Lₖ; f; Cₖ])
+    Gₖ = [g; hₖ + sₖ; sₖ; γₖ; γₚₖ; μₛₖ; Gₖ₊₁ without g]
+    zₖ = [zₖ₊₁; sₖ; λₖ; γₖ; γₚₖ; μₛₖ].
+
+A prioritized level minimizes cₖ = 1ᵀsₖ subject to hₖ + sₖ ≥ 0 and sₖ ≥ 0; otherwise cₖ is
+the cost hₖ, and sₖ, γₚₖ and μₛₖ are empty. A player's residual is F₁, with its inequalities
+g and hₘ + sₘ written as equalities with nonnegative slacks σ; s, σ and every γ, γₚ, μₛ are
+sign-bounded coordinates.
+
+`complementarity = :exact` is (2.12)–(2.17), with no relaxation. `complementarity =
+:perturbed` is (6.1): the same recursion, but each level k gets its own slacks σₖ on g
+(g − σₖ = 0), every product row is written with σₖ in place of g, and every product equals
+ρ. At ρ = 0 and σₖ = g its residual is the exact system's. Solve it down a ρ schedule.
+
+Returns a `CompleteKKTSystem` for `Scholtes()`.
+"""
+function generate_slacked_complete_kkt_system(
+    goop::ParametricGOOP;
+    complementarity::Symbol = :exact,
+    backend_options = (;),
+    codegen = :fast_differentiation,
+    fd_codegen_chunk_size = FD_CODEGEN_CHUNK_SIZE,
+)
+    complementarity in (:exact, :perturbed) || throw(
+        ArgumentError("complementarity must be :exact or :perturbed, got $complementarity"),
+    )
+    codegen in (:native, :fast_differentiation) ||
+        throw(ArgumentError("unknown codegen option: $codegen"))
+    for (player, preferences) in enumerate(goop.preferences)
+        length(preferences) >= 2 || throw(
+            ArgumentError(
+                "Complete KKT construction requires K >= 2 for every player; player $player has K = $(length(preferences)).",
+            ),
+        )
+    end
+    perturbed = complementarity === :perturbed
+
+    # Symbolic variables for all primals and parameters.
+    backend = SymbolicTracingUtils.SymbolicsBackend()
+    x =
+        SymbolicTracingUtils.make_variables(backend, :x, sum(goop.primal_dims)) |>
+        to_blockvector(goop.primal_dims)
+    θ =
+        SymbolicTracingUtils.make_variables(backend, :θ, sum(goop.parameter_dims)) |>
+        to_blockvector(goop.parameter_dims)
+    ρ = only(SymbolicTracingUtils.make_variables(backend, :ρ, 1))
+    symbolic_type = eltype(x)
+
+    # Keep track of all the preference (s) and interior point (σ) slacks we create, and of the
+    # expressions the slacks σ stand for.
+    s = symbolic_type[]
+    Σ = symbolic_type[]
+    slack_expressions = symbolic_type[]
+
+    # Keep track of all equality constraint duals (λ) that we create.
+    Λ = symbolic_type[]
+
+    # Keep track of all inequality constraint duals (γ, γₚ, μₛ) that we create.
+    Γ = symbolic_type[]
+
+    # Recursive function to construct a player's KKT conditions.
+    function construct_player_kkt_conditions(
+        preferences,
+        is_prioritized_constraint;
+        player,
+    )
+        num_levels = length(goop.preferences[player]) # Kⁱ
+        level = 1 + num_levels - length(preferences)
+
+        f =
+            goop.equality_dims[player] == 0 ? symbolic_type[] :
+            symbolic_type[goop.equality_constraints[player](x, θ)...]
+        g =
+            goop.inequality_dims[player] == 0 ? symbolic_type[] :
+            symbolic_type[goop.inequality_constraints[player](x, θ)...]
+
+        # Below the inner-most level: F = f, G = g and the variables are xⁱ. Above it, the
+        # conditions of the levels below. F_ρ holds F's rows as the residual writes them; it
+        # differs from F only with :perturbed.
+        (; F, F_ρ, G, z, levels) =
+            length(preferences) == 1 ?
+            (; F = f, F_ρ = f, G = g, z = collect(x[Block(player)]), levels = Any[]) :
+            construct_player_kkt_conditions(
+                preferences[2:end],
+                is_prioritized_constraint[2:end];
+                player,
+            )
+        h = symbolic_type[first(preferences)(x, θ)...]
+
+        λ = SymbolicTracingUtils.make_variables(
+            backend,
+            Symbol("λ̄_$(player)_$(level)"),
+            length(F),
+        )
+        push!(Λ, λ...)
+
+        γ = SymbolicTracingUtils.make_variables(
+            backend,
+            Symbol("γ̄_$(player)_$(level)"),
+            length(G),
+        )
+        push!(Γ, γ...)
+
+        if first(is_prioritized_constraint)
+            # Current priority is a constraint: minimize sum(preference_slack) subject to
+            # h + preference_slack ≥ 0 and preference_slack ≥ 0.
+            preference_slack = SymbolicTracingUtils.make_variables(
+                backend,
+                Symbol("s̄_$(player)_$(level)"),
+                length(h),
+            )
+            push!(s, preference_slack...)
+
+            γₚ = SymbolicTracingUtils.make_variables(
+                backend,
+                Symbol("γ̄ₚ_$(player)_$(level)"),
+                length(h),
+            )
+            push!(Γ, γₚ...)
+
+            μₛ = SymbolicTracingUtils.make_variables(
+                backend,
+                Symbol("μ̄ₛ_$(player)_$(level)"),
+                length(h),
+            )
+            push!(Γ, μₛ...)
+
+            L =
+                sum(preference_slack) - γₚ' * (h .+ preference_slack) -
+                μₛ' * preference_slack - λ' * F - γ' * G
+            vars = [z; preference_slack]
+            ∇L = _fast_gradient(L, vars)
+
+            # Every inequality times its multiplier; the level above inherits this level's
+            # inequalities and multipliers.
+            complementary_slackness = [
+                G .* γ
+                (h .+ preference_slack) .* γₚ
+                preference_slack .* μₛ
+            ]
+            G̃ = [
+                g
+                h .+ preference_slack
+                preference_slack
+                γ
+                γₚ
+                μₛ
+                G[(length(g) + 1):end]
+            ]
+
+            # The residual writes h + preference_slack ≥ 0 as an equality with slacks σₚ ≥ 0.
+            σₚ = SymbolicTracingUtils.make_variables(
+                backend,
+                Symbol("σ̄ₚ_$(player)_$(level)"),
+                length(h),
+            )
+            push!(Σ, σₚ...)
+            push!(slack_expressions, (h .+ preference_slack)...)
+        else
+            @assert length(h) == 1 "Expected a single preference function at the level $(level), but got $(length(h))"
+            # Current priority is a cost.
+            preference_slack, γₚ, μₛ = symbolic_type[], symbolic_type[], symbolic_type[]
+
+            L = only(h) - λ' * F - γ' * G
+            vars = z
+            ∇L = _fast_gradient(L, vars)
+
+            # Every inequality times its multiplier; the level above inherits this level's
+            # multipliers.
+            complementary_slackness = G .* γ
+            G̃ = [g; γ; G[(length(g) + 1):end]]
+        end
+
+        # The residual writes g ≥ 0 as g − σ = 0 with slacks σ ≥ 0: once (:exact), or once per
+        # level (:perturbed), because each level's complementary slackness rows with g (the
+        # first rows of G) then use its own σ and equal ρ, σ ⊙ γ = ρ; a σ shared by all levels
+        # would force their multipliers on g to be equal. At ρ = 0 every σ equals g, and the
+        # system is the exact one. 
+        if perturbed || length(preferences) == 1 # innermost level
+            σ = SymbolicTracingUtils.make_variables(
+                backend,
+                Symbol("σ̄_$(player)_$(level)"),
+                length(g),
+            )
+            push!(Σ, σ...)
+            push!(slack_expressions, g...)
+        end
+        complementary_slackness_ρ =
+            perturbed ?
+            [σ .* γ[1:length(g)]; complementary_slackness[(length(g) + 1):end]] .- ρ :
+            complementary_slackness
+
+        if length(preferences) == 1
+            F̃ = [∇L; F; complementary_slackness]
+            F̃_ρ = [∇L; F_ρ; complementary_slackness_ρ]
+        else
+            F̃ = [∇L; complementary_slackness; F]
+            F̃_ρ = [∇L; complementary_slackness_ρ; F_ρ]
+        end
+
+        level_record = (; 
+            F = F̃,
+            G = G̃,
+            L,
+            lambda = λ,
+            gamma = γ,
+            preference_slack,
+            preference_gamma = γₚ,
+            preference_mu = μₛ,
+            complementary_slackness,
+        )
+        return (;
+            F = F̃,
+            F_ρ = F̃_ρ,
+            G = G̃,
+            z = [z; preference_slack; λ; γ; γₚ; μₛ],
+            levels = vcat(Any[level_record], levels),
+        )
+    end
+
+    # Recursively generate the KKT conditions of each player.
+    player_kkt_conditions = @timeit TO "symbolic expression construction" [
+        construct_player_kkt_conditions(
+            goop.preferences[player],
+            goop.is_prioritized_constraint[player];
+            player,
+        ) for player in 1:(goop.num_players)
+    ]
+
+    # Flatten the residual rows of all players, then write every slacked inequality as an
+    # equality.
+    F = [
+        reduce(vcat, (conditions.F_ρ for conditions in player_kkt_conditions))
+        slack_expressions .- Σ
+    ]
+    G = reduce(vcat, (conditions.G for conditions in player_kkt_conditions))
+
+    # Pack all variables together.
+    z = Vector{symbolic_type}(vcat(x, s, Σ, Λ, Γ))
+    θ = Vector{symbolic_type}(θ)
+
+    idx = blockedrange(length.([x, s, Σ, Λ, Γ]))
+    primal_dims = idx[Block(1)] # x
+    preference_slack_dims = idx[Block(2)] # s
+    interior_point_slack_dims = vcat(idx[Block(3)]) # Σ
+    equality_constraint_dual_dims = vcat(idx[Block(4)]) # Λ
+    inequality_constraint_dual_dims = vcat(idx[Block(5)]) # Γ
+
+    @timeit TO "Jacobian / KKT construction" BuildCompleteKKTSystem(
+        F,
+        z,
+        θ,
+        ρ,
+        primal_dims,
+        preference_slack_dims,
+        interior_point_slack_dims,
+        inequality_constraint_dual_dims;
+        equality_constraint_dual_dims,
+        complementarity,
+        G_symbolic = G,
+        slack_expressions,
+        levels = [conditions.levels for conditions in player_kkt_conditions],
+        backend_options,
+        codegen,
+        fd_codegen_chunk_size,
+    )
+end
+
 # Helper functions
+# Note: the complete generator differentiates with `_fast_gradient`, not with the
+# `SymbolicTracingUtils.gradient` of `generate_slacked_reduced_kkt_system`, because it is faster
+# on large systems: both give the same expressions (checked string for string, and the compiled
+# residuals and Jacobians bitwise), and the intersection game's exact complete system builds in
+# 2.8 s with it against 7.2 s (2026-11-02).
+"""
+`Symbolics.gradient(O, x)`, expression for expression, without walking all of `O` once per
+variable: `executediff` is called only on the terms of a sum that can contain `x[j]` (found
+once from each term's variables). Anything that is not a plain sum, or an `x` with repeated
+entries, goes to `Symbolics.gradient` itself.
+"""
+function _fast_gradient(O, x::AbstractVector{Symbolics.Num})
+    u = Symbolics.unwrap(O)
+    (u isa SymbolicUtils.BasicSymbolic && SymbolicUtils.isadd(u)) ||
+        return Symbolics.gradient(O, x)
+    column = Dict(Symbolics.unwrap(v) => j for (j, v) in enumerate(x))
+    length(column) == length(x) || return Symbolics.gradient(O, x)
+
+    terms = SymbolicUtils.arguments(u)
+    candidates = [Int[] for _ in x]
+    for (t, term) in enumerate(terms)
+        every = false
+        for v in Symbolics.get_variables(term)
+            j = get(column, v, 0)
+            j > 0 ? push!(candidates[j], t) : (every |= !_provably_distinct_leaf(v))
+        end
+        every && foreach(c -> (isempty(c) || last(c) != t) && push!(c, t), candidates)
+    end
+
+    VT = Symbolics.VartypeT
+    return map(eachindex(x)) do j
+        D = Symbolics.Differential(x[j])
+        summed = SymbolicUtils.ArgsT{VT}()
+        for t in candidates[j]
+            t2 = Symbolics.executediff(D, terms[t])
+            Symbolics._iszero(t2) && continue
+            push!(summed, t2)
+        end
+        !isempty(summed) && return Symbolics.Num(SymbolicUtils.add_worker(VT, summed))
+        any(t -> Symbolics.occursin_info(D.x, terms[t]), candidates[j]) ?
+        Symbolics.Num(SymbolicUtils.add_worker(VT, summed)) :
+        Symbolics.Num(Symbolics.COMMON_ZERO)
+    end
+end
+
+# A leaf that provably is not any `x[j]` when it is not one of them: a scalar symbol, or an
+# element indexed by constants.
+function _provably_distinct_leaf(v)
+    SymbolicUtils.issym(v) && return !SymbolicUtils.is_array_shape(SymbolicUtils.shape(v))
+    SymbolicUtils.iscall(v) && SymbolicUtils.operation(v) === getindex || return false
+    return all(i -> i isa Integer || SymbolicUtils.isconst(i), @view SymbolicUtils.arguments(v)[2:end])
+end
+
 make_blocks(vec, b) =
     (@assert length(vec) % b == 0; BlockArray(vec, fill(b, length(vec) ÷ b)))
 

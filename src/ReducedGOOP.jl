@@ -1,7 +1,7 @@
 module ReducedGOOP
 
 using SymbolicTracingUtils: SymbolicTracingUtils
-using Symbolics: Symbolics
+using Symbolics: Symbolics, SymbolicUtils
 using BlockArrays: BlockArrays, BlockArray, Block, blockedrange
 using SparseArrays: SparseArrays
 using InvertedIndices: Not

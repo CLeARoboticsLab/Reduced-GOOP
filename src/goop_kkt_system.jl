@@ -123,15 +123,14 @@ hash-consed DAG shares common subexpressions across all outputs, which shrinks
 the generated code by orders of magnitude and avoids the pathological LLVM
 compile times of the Symbolics/RuntimeGeneratedFunctions path on large systems.
 
-Returns an in-place function `f!(result, z, θ, ϵ, η)`.
+Returns an in-place function `f!(result, z, θ, scalars...)`, one runtime value per symbolic
+scalar parameter: the relaxation, and the regularization η where a construction still has one.
 """
 function _build_fd_codegen_function(
     exprs::AbstractVector{<:Symbolics.Num},
     z_symbolic,
     θ_symbolic,
-    ϵ_symbolic,
-    η_symbolic,
-    ;
+    scalar_symbolics...;
     chunk_size = nothing,
 )
     isnothing(chunk_size) ||
@@ -139,13 +138,15 @@ function _build_fd_codegen_function(
         throw(ArgumentError("FastDifferentiation codegen chunk_size must be positive."))
     fd_z = SymbolicTracingUtils.FD.make_variables(:z, length(z_symbolic))
     fd_θ = SymbolicTracingUtils.FD.make_variables(:θ, length(θ_symbolic))
-    fd_ϵ = SymbolicTracingUtils.FD.make_variables(:ϵ, 1)
-    fd_η = SymbolicTracingUtils.FD.make_variables(:η, 1)
+    fd_scalars = [
+        SymbolicTracingUtils.FD.make_variables(Symbol(:scalar, i), 1) for
+        i in eachindex(scalar_symbolics)
+    ]
 
     varmap = Dict{Any,Any}()
     for (s, f) in zip(
-        Iterators.flatten((z_symbolic, θ_symbolic, (ϵ_symbolic, η_symbolic))),
-        Iterators.flatten((fd_z, fd_θ, fd_ϵ, fd_η)),
+        Iterators.flatten((z_symbolic, θ_symbolic, scalar_symbolics)),
+        Iterators.flatten((fd_z, fd_θ, fd_scalars...)),
     )
         varmap[Symbolics.unwrap(s)] = f
     end
@@ -159,10 +160,10 @@ function _build_fd_codegen_function(
     # A single concatenated input vector keeps the generated function's arity
     # in sync with the runtime call below, which flattens its arguments the
     # same way.
-    fd_inputs = vcat(fd_z, fd_θ, fd_ϵ, fd_η)
+    fd_inputs = vcat(fd_z, fd_θ, fd_scalars...)
     if isnothing(chunk_size) || length(fd_exprs) <= chunk_size
         _f! = SymbolicTracingUtils.FD.make_function(fd_exprs, fd_inputs; in_place = true)
-        return (result, z, θ, ϵ, η) -> _f!(result, vcat(z, θ, ϵ, η))
+        return (result, z, θ, scalars...) -> _f!(result, vcat(z, θ, scalars...))
     end
 
     chunk_ranges = [
@@ -179,8 +180,8 @@ function _build_fd_codegen_function(
             in_place = true,
         ) for range in chunk_ranges
     ]
-    function (result, z, θ, ϵ, η)
-        inputs = vcat(z, θ, ϵ, η)
+    function (result, z, θ, scalars...)
+        inputs = vcat(z, θ, scalars...)
         for (range, f!) in zip(chunk_ranges, chunk_functions)
             f!(@view(result[range]), inputs)
         end
@@ -231,6 +232,41 @@ function _build_symbolics_sparse_jacobian(
         length(ops),
         length(vars),
     )
+end
+
+"""
+Default `fd_codegen_chunk_size` of the complete and Scholtes systems. The FastDifferentiation
+code generator otherwise emits each block as one function, whose compile time grows faster
+than linearly with its size (robotic arm: first solve 44 s unchunked, about 18 s at 32).
+`nothing` restores a single function per block.
+"""
+const FD_CODEGEN_CHUNK_SIZE = 32
+
+"""
+Compile the rows `exprs(z; θ, ρ)` to `f!(out, z, θ, ρ)`, and their sparse Jacobian w.r.t. z to
+`J!(buffer, z, θ, ρ)`, which writes the buffer's `nonzeros` in CSC order. Returns
+`(f!, J!, buffer, (rows, cols))`, the last being the Jacobian's structural nonzeros.
+"""
+function _compile_kkt_block(exprs, z, θ, ρ; codegen, fd_codegen_chunk_size, backend_options)
+    n = length(z)
+    if isempty(exprs)
+        buffer = SparseArrays.spzeros(0, n)
+        return (out, z, θ, ρ) -> out, (J, z, θ, ρ) -> J, buffer, (Int[], Int[])
+    end
+    J_symbolic = _build_symbolics_sparse_jacobian(exprs, z)
+    rows, cols, values = SparseArrays.findnz(J_symbolic)
+    buffer = SparseArrays.sparse(rows, cols, zeros(length(rows)), length(exprs), n)
+    compile(e) =
+        if codegen === :fast_differentiation
+            _build_fd_codegen_function(e, z, θ, ρ; chunk_size = fd_codegen_chunk_size)
+        else
+            SymbolicTracingUtils.build_function(e, z, θ, ρ; in_place = true, backend_options)
+        end
+    _f! = compile(exprs)
+    _v! = isempty(values) ? ((out, _...) -> out) : compile(values)
+    f! = (out, z, θ, ρ) -> (_f!(out, z, θ, ρ); out)
+    J! = (J, z, θ, ρ) -> (_v!(SparseArrays.nonzeros(J), z, θ, ρ); J)
+    return f!, J!, buffer, (rows, cols)
 end
 
 function BuildGOOPKKTSystem(
@@ -365,4 +401,84 @@ function BuildGOOPKKTSystem(
             z_symbolic,
         )
     end
+end
+
+"""
+Compile a complete KKT system (`generate_slacked_complete_kkt_system`) and pack it into the
+containers the Scholtes engine reads: a `ScholtesKKTSystem` without a complementarity block
+(a, b), wrapped in a `CompleteKKTSystem` with the symbolic data. Until one `GOOPKKTSystem`
+holds every system. The exact system has no relaxation: it is evaluated at ρ = 0 whatever ρ
+it is given.
+"""
+function BuildCompleteKKTSystem(
+    F_symbolic::Vector{T},
+    z_symbolic::Vector{T},
+    θ_symbolic::Vector{T},
+    ρ_symbolic::T,
+    primal_dims,
+    preference_slack_dims,
+    interior_point_slack_dims,
+    inequality_constraint_dual_dims;
+    equality_constraint_dual_dims,
+    complementarity,
+    G_symbolic,
+    slack_expressions,
+    levels,
+    backend_options = (;),
+    codegen = :fast_differentiation,
+    fd_codegen_chunk_size = FD_CODEGEN_CHUNK_SIZE,
+) where {T<:Symbolics.Num}
+    exact = complementarity === :exact
+    f!, J!, J_buffer, J_pattern = _compile_kkt_block(
+        F_symbolic,
+        z_symbolic,
+        θ_symbolic,
+        ρ_symbolic;
+        codegen,
+        fd_codegen_chunk_size,
+        backend_options,
+    )
+    F! = (out, z, θ, ρ) -> f!(out, z, θ, exact ? 0.0 : ρ)
+    ∇F! = (out, z, θ, ρ) -> J!(out, z, θ, exact ? 0.0 : ρ)
+    no_f!, no_J!, no_buffer, no_pattern = _compile_kkt_block(
+        T[],
+        z_symbolic,
+        θ_symbolic,
+        ρ_symbolic;
+        codegen,
+        fd_codegen_chunk_size,
+        backend_options,
+    )
+
+    n, m, p = length(z_symbolic), length(F_symbolic), length(θ_symbolic)
+    # The evaluation state (θ, ρ, Jacobian memo) starts at ρ = 0 (exact) or 1e-9 (perturbed).
+    system = ScholtesKKTSystem(
+        n, m, 0, primal_dims, preference_slack_dims, Int[], p,
+        F!, no_f!, no_f!, ∇F!, no_J!, no_J!, J_buffer, no_buffer, copy(no_buffer),
+        J_pattern, no_pattern, no_pattern, Int[], 0, NamedTuple[], z_symbolic,
+        zeros(p), Ref(exact ? 0.0 : 1e-9), zeros(n), Ref(false),
+    )
+    nonnegative_dims = [
+        collect(preference_slack_dims)
+        interior_point_slack_dims
+        inequality_constraint_dual_dims
+    ]
+    CompleteKKTSystem(
+        system,
+        (;
+            formulation = complementarity,
+            complete_residual! = f!,
+            F_symbolic,
+            G_symbolic,
+            z_symbolic,
+            levels,
+            slack_expressions,
+            nonnegative_dims,
+            interior_point_slack_dims,
+            inequality_constraint_dual_dims,
+            equality_constraint_dual_dims,
+            kkt_dimension = m,
+            variable_dimension = n,
+        ),
+    )
 end
