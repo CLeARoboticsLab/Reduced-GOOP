@@ -17,9 +17,6 @@ For every objective variant and every sampled initial state:
                      solution, and report how far the trajectory moves.
 
 Terms
-  aggregate  generate_scholtes_complete_kkt_system: the legacy slacked complete system;
-             complementarity enters as aggregate rows ρ − γᵀG ≥ 0, with ρ (the legacy ε)
-             run down `complete_rho_schedule`.
   exact      generated_exact_complete_kkt_system: componentwise complementarity, no
              relaxation, so it is solved once at ρ = 0.
   R, K₀      residual norm at the stage's ρ, and at ρ = 0; always reported as RMS,
@@ -273,7 +270,7 @@ default_settings() = (;
     num_instances=2,                             # accepted initial states per objective variant
     rng_seed=123,                                # Xoshiro seed for sampling
     objective_variants=(:cosh,),                 # names in objective_variants(settings); (:quadratic, :cosh)
-    complete_formulations=(:exact,),             # names in `builders` (run)            ; (:exact, :aggregate)
+    complete_formulations=(:exact,),             # names in `builders` (run)
     comparison_modes=(:fixed_primal,),           # names in `modes` (run)               ; (:fixed_primal, :warmstart)
     # Scenario (Intersection.jl). Units m, s; state [px, py, vx, vy], or [px, py, v, ψ] for the unicycle;
     # P1 drives along x, P2 along y.
@@ -304,7 +301,6 @@ default_settings() = (;
     # Solvers
     #! format: off
     rho_schedule          = [1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9], # reduced system
-    complete_rho_schedule = [1.0,  1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6], # aggregate complete system; exact runs at ρ = 0
     #! format: on
     max_inner_iters=1000,                        # Scholtes Newton steps per ρ stage
     linear_solver=:normal,                       # ScholtesOptions.linear_solver
@@ -355,8 +351,8 @@ function validated_settings(overrides)
     settings.dynamics_model in (:planar_double_integrator, :unicycle) ||
         error("dynamics_model must be :planar_double_integrator or :unicycle")
     settings.num_instances > 0 && settings.planning_horizon >= 2 || error("invalid num_instances or planning_horizon")
-    schedules = (settings.rho_schedule, settings.complete_rho_schedule)
-    all(s -> !isempty(s) && all(ρ -> isfinite(ρ) && ρ > 0, s), schedules) || error("invalid relaxation schedule")
+    (; rho_schedule) = settings
+    !isempty(rho_schedule) && all(ρ -> isfinite(ρ) && ρ > 0, rho_schedule) || error("invalid relaxation schedule")
     settings
 end
 
@@ -625,10 +621,7 @@ function run(; overrides=(;))
     )
     variants = filter(v -> v.name in settings.objective_variants, objective_variants(settings))
     modes = filter(m -> m.name in settings.comparison_modes, [(; name=:fixed_primal), (; name=:warmstart)])
-    builders = [
-        (; name=:aggregate, build=ReducedGOOP.generate_scholtes_complete_kkt_system),
-        (; name=:exact, build=ReducedGOOP.generated_exact_complete_kkt_system),
-    ]
+    builders = [(; name=:exact, build=ReducedGOOP.generated_exact_complete_kkt_system)]
     builders = filter(b -> b.name in settings.complete_formulations, builders)
     num_checks = length(builders) * length(modes)
     total, done = length(variants) * length(instances) * num_checks, 0
@@ -645,7 +638,7 @@ function run(; overrides=(;))
             # push, so every save stores the progress so far.
             push!(results, record)
             save()
-            # formulations: :aggregate, :exact; modes: :fixed_primal, :warmstart
+            # formulations: :exact; modes: :fixed_primal, :warmstart
             for formulation in systems.formulations, mode in modes
                 push!(record.checks, check_complete_kkt(record, systems, formulation, mode, settings))
                 done += 1
@@ -1146,7 +1139,7 @@ function fixed_primal_formulation(kkt)
         nonzeros(J_out) .= view(nonzeros(full_J), selected_slots)
         J_out
     end
-    # The unrelaxed residual that _norm_K₀ evaluates for :aggregate (exact ignores it).
+    # The unrelaxed residual that CompleteKKTSystem carries; _norm_K₀ does not evaluate it for exact.
     function complete_residual!(out, v, θx, ρ)
         kkt.complete_residual!(out, fill_full!(v, θx), θ_buffer, ρ)
     end
@@ -1232,8 +1225,8 @@ Starting point for a complete solve from an accepted reduced solution. The order
  2. every nonnegative coordinate <- positive_seed;
  3. mapped preference slacks and multipliers <- reduced w (variable_mapping);
  4. nonnegative coordinates floored at positive_floor;
- 5. auxiliary slacks σ <- their defining expressions (compile_slack_targets) at the first ρ
-    of the solve (0 for exact, first(complete_rho_schedule) for aggregate), floored as in 4.
+ 5. auxiliary slacks σ <- their defining expressions (compile_slack_targets) at ρ = 0, the
+    solve's only ρ, floored as in 4.
 """
 function complete_initialization(formulation, output, θ, settings)
     (; complete_kkt) = formulation
@@ -1242,9 +1235,8 @@ function complete_initialization(formulation, output, θ, settings)
     y[complete_kkt.nonnegative_dims] .= settings.positive_seed
     y[formulation.mapping.destination] .= output.w[formulation.mapping.source]
     y[complete_kkt.nonnegative_dims] .= max.(y[complete_kkt.nonnegative_dims], settings.positive_floor)
-    ρ = formulation.name === :exact ? 0.0 : first(settings.complete_rho_schedule)
     y[complete_kkt.interior_point_slack_dims] .=
-        max.(formulation.slack_targets(y, θ, ρ), settings.positive_floor)
+        max.(formulation.slack_targets(y, θ, 0.0), settings.positive_floor)
     y
 end
 
@@ -1261,9 +1253,8 @@ function solve_scholtes_complete(
     io=stdout,
 )
     (; complete_kkt) = formulation
-    # exact is unrelaxed: one stage at ρ = 0. aggregate runs down complete_rho_schedule (ρ plays
-    # the legacy ε). Each retry restarts from `initial` with the next η.
-    schedule = formulation.name === :exact ? [0.0] : settings.complete_rho_schedule
+    # exact is unrelaxed: one stage at ρ = 0. Each retry restarts from `initial` with the next η.
+    schedule = [0.0]
     # :warmstart solves the whole complete system. :fixed_primal solves the fixed-primal system,
     # whose unknowns are the free columns and whose parameters are [θ; x], so x cannot move.
     # Note: until 2026-10-22 :fixed_primal used NonlinearSolve's BoundedTrustRegion. On these
@@ -1289,9 +1280,8 @@ function solve_scholtes_complete(
         )
         for ρ in schedule
             stage_initial = copy(y)
-            # The 1e-12 floor is defensive: exact ignores ρ (its residual is evaluated at ρ = 0)
-            # and complete_rho_schedule stays above it, so it changes nothing today; for exact
-            # it only keeps ρ and tol_inner positive.
+            # exact ignores ρ (its residual is evaluated at ρ = 0); the 1e-12 floor only keeps ρ and
+            # tol_inner positive.
             options = scholtes_options(settings; ρ=max(ρ, 1e-12), tol=settings.complete_tol, eta, residual_scale)
             (; history, trace) = history_recorder(residuals, ρ)
             timed = @timed ReducedGOOP.solve(
@@ -1305,8 +1295,7 @@ function solve_scholtes_complete(
             output = timed.value
             y[unknowns] .= output.w
             push!(history, (; raw=output.relaxed_residual, unrelaxed=output.residual, eta=output.eta))
-            parameter = formulation.name === :exact ? :unrelaxed : :epsilon_complete
-            push!(stages, stage_record(; ρ, parameter, timed, history, initial=stage_initial, final=copy(y)))
+            push!(stages, stage_record(; ρ, parameter=:unrelaxed, timed, history, initial=stage_initial, final=copy(y)))
             # Residuals of the full complete iterate, for the table and the best-stage choice.
             r, r0 = zeros(complete_kkt.n_nc), zeros(complete_kkt.n_nc)
             complete_kkt.F_nc!(r, y, θ, ρ)
@@ -1566,8 +1555,6 @@ end
 const CHECK_COLORS = Dict(
     (:exact, :fixed_primal) => :navy,
     (:exact, :warmstart) => :seagreen,
-    (:aggregate, :fixed_primal) => :purple,
-    (:aggregate, :warmstart) => :goldenrod,
 )
 
 "A solve's `field` trace (:unrelaxed for K₀, :raw for R) over all its stages, as RMS over `equations` rows."
@@ -1773,7 +1760,7 @@ function trial_page(data, row)
                 physical=isnothing(complete) ? nothing : complete.physical,
                 status=check_status(check),
                 k₀,
-                linestyle=check.formulation === :exact ? :dash : :dashdot,
+                linestyle=:dash,
             ),
         )
     end
@@ -2039,7 +2026,7 @@ function summary_page(data, directory)
         "Both systems use identical physical ordering: player, time knot, $(is_unicycle(settings) ? "[px, py, v, ψ, a, ω]" : "[px, py, vx, vy, ax, ay]"). Preference slacks map by player/source preference/component, not flat index order. The innermost original equality and inequality multipliers also map by player and original row. All other equality/induced multipliers start at zero; remaining sign-constrained variables use positive_seed, followed by auxiliary-slack initialization from their defining expressions. Full source/destination index maps and labels are saved in results.jls.",
     )
     paragraph!(
-        "Every solve uses Scholtes; each ρ stage's inner loop stops once its scaled relaxed residual drops below min(ρ, $(settings.inner_ρ_tol)), at max_inner_iters, or on a line-search stall, unless the scaled residual reaches its tolerance first. :fixed_primal recovery solves the complete system with the physical trajectory as a parameter, so only the remaining columns move; nonnegative coordinates stay inside the sign box. Exact complete equations have no ε schedule; aggregate uses complete_rho_schedule as the legacy ε. All complete rows remain after fixing physical columns.",
+        "Every solve uses Scholtes; each ρ stage's inner loop stops once its scaled relaxed residual drops below min(ρ, $(settings.inner_ρ_tol)), at max_inner_iters, or on a line-search stall, unless the scaled residual reaches its tolerance first. :fixed_primal recovery solves the complete system with the physical trajectory as a parameter, so only the remaining columns move; nonnegative coordinates stay inside the sign box. Exact complete equations have no ε schedule. All complete rows remain after fixing physical columns.",
     )
     paragraph!(
         "Residual curves show the scaled relaxed and unrelaxed residuals on logarithmic axes, concatenated across stages, against solver-trace samples (Scholtes iterates). Reduced curves include all sampled trials; complete curves include all attempted checks, using each check's kept (best) try. Histograms use accepted pairs only. Curves use available samples only: no padding after a run ends, and a gap where a sample is not finite. On the aggregate page, lines are geometric means and bands are mean +/- one sample standard deviation in log10 residual, drawn at indices with at least two contributors. Stage endpoints and raw histories are in results.jls. Each trial page shows that trial's own curves (the relaxed-residual plot marks where each reduced ρ stage starts), its reduced and :warmstart complete trajectories next to their vehicle separation, and their $(is_unicycle(settings) ? "speed, heading, acceleration and yaw-rate" : "velocity and acceleration") profiles overlaid (solid: reduced; dashed: complete), including failed returned iterates with explicit status labels.",

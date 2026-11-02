@@ -16,7 +16,6 @@ const TO = TimerOutput()
 include("goop_kkt_system.jl")
 include("goop.jl")
 include("solver.jl")
-include("parametric_optimization_problem.jl")
 
 # Scholtes relaxation (opt-in via `complementarity = :scholtes`), ported from
 # ScholtesReducedGOOP.jl by Jingqi Li: the KKT blocks, the residual and sign box,

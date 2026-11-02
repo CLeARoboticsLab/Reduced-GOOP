@@ -29,10 +29,8 @@ F stacks, for every player and level,
 
 over z = [x; s; σ; λ; γ; ψ; φ]. The solver keeps σ, γ (and s) positive, drives ϵ → 0,
 and recovers x from the primal block. φ enters only through the stationarity rows. The
-reduced path creates no preference slacks s; the complete formulation
-(`generate_slacked_complete_kkt_system`) uses them, with the nested KKT conditions
-written out explicitly. With `drop_higher_order_terms = true` (quasi), every term of
-∇ₓLₖ that would be differentiated more than twice is set to zero.
+reduced path creates no preference slacks s. With `drop_higher_order_terms = true`
+(quasi), every term of ∇ₓLₖ that would be differentiated more than twice is set to zero.
 
 For the Scholtes form of the same hierarchy (exact φ rows, ρ homotopy) see
 `ScholtesKKTSystem` in src/scholtes_kkt.jl.

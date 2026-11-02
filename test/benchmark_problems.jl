@@ -67,7 +67,6 @@ function default_interior_point_options(;
 end
 
 # Generate KKT systems 
-complete_kkt_system(problem) = ReducedGOOP.generate_slacked_complete_kkt_system(problem)
 reduced_kkt_system(problem) = ReducedGOOP.generate_slacked_reduced_kkt_system(problem)
 quasi_kkt_system(problem) = ReducedGOOP.generate_slacked_quasi_kkt_system(problem)
 
