@@ -16,11 +16,14 @@
 #             w ← P(w + αd)
 #
 # `P` is the projected rule's arc and the merit is ∞ outside the sign box, so
-# positivity is a property of the direction, never a test on the step length.
+# positivity is a property of the direction, never a test on the step length. This is
+# `method = :projected_regularized`, the default.
 #
-# `method = :pdip` is Algorithm 5.1 of manuscript/main.pdf instead: d = −J⁺r through its
-# Tikhonov limit (no projection), and α ← β α while merit(w + αd) > ‖r‖, so a step that
-# leaves the open sign box is shortened; α < min_step ends the level, as above.
+# `method = :pdip` is Algorithm 5.1 of manuscript/main.pdf instead: d = −J⁺r with no
+# projection (the exact dense pinv under `linear_solver = :svd`, its Tikhonov limit under
+# `:normal`), and α ← β α while merit(w + αd) > ‖r‖, so a step that leaves the open sign box
+# is shortened; α < min_step ends the level, as above. The ‖K₀(w)‖ < tol test, before every
+# Newton step, stops the whole solve.
 
 """
     Scholtes()
@@ -41,15 +44,16 @@ except `linear_solver`, which defaults to `:normal` (the robotic-arm setting).
   - `max_inner = 200`: Newton steps per ρ level.
   - `tol = 1e-8`: bar on the true residual ‖K₀‖ (converged). `tol_inner = 1e-11`: bar on
     ‖R(w; ρ)‖ (this level solved).
-  - `method = :scholtes`: the Newton step and line search. `:scholtes` is the scheme below
-    (projected bound rule, Armijo, optional η schedule). `:pdip` is Algorithm 5.1 of
-    manuscript/main.pdf: the step −J⁺R(w; ρ) and a backtracking line search, α ← `beta`·α while
-    ‖R‖ would increase or a sign-constrained coordinate would be ≤ 0, failing at α < `min_step`
-    = 1e-14. J is rank-deficient when the multipliers are not unique, so J⁺R is computed through
-    its Tikhonov limit −Jᵀ(JJᵀ + η²I)⁻¹R, at the smallest η in `eta_pdip`, 100·`eta_pdip`, … whose
-    Cholesky succeeds, restarting at `eta_pdip` every step (`:svd` takes the exact dense `pinv`).
-    `:pdip` needs a system without Scholtes pairs (`n_comp = 0`, e.g. the complete containers)
-    and `linear_solver` `:normal` or `:svd`, and ignores the projection options and the other η options.
+  - `method = :projected_regularized`: the Newton step and line search. `:projected_regularized`
+    is the projected, η-regularized scheme in this file's header (projected bound rule, Armijo,
+    optional η schedule). `:pdip` is Algorithm 5.1 of manuscript/main.pdf: the step −J⁺R(w; ρ)
+    and a backtracking line search, α ← `beta`·α while ‖R‖ would increase or a sign-constrained
+    coordinate would be ≤ 0, failing at α < `min_step` = 1e-14. J is rank-deficient when the
+    multipliers are not unique. `linear_solver = :svd` computes J⁺R exactly, by the dense `pinv`;
+    `:normal` computes its Tikhonov limit −Jᵀ(JJᵀ + η²I)⁻¹R, at the smallest η in `eta_pdip`,
+    100·`eta_pdip`, … whose Cholesky succeeds, restarting at `eta_pdip` every step. `:pdip` needs
+    a system without Scholtes pairs (`n_comp = 0`, e.g. the complete containers) and
+    `linear_solver` `:normal` or `:svd`, and ignores the projection options and the other η options.
   - `projected_step::Bool = true`: the two-metric projected bound rule. It is REQUIRED:
     the exact φ/σ rows are only handled by the projected step, and this package
     supports only φ = true, so `false` throws.
@@ -78,7 +82,7 @@ Base.@kwdef struct ScholtesOptions
     max_inner::Int = 200
     tol::Float64 = 1e-8
     tol_inner::Float64 = 1e-11
-    method::Symbol = :scholtes
+    method::Symbol = :projected_regularized
     projected_step::Bool = true
     tau::Float64 = 0.99
     proj_eps::Float64 = 1e-12
@@ -291,7 +295,8 @@ function _solve(
     (; gain_low, gain_high, tightening_rate, loosening_rate, verbose) = options
     (; method, beta, min_step, eta_pdip) = options
 
-    method in (:scholtes, :pdip) || throw(ArgumentError("method must be :scholtes or :pdip, got $method"))
+    method in (:projected_regularized, :pdip) ||
+        throw(ArgumentError("method must be :projected_regularized or :pdip, got $method"))
     pdip = method === :pdip
     pdip && kkt.n_comp > 0 && throw(
         ArgumentError("method = :pdip (Algorithm 5.1) needs a system without Scholtes pairs (n_comp = 0)"),

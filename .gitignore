@@ -38,3 +38,6 @@ AGENTS.md
 CLAUDE.md
 .claude/
 .codebase-memory/
+
+# Python bytecode cache (experiments/RandomGOOP_plotting.py)
+__pycache__/

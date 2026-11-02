@@ -1100,6 +1100,15 @@ end
             end
             @test norm(w[k.primal_dims] - expected) < 1e-8
             @test minimum(w[k.nonnegative_dims]) > 0
+            # The ‖K₀‖ < tol stop (the experiment's early stop), checked before every Newton step: with tol far above
+            # ‖K₀‖, a solve stops at its first residual evaluation, with the exact J⁺ (:svd) and its Tikhonov limit.
+            for linear_solver in (:svd, :normal)
+                options = RG.ScholtesOptions(; rho_schedule = [1.0], max_inner = 1000, tol = 1e10, tol_inner = 1e-10,
+                    method = :pdip, linear_solver)
+                output = RG.solve(RG.Scholtes(), k, θ; z₀ = zeros(4), options)
+                @test output.iters == 1
+                @test output.termination_reason === :tolerance_reached
+            end
         end
     end
     # Algorithm 5.1 has no rule for the Scholtes pairs, and the KLU backends always shift by η.

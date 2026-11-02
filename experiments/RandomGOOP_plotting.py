@@ -1,24 +1,27 @@
 """
-Figures and tables for the manuscript's §6.1–6.2 from one MonteCarlo_RandomGOOP run directory.
+Figures and tables for the manuscript's §6 from one MonteCarlo_RandomGOOP run directory.
 
 Reads the CSV files that MonteCarlo_RandomGOOP.export_csv writes (settings, sizes, setup, solves, stages,
-traces) and writes into <run_dir>/figures/:
-  fig2_<formulation>.{png,pdf}         convergence traces, styled like manuscript/trace.png: one row per
-                                       objective class; reduced panels at ρ = 1.0 and 0.1, then the complete
-                                       panels (:perturbed and :aggregate at ρ = 1.0 and 0.1, :exact at ρ = 0);
-                                       traces aligned at the iteration where each reaches its floor
-  fig3_<formulation>.{png,pdf}         histograms of log10 ‖z_complete − z_reduced‖₂, one panel per class,
-  fig3_<formulation>_<class>.pdf       styled like manuscript/exp4_kkt_equiv.pdf; and one file per class
-  table2_<formulation>.tex             Table 2 (tab:kkt-compare-levels) in the manuscript's layout
-  timing_table.tex, timing_table.md    build, compile and solve time of the reduced system and each
-                                       complete formulation, per class and K
-  timing_per_rho.{png,pdf}             solve seconds and Newton iterations per ρ stage, per class
+traces) and writes into <run_dir>/figures/, with <pair> = interior_point_perturbed (the reduced (5.2) and
+the complete :perturbed system):
+  timing_per_rho_<pair>.{png,pdf}      manuscript Fig 2: Newton steps (top row) and solve seconds (bottom
+                                       row) per ρ stage, mean ± std after the 2.5 % trimming, one column per class
+  fig2_<pair>.{png,pdf}                manuscript Fig 3: convergence traces at ρ = 1.0 and 0.1, one row per
+                                       class, each solve aligned at its last iterate, over its last five
+                                       Newton steps, with the quadratic reference from two steps before
+  fig3_<pair>.{png,pdf}                manuscript Fig 4: histograms of log10 ‖z_complete − z_reduced‖₂,
+  fig3_<pair>_<class>.pdf              one panel per class; and one file per class
+  table2_<pair>.tex, table2.tex        Table 2 (tab:kkt-compare-levels) in the manuscript's layout
+  table3_setup_<pair>.tex, table3.tex  Table 3 (tab:setup-time)
+  timing_per_rho_sec6.pdf, fig2_sec6.pdf, fig3_sec6.pdf
+                                       copies of Figs 2–4 under the manuscript's file names (MANUSCRIPT_FIGURES)
+  timing_table.tex, timing_table.md    build, compile and solve time of each system, per class and K
 
 Table 2 cells: sizes from the manuscript's formulas (Props. thm:quadratic-growth-reduced-kkt and
 thm:exponential-growth-complete-kkt); solve time as mean ± standard deviation of the accepted solves after
-trimming the top and bottom 2.5 %. A K the class does not run is blank; a system that was not built, or
-that has no accepted solve, is "Failed"; a cell with fewer than all solves accepted gets a dagger, and
-the counts are listed in a comment below the table.
+trimming the top and bottom 2.5 %. A K the class does not run is blank; a system that was not built
+(complete_levels) is "--", and one with no accepted solve "Failed"; a cell with fewer than all solves
+accepted gets a dagger, and the counts are listed in a comment below the table.
 
 Usage (MonteCarlo_RandomGOOP.run calls this at the end, through plot_results):
     uv run --no-project --isolated --with matplotlib --with numpy python -I experiments/RandomGOOP_plotting.py \
@@ -29,12 +32,14 @@ import argparse
 import csv
 import math
 import pathlib
+import shutil
 from collections import defaultdict
 
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+from matplotlib.lines import Line2D  # noqa: E402
 from matplotlib.ticker import MaxNLocator  # noqa: E402
 import numpy as np  # noqa: E402
 
@@ -45,11 +50,14 @@ COMPLETE_COLOR = "#d0283a"
 HISTOGRAM_COLOR = "#74a1c7"
 INK = "#1a1a1a"
 CLASS_ORDER = ("quadratic", "nonquadratic")
-REDUCED_SYSTEMS = ("reduced_scholtes", "reduced_interior_point")  # :scholtes, and (5.2) as :interior_point
-FORMULATIONS = ("perturbed", "exact", "aggregate")  # complete formulations
-SHORT = {"reduced_scholtes": "scholtes", "reduced_interior_point": "interior_point"}
-# Table 2, Fig 2 and Fig 3 of the manuscript: R = the paper's (5.2), C = the exact complete system (your call).
+REDUCED_SYSTEMS = ("reduced_interior_point",)  # the paper's (5.2)
+FORMULATIONS = ("perturbed",)  # the ρ-perturbed complete system (6.1)
+SHORT = {"reduced_interior_point": "interior_point"}
+# The manuscript's tables and figures: R = the paper's (5.2), C = the ρ-perturbed complete system (6.1).
 MAIN_PAIR = ("reduced_interior_point", "perturbed")
+# The manuscript's file names for MAIN_PAIR's figures (manuscript/6_experiments.tex): Fig 2 is the per-ρ
+# figure; Figs 3 and 4 keep the file names of their earlier numbers.
+MANUSCRIPT_FIGURES = {"timing_per_rho": "timing_per_rho_sec6.pdf", "fig2": "fig2_sec6.pdf", "fig3": "fig3_sec6.pdf"}
 
 plt.rcParams.update(
     {
@@ -98,8 +106,8 @@ def read_run(run_dir):
 
 
 def system_key(row):
-    """'reduced_scholtes', 'reduced_interior_point', 'exact' or 'aggregate' (older runs: reduced rows unlabeled)."""
-    return "reduced_" + (row["formulation"] or "scholtes") if row["system"] == "reduced" else row["formulation"]
+    """'reduced_interior_point' or 'perturbed'."""
+    return "reduced_" + row["formulation"] if row["system"] == "reduced" else row["formulation"]
 
 
 def levels_run(run, class_name):
@@ -121,8 +129,9 @@ def trimmed(values, fraction=0.025):
     return values[k : len(values) - k] if len(values) > 2 * k else values
 
 
-def format_seconds(value):
-    return f"{value:.2f}" if abs(value) >= 0.1 else f"{value:.3f}"
+def format_seconds(value, like=None):
+    """Seconds to 2 decimals from 0.1 s up and 3 below; with `like`, to the decimals of `like` (a std takes its mean's)."""
+    return f"{value:.2f}" if abs(value if like is None else like) >= 0.1 else f"{value:.3f}"
 
 
 # ── Table 2 ──────────────────────────────────────────────────────────────────
@@ -143,16 +152,19 @@ def manuscript_sizes(K, settings):
 
 
 def time_cell(run, class_name, K, system, notes):
-    """Table 2 solve-time cell: blank, "Failed", or trimmed mean ± std of the accepted solves."""
+    """Table 2 solve-time cell: blank, "--", "Failed", or trimmed mean ± std of the accepted solves."""
     if K not in levels_run(run, class_name):
         return ""
     rows = solve_rows(run, class_name, K, system)
     accepted = [number(r["seconds"]) for r in rows if r["accepted"] == "true"]
+    if not rows:
+        notes.append(f"{class_name} K = {K} {system}: not built")
+        return "--"
     if not accepted:
-        notes.append(f"{class_name} K = {K} {system}: " + ("not built" if not rows else f"0/{len(rows)} accepted"))
+        notes.append(f"{class_name} K = {K} {system}: 0/{len(rows)} accepted")
         return "Failed"
     values = trimmed(accepted)
-    cell = f"${format_seconds(values.mean())} \\pm {format_seconds(values.std())}$"
+    cell = f"${format_seconds(values.mean())} \\pm {format_seconds(values.std(), like=values.mean())}$"
     if len(accepted) < len(rows):
         notes.append(f"{class_name} K = {K} {system}: {len(accepted)}/{len(rows)} accepted")
         cell = cell[:-1] + "^{\\dagger}$"
@@ -160,12 +172,12 @@ def time_cell(run, class_name, K, system, notes):
 
 
 def setup_cell(run, class_name, K, system):
-    """Table 2 setup-time cell: one-time build + compile seconds of the system, blank if not built."""
+    """Table 3 setup-time cell: one-time build + compile seconds of the system, "--" if not built."""
     if K not in levels_run(run, class_name):
         return ""
     build, compile_ = setup_value(run, class_name, K, system, "build_seconds"), setup_value(run, class_name, K, system, "compile_seconds")
     if not (np.isfinite(build) and np.isfinite(compile_)):
-        return "Failed" if not solve_rows(run, class_name, K, system) else ""
+        return "--" if not solve_rows(run, class_name, K, system) else ""
     total = build + compile_
     return f"${total:.1f}$" if total < 10 else f"${total:.0f}$"
 
@@ -179,7 +191,7 @@ def write_table2(run, reduced, formulation, out_dir):
         f"% Reduced formulation: :{SHORT[reduced]}; complete formulation: :{formulation}.",
         "% Solve time: mean ± std of the accepted solves after trimming the",
         "% top and bottom 2.5 %. Setup times are in Table 3 (write_table3).",
-        "% Blank: K not run for that class. Failed: not built, or no accepted solve.",
+        "% Blank: K not run for that class. --: system not built. Failed: no accepted solve.",
         "\\begin{table}[ht]",
         "\\caption{Comparison of reduced and complete KKT systems across preference levels. \\textnormal{R} denotes "
         "the reduced KKT system, and \\textnormal{C} denotes the complete KKT system. }",
@@ -277,9 +289,14 @@ def trace_curves(run, class_name, K, system, rho, accepted_only):
 
 
 # Fig 2 aligns each trace at the iteration where it first comes within FLOOR_DECADES of its minimum (its
-# floor), so the local convergence of every solve lines up; x runs over ALIGNED_ITERATIONS from there.
+# floor), so the local convergence of every solve lines up; x runs over ALIGNED_ITERATIONS from there. The
+# last five Newton steps: every stage in Fig 2's panels takes at least five, so each point averages every
+# solve (your call, 2026-11-01).
 FLOOR_DECADES = 0.5
-ALIGNED_ITERATIONS = np.arange(-7, 3)
+ALIGNED_ITERATIONS = np.arange(-5, 3)
+# Legend label of the dashed reference; the caption gives its formula, ‖K_ρ(y + Δy_ρ)‖₂ = ‖K_ρ(y)‖₂², which
+# is too long for the legend row and would name only the reduced system.
+QUADRATIC_REFERENCE = "quadratic reference"
 
 
 def floor_iteration(curve):
@@ -287,7 +304,27 @@ def floor_iteration(curve):
     return int(np.argmax(curve <= curve.min() + FLOOR_DECADES))
 
 
-def plot_trace_panel(ax, curves, color, label, rho, ylabel):
+# Fig 2 and Fig 3 are drawn at their printed width, the manuscript's text width (svjour3 smallextended,
+# 119 mm), so their text prints at 6.5–7.5 pt (your calls, 2026-10-29; Fig 2: option A, the same 2 × 4
+# layout). A Fig 2 panel is about 1 in wide, hence one y-label per row, column titles in place of
+# x-labels, and one legend.
+PRINT_WIDTH = 4.55  # inches; the tight bounding box adds ≈ 0.12 in, so the PDF is ≈ 4.68 in wide
+PRINT_STYLE = {
+    "font.size": 7.5,
+    "axes.titlesize": 7.5,
+    "axes.labelsize": 7.5,
+    "xtick.labelsize": 6.5,
+    "ytick.labelsize": 6.5,
+    "legend.fontsize": 7,
+    "axes.linewidth": 0.6,
+    "xtick.major.width": 0.5,
+    "ytick.major.width": 0.5,
+    "xtick.major.size": 2.5,
+    "ytick.major.size": 2.5,
+}
+
+
+def plot_trace_panel(ax, curves, color, label):
     # Mean ± std, at each offset from the floor iteration, over the solves that have an iterate there;
     # offsets where fewer than a tenth of the solves (and fewer than 3, or all if fewer) do are dropped.
     columns = [[c[floor_iteration(c) + o] for c in curves if 0 <= floor_iteration(c) + o < len(c)] for o in ALIGNED_ITERATIONS]
@@ -295,126 +332,122 @@ def plot_trace_panel(ax, curves, color, label, rho, ylabel):
     x = ALIGNED_ITERATIONS[keep]
     mean = np.array([np.mean(v) for v, k in zip(columns, keep) if k])
     std = np.array([np.std(v) for v, k in zip(columns, keep) if k])
-    ax.fill_between(x, mean - std, mean + std, color=color, alpha=0.25, linewidth=0.6, edgecolor=color)
-    ax.plot(x, mean, color=color, linewidth=2.0, marker="o", markersize=4, label=label)
-    # Quadratic-rate reference: from the mean at offset -3, the digits double each iteration
-    # (log10 r_{k+1} = 2 log10 r_k), drawn while it stays above the panel's floor.
-    start = int(np.argmax(x >= -3))
+    ax.fill_between(x, mean - std, mean + std, color=color, alpha=0.25, linewidth=0.4, edgecolor=color)
+    ax.plot(x, mean, color=color, linewidth=1.1, marker="o", markersize=2.2, label=label)
+    # Quadratic-rate reference r_{j+1} = r_j²: from the mean at offset -2, the order of magnitude doubles each iteration
+    # (log10 r_{k+1} = 2 log10 r_k), drawn to the last offset in every panel. Added as an artist, it leaves the data
+    # limits, and so the shared y axis, alone: where it falls below the panel's floor (quadratic K = 4, reduced
+    # ρ = 0.1: -16.8 at 0), the axis clips it.
+    start = int(np.argmax(x >= -2))
     if mean[start] < 0:
-        reference = [mean[start]]
-        while len(reference) < 4 and 2 * reference[-1] > mean.min() - 1:
-            reference.append(2 * reference[-1])
-        steps = x[start : start + len(reference)]
+        steps = x[start:]
+        reference = mean[start] * 2.0 ** np.arange(len(steps))
         if len(steps) >= 2:
-            ax.plot(steps, reference[: len(steps)], color="#555555", linestyle="--", linewidth=1.2, label="digits double")
-    ax.set_xlim(x[0], x[-1])
-    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
-    ax.set_xlabel(f"iterations from convergence  (ρ={rho:.1f})" if rho >= 0.1 else f"iterations from convergence  (ρ={rho:g})", fontsize=14)
-    if ylabel:
-        ax.set_ylabel(ylabel, fontsize=14)
-    ax.grid(True, color="#b0b0b0", linewidth=0.6, alpha=0.6)
-    ax.legend(loc="lower left", fontsize=12, handlelength=1.6)
+            ax.add_artist(Line2D(steps, reference, color="#555555", linestyle="--", linewidth=0.8, label=QUADRATIC_REFERENCE))
+    # Every panel starts at the window's first offset, also where no solve has an iterate that early.
+    ax.set_xlim(ALIGNED_ITERATIONS[0], x[-1])
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=4, integer=True))
+    ax.grid(True, color="#b0b0b0", linewidth=0.4, alpha=0.6)
 
 
 def write_fig2(run, reduced, formulation, fig_levels, accepted_only, out_dir):
-    reduced_label = r"$\log_{10}(\|\mathcal{K}_\rho(y)\|_2)$"
-    complete_label = r"$\log_{10}(\|\bar{\mathcal{K}}_\rho(\bar{y})\|_2)$"
-    panels = [(reduced, 1.0), (reduced, 0.1)]
-    panels += [(formulation, 1.0), (formulation, 0.1)] if formulation in ("perturbed", "aggregate") else [(formulation, 0.0)]
+    panels = [(reduced, 1.0), (reduced, 0.1), (formulation, 1.0), (formulation, 0.1)]
     classes = [c for c in CLASS_ORDER if fig_levels.get(c) in levels_run(run, c)]
     if not classes:
         print(f"Fig 2 ({SHORT[reduced]}, {formulation}): no class was run at the levels {fig_levels}; skipped")
         return []
-    fig, axes = plt.subplots(len(classes), len(panels), figsize=(4.55 * len(panels), 3.2 * len(classes)), squeeze=False)
-    for row, class_name in enumerate(classes):
-        K = fig_levels[class_name]
-        for col, (system, rho) in enumerate(panels):
-            ax = axes[row][col]
-            curves = trace_curves(run, class_name, K, system, rho, accepted_only)
-            if curves is None:
-                ax.text(0.5, 0.5, f"no {system} data at ρ = {rho:g}", ha="center", va="center", transform=ax.transAxes)
-                continue
-            is_reduced = system.startswith("reduced")
-            first_of_kind = col == 0 or (not is_reduced and panels[col - 1][0].startswith("reduced"))
-            plot_trace_panel(
-                ax,
-                curves,
-                REDUCED_COLOR if is_reduced else COMPLETE_COLOR,
-                "Reduced KKT" if is_reduced else "Complete KKT",
-                rho,
-                (reduced_label if is_reduced else complete_label) if first_of_kind else None,
-            )
-        constraint = run["settings"].get("nonquadratic_constraint_type", "nonlinear") if class_name == "nonquadratic" else "linear"
-        label = ("Quad." if class_name == "quadratic" else "Nonquad.") + f" obj. with\n{constraint} const."
-        axes[row][0].annotate(
-            label,
-            xy=(0, 0.5),
-            xycoords="axes fraction",
-            xytext=(-78, 0),
-            textcoords="offset points",
-            ha="right",
-            va="center",
-            rotation=90,
-            fontsize=17,
+    with plt.rc_context(PRINT_STYLE):
+        fig, axes = plt.subplots(
+            len(classes), len(panels), figsize=(PRINT_WIDTH, 0.6 + 1.15 * len(classes)), sharey=True, squeeze=False, layout="constrained"
         )
-    fig.tight_layout(w_pad=1.2, h_pad=1.6)
-    paths = [out_dir / f"fig2_{SHORT[reduced]}_{formulation}.{ext}" for ext in ("png", "pdf")]
-    for path in paths:
-        fig.savefig(path, bbox_inches="tight")
-    plt.close(fig)
+        for row, class_name in enumerate(classes):
+            K = fig_levels[class_name]
+            for col, (system, rho) in enumerate(panels):
+                ax = axes[row][col]
+                is_reduced = system.startswith("reduced")
+                if row == 0:
+                    ax.set_title(f"{'Reduced' if is_reduced else 'Complete'}, ρ = {rho:g}")
+                curves = trace_curves(run, class_name, K, system, rho, accepted_only)
+                if curves is None:
+                    ax.text(0.5, 0.5, f"no {system} data at ρ = {rho:g}", ha="center", va="center", transform=ax.transAxes)
+                    continue
+                plot_trace_panel(ax, curves, REDUCED_COLOR if is_reduced else COMPLETE_COLOR, "Reduced KKT" if is_reduced else "Complete KKT")
+            # The same names as Fig 3's panel titles and §6's text ("quadratic class at K = 4"). One label serves
+            # the reduced and the complete columns, so it stays generic; the caption names each residual,
+            # ‖K_ρ(y)‖₂ resp. ‖K̄_ρ(ȳ)‖₂ (your call, 2026-11-02).
+            axes[row][0].set_ylabel(f"{'Quadratic' if class_name == 'quadratic' else 'Nonquadratic'}, K = {K}\n" + r"$\log_{10}$ residual")
+        axes[0][0].yaxis.set_major_locator(MaxNLocator(nbins=4, integer=True))
+        fig.supxlabel("iterations from convergence", fontsize=7.5)
+        # One legend for the figure, in the order reduced, complete, reference.
+        handles = {}
+        for ax in axes.flat:
+            for handle, label in zip(*ax.get_legend_handles_labels()):
+                handles.setdefault(label, handle)
+        order = [label for label in ("Reduced KKT", "Complete KKT", QUADRATIC_REFERENCE) if label in handles]
+        fig.legend([handles[label] for label in order], order, loc="outside upper center", ncol=len(order), frameon=False)
+        paths = [out_dir / f"fig2_{SHORT[reduced]}_{formulation}.{ext}" for ext in ("png", "pdf")]
+        for path in paths:
+            fig.savefig(path, bbox_inches="tight")
+        plt.close(fig)
     return paths
 
 
 # ── Fig 3: distance histograms ───────────────────────────────────────────────
 
 
-def distances(run, class_name, K, reduced, formulation):
-    """log10 ‖z_complete − z_reduced‖₂ of the accepted pairs, against the :scholtes or the :interior_point z."""
-    column = "distance" if reduced == "reduced_scholtes" else "distance_interior_point"
+def distances(run, class_name, K, formulation):
+    """log10 ‖z_complete − z_reduced‖₂ of the accepted pairs: distance_fig3, the two iterates at the end of the
+    same ρ stage (settings fig3_rho)."""
     values = [
-        number(r[column])
+        number(r["distance_fig3"])
         for r in run["solves"]
         if r["class"] == class_name
         and (K is None or int(r["K"]) == K)
         and r["system"] == "complete"
         and r["formulation"] == formulation
-        and r.get(column, "") != ""
+        and r.get("distance_fig3", "") != ""
     ]
     return np.log10(np.maximum(np.array([v for v in values if np.isfinite(v)]), 1e-300))
 
 
+DISTANCE_LABEL = r"$\log_{10}\|z_{\mathrm{complete}} - z_{\mathrm{reduced}}\|_2$"
+
+
 def plot_histogram(ax, values):
-    ax.hist(values, bins=min(22, max(6, len(values) // 4)), color=HISTOGRAM_COLOR, edgecolor=INK, linewidth=1.2)
-    ax.set_xlabel(r"$\log_{10}(\|\,z_{\mathrm{complete}} - z_{\mathrm{reduced}}\|_2)$", fontsize=15)
-    ax.set_ylabel("Count", fontsize=18)
-    ax.yaxis.set_major_locator(MaxNLocator(integer=True))
-    ax.grid(True, color="#b0b0b0", linewidth=0.6, alpha=0.6)
+    ax.hist(values, bins=min(22, max(6, len(values) // 4)), color=HISTOGRAM_COLOR, edgecolor=INK, linewidth=0.5)
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=6, steps=[1, 2, 5, 10]))
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=4, integer=True))
+    ax.grid(True, color="#b0b0b0", linewidth=0.4, alpha=0.6)
     ax.set_axisbelow(True)
 
 
 def write_fig3(run, reduced, formulation, fig_levels, out_dir):
     classes = [c for c in CLASS_ORDER if fig_levels.get(c) in levels_run(run, c)]
-    data = {c: distances(run, c, fig_levels[c], reduced, formulation) for c in classes}
+    data = {c: distances(run, c, fig_levels[c], formulation) for c in classes}
     classes = [c for c in classes if len(data[c])]
     if not classes:
         return []
-    fig, axes = plt.subplots(1, len(classes), figsize=(5.6 * len(classes), 2.9), squeeze=False)
-    for ax, class_name in zip(axes[0], classes):
-        plot_histogram(ax, data[class_name])
-        ax.set_title(f"{'Quadratic' if class_name == 'quadratic' else 'Nonquadratic'}, K = {fig_levels[class_name]}", fontsize=13)
-    fig.tight_layout()
-    paths = [out_dir / f"fig3_{SHORT[reduced]}_{formulation}.{ext}" for ext in ("png", "pdf")]
-    for path in paths:
-        fig.savefig(path, bbox_inches="tight")
-    plt.close(fig)
-    for class_name in classes:
-        fig, ax = plt.subplots(figsize=(5.6, 2.9))
-        plot_histogram(ax, data[class_name])
-        fig.tight_layout()
-        path = out_dir / f"fig3_{SHORT[reduced]}_{formulation}_{class_name}.pdf"
-        fig.savefig(path, bbox_inches="tight")
+    with plt.rc_context(PRINT_STYLE):
+        fig, axes = plt.subplots(1, len(classes), figsize=(PRINT_WIDTH, 1.75), squeeze=False, layout="constrained")
+        for ax, class_name in zip(axes[0], classes):
+            plot_histogram(ax, data[class_name])
+            ax.set_title(f"{'Quadratic' if class_name == 'quadratic' else 'Nonquadratic'}, K = {fig_levels[class_name]}")
+        axes[0][0].set_ylabel("Count")
+        fig.supxlabel(DISTANCE_LABEL, fontsize=7.5)
+        paths = [out_dir / f"fig3_{SHORT[reduced]}_{formulation}.{ext}" for ext in ("png", "pdf")]
+        for path in paths:
+            fig.savefig(path, bbox_inches="tight")
         plt.close(fig)
-        paths.append(path)
+        # One panel per class, at half the text width.
+        for class_name in classes:
+            fig, ax = plt.subplots(figsize=(PRINT_WIDTH / 2, 1.75), layout="constrained")
+            plot_histogram(ax, data[class_name])
+            ax.set_xlabel(DISTANCE_LABEL)
+            ax.set_ylabel("Count")
+            path = out_dir / f"fig3_{SHORT[reduced]}_{formulation}_{class_name}.pdf"
+            fig.savefig(path, bbox_inches="tight")
+            plt.close(fig)
+            paths.append(path)
     return paths
 
 
@@ -453,7 +486,8 @@ def timing_rows(run):
                         "mean": values.mean() if len(values) else math.nan,
                         "std": values.std() if len(values) else math.nan,
                         "median": float(np.median(accepted)) if accepted else math.nan,
-                        "iterations": float(np.median([number(r["iterations"]) for r in solves if r["accepted"] == "true"]))
+                        # Runs before 2026-11-02 record only residual evaluations: Newton steps plus one per stage.
+                        "iterations": float(np.median([number(r.get("newton_steps", r["iterations"])) for r in solves if r["accepted"] == "true"]))
                         if accepted
                         else math.nan,
                         "accepted": f"{len(accepted)}/{len(solves)}",
@@ -466,7 +500,7 @@ def write_timing_tables(run, out_dir):
     rows = timing_rows(run)
     show = lambda v: "—" if not np.isfinite(v) else format_seconds(v)  # noqa: E731
     md = [
-        "| class | K | system | build (s) | compile (s) | solve, trimmed mean ± std (s) | solve median (s) | Newton iterations (median) | accepted |",
+        "| class | K | system | build (s) | compile (s) | solve, trimmed mean ± std (s) | solve median (s) | Newton steps (median) | accepted |",
         "|---|---|---|---|---|---|---|---|---|",
     ]
     tex = [
@@ -474,16 +508,16 @@ def write_timing_tables(run, out_dir):
         "% accepted solves (trimmed 2.5 % each side; compilation excluded).",
         "\\begin{tabular}{l c l r r c r r c}",
         "\\toprule",
-        "Class & $K$ & System & Build (s) & Compile (s) & Solve (s) & Median (s) & Newton its. & Accepted \\\\",
+        "Class & $K$ & System & Build (s) & Compile (s) & Solve (s) & Median (s) & Newton steps & Accepted \\\\",
         "\\midrule",
     ]
     for r in rows:
-        solve = "—" if not np.isfinite(r["mean"]) else f"{format_seconds(r['mean'])} ± {format_seconds(r['std'])}"
+        solve = "—" if not np.isfinite(r["mean"]) else f"{format_seconds(r['mean'])} ± {format_seconds(r['std'], like=r['mean'])}"
         md.append(
             f"| {r['class']} | {r['K']} | {r['system']} | {show(r['build'])} | {show(r['compile'])} | {solve} | "
             f"{show(r['median'])} | {'—' if not np.isfinite(r['iterations']) else int(r['iterations'])} | {r['accepted']} |"
         )
-        solve_tex = "--" if not np.isfinite(r["mean"]) else f"${format_seconds(r['mean'])} \\pm {format_seconds(r['std'])}$"
+        solve_tex = "--" if not np.isfinite(r["mean"]) else f"${format_seconds(r['mean'])} \\pm {format_seconds(r['std'], like=r['mean'])}$"
         tex.append(
             f"{r['class']} & {r['K']} & {r['system']} & {show(r['build']).replace('—', '--')} & "
             f"{show(r['compile']).replace('—', '--')} & {solve_tex} & {show(r['median']).replace('—', '--')} & "
@@ -496,74 +530,92 @@ def write_timing_tables(run, out_dir):
 
 
 def stage_profile(run, class_name, K, system):
-    """Mean seconds and Newton iterations per ρ stage over the accepted solves (all tries of a complete solve)."""
+    """Seconds and Newton steps per ρ stage, one value per accepted solve. The stages a solve runs after its
+    ‖K₀‖ < epsilon_0 stop take no step and are left out."""
     accepted = {
         int(r["trial"])
         for r in run["solves"]
         if r["class"] == class_name and int(r["K"]) == K and system_key(r) == system and r["accepted"] == "true"
     }
-    seconds, iterations = defaultdict(list), defaultdict(list)
-    per_trial = defaultdict(lambda: defaultdict(lambda: [0.0, 0.0]))
+    by_trial = defaultdict(list)
     for r in run["stages"]:
         if r["class"] != class_name or int(r["K"]) != K or system_key(r) != system or int(r["trial"]) not in accepted:
             continue
-        cell = per_trial[int(r["trial"])][number(r["rho"])]
-        cell[0] += number(r["seconds"])
-        cell[1] += number(r["iterations"])
+        by_trial[int(r["trial"])].append(r)
+    per_trial = defaultdict(lambda: defaultdict(lambda: [0.0, 0.0]))
+    for trial, rows in by_trial.items():
+        rows.sort(key=lambda r: int(r["stage"]))
+        # Runs before 2026-11-02 record only a stage's residual evaluations, one more than its Newton steps.
+        steps = [int(r["newton_steps"]) if "newton_steps" in r else int(r["iterations"]) - 1 for r in rows]
+        last = max((i for i, s in enumerate(steps) if s > 0), default=-1)
+        for r, s in zip(rows[: last + 1], steps):
+            cell = per_trial[trial][number(r["rho"])]
+            cell[0] += number(r["seconds"])
+            cell[1] += s
+    seconds, steps = defaultdict(list), defaultdict(list)
     for by_rho in per_trial.values():
-        for rho, (s, i) in by_rho.items():
+        for rho, (s, n) in by_rho.items():
             seconds[rho].append(s)
-            iterations[rho].append(i)
+            steps[rho].append(n)
     rhos = sorted(seconds, reverse=True)
-    return rhos, [np.mean(seconds[r]) for r in rhos], [np.mean(iterations[r]) for r in rhos]
+    return rhos, [seconds[r] for r in rhos], [steps[r] for r in rhos]
 
 
 def rho_label(rho):
-    if rho == 0:
-        return "0"
     exponent = round(math.log10(rho))
-    return "1" if exponent == 0 else f"$10^{{{exponent}}}$"
+    # \mathdefault sets 10⁻ᵏ in the tick font, as matplotlib's own log ticks do, not in the serif math font.
+    return "1" if exponent == 0 else f"$\\mathdefault{{10^{{{exponent}}}}}$"
 
 
-def write_timing_per_rho(run, fig_levels, out_dir):
+def write_timing_per_rho(run, reduced, formulation, fig_levels, out_dir):
+    # Drawn at the printed width like Fig 2: Newton steps (top row) and seconds (bottom row), one column per
+    # class, each row on one y axis; mean ± std curves in Fig 2's style (your calls, 2026-11-01).
     classes = [c for c in CLASS_ORDER if fig_levels.get(c) in levels_run(run, c)]
     if not classes:
         return []
-    fig, axes = plt.subplots(len(classes), 2, figsize=(11.5, 3.3 * len(classes)), squeeze=False)
-    styles = {
-        "reduced_scholtes": dict(color=REDUCED_COLOR, marker="o", label="Reduced KKT, :scholtes"),
-        "reduced_interior_point": dict(color=REDUCED_COLOR, marker="^", linestyle="--", label="Reduced KKT, (5.2) :interior_point"),
-        "perturbed": dict(color=COMPLETE_COLOR, marker="v", linestyle="--", label="Complete KKT, :perturbed"),
-        "aggregate": dict(color=COMPLETE_COLOR, marker="s", label="Complete KKT, :aggregate"),
-        "exact": dict(color=COMPLETE_COLOR, marker="D", linestyle="none", markerfacecolor="white", label="Complete KKT, :exact (ρ = 0)"),
-    }
-    for row, class_name in enumerate(classes):
-        K = fig_levels[class_name]
-        profiles = {s: stage_profile(run, class_name, K, s) for s in REDUCED_SYSTEMS + FORMULATIONS}
-        all_rhos = sorted({rho for rhos, _, _ in profiles.values() for rho in rhos if rho > 0}, reverse=True)
-        positions = {rho: i for i, rho in enumerate(all_rhos)}
-        positions[0.0] = len(all_rhos) + 0.5
-        for col, (index, ylabel) in enumerate(((1, "Seconds per stage (mean)"), (2, "Newton iterations per stage (mean)"))):
-            ax = axes[row][col]
-            for system, (rhos, secs, its) in profiles.items():
-                if not rhos:
-                    continue
-                values = secs if index == 1 else its
-                ax.plot([positions[r] for r in rhos], values, linewidth=2.0, markersize=7, **styles[system])
-            # Every other ρ is labeled, so the 10⁻ᵏ labels don't collide; ρ = 0 (:exact) always is.
-            ax.set_xticks(list(positions.values()), [rho_label(r) if (i % 2 == 0 or r == 0) else "" for (i, r) in enumerate(positions)])
-            ax.set_xlabel("ρ stage", fontsize=12)
-            ax.set_ylabel(ylabel, fontsize=12)
-            ax.set_yscale("log" if index == 1 else "linear")
-            ax.grid(True, color="#b0b0b0", linewidth=0.6, alpha=0.6)
-            ax.set_title(f"{'Quadratic' if class_name == 'quadratic' else 'Nonquadratic'}, K = {K}", fontsize=12)
-            if row == 0 and col == 0:
-                ax.legend(loc="best", fontsize=10)
-    fig.tight_layout()
-    paths = [out_dir / f"timing_per_rho.{ext}" for ext in ("png", "pdf")]
-    for path in paths:
-        fig.savefig(path, bbox_inches="tight")
-    plt.close(fig)
+    profiles = {c: {s: stage_profile(run, c, fig_levels[c], s) for s in (reduced, formulation)} for c in classes}
+    all_rhos = sorted({rho for by_system in profiles.values() for rhos, _, _ in by_system.values() for rho in rhos if rho > 0}, reverse=True)
+    positions = {rho: i for i, rho in enumerate(all_rhos)}
+    with plt.rc_context(PRINT_STYLE):
+        fig, axes = plt.subplots(
+            2, len(classes), figsize=(PRINT_WIDTH, 0.5 + 1.35 * 2), sharex=True, sharey="row", squeeze=False, layout="constrained"
+        )
+        for col, class_name in enumerate(classes):
+            for row in range(2):
+                ax = axes[row][col]
+                for system, (rhos, seconds, steps) in profiles[class_name].items():
+                    if not rhos:
+                        continue
+                    is_reduced = system.startswith("reduced")
+                    color = REDUCED_COLOR if is_reduced else COMPLETE_COLOR
+                    x = [positions[r] for r in rhos]
+                    # Mean ± std after Table 2's trimming; on the log axis, a nonpositive lower edge is clipped.
+                    values = [trimmed(v) for v in (steps if row == 0 else seconds)]
+                    mean, std = np.array([np.mean(v) for v in values]), np.array([np.std(v) for v in values])
+                    ax.fill_between(x, mean - std, mean + std, color=color, alpha=0.25, linewidth=0.4, edgecolor=color)
+                    ax.plot(x, mean, color=color, linewidth=1.1, marker="o", markersize=2.2, label="Reduced KKT" if is_reduced else "Complete KKT")
+                # Every ρ gets a tick, every fourth a label, so the 10⁻ᵏ labels don't collide.
+                ax.set_xticks(list(positions.values()), [rho_label(r) if i % 4 == 0 else "" for (i, r) in enumerate(positions)])
+                ax.set_yscale("linear" if row == 0 else "log")
+                if row == 0:
+                    ax.yaxis.set_major_locator(MaxNLocator(nbins=5, integer=True))
+                ax.grid(True, color="#b0b0b0", linewidth=0.4, alpha=0.6)
+            axes[0][col].set_title(f"{'Quadratic' if class_name == 'quadratic' else 'Nonquadratic'}, K = {fig_levels[class_name]}")
+        axes[0][0].set_ylabel("Newton steps per stage")
+        axes[1][0].set_ylabel("seconds per stage")
+        # The rows' tick labels differ in width (8 against 10⁻²); align the two labels on one vertical line.
+        fig.align_ylabels(axes[:, 0])
+        fig.supxlabel("ρ stage", fontsize=7.5)
+        handles = {}
+        for ax in axes.flat:
+            for handle, label in zip(*ax.get_legend_handles_labels()):
+                handles.setdefault(label, handle)
+        order = [label for label in ("Reduced KKT", "Complete KKT") if label in handles]
+        fig.legend([handles[label] for label in order], order, loc="outside upper center", ncol=len(order), frameon=False)
+        paths = [out_dir / f"timing_per_rho_{SHORT[reduced]}_{formulation}.{ext}" for ext in ("png", "pdf")]
+        for path in paths:
+            fig.savefig(path, bbox_inches="tight")
+        plt.close(fig)
     return paths
 
 
@@ -596,8 +648,13 @@ def main():
             written.append(write_table3(run, reduced, formulation, out_dir))
             written += write_fig2(run, reduced, formulation, fig_levels, not args.all_solves, out_dir)
             written += write_fig3(run, reduced, formulation, fig_levels, out_dir)
+            written += write_timing_per_rho(run, reduced, formulation, fig_levels, out_dir)
+            if (reduced, formulation) == MAIN_PAIR:
+                for prefix, name in MANUSCRIPT_FIGURES.items():
+                    source = out_dir / f"{prefix}_{SHORT[reduced]}_{formulation}.pdf"
+                    if source.exists():
+                        written.append(shutil.copyfile(source, out_dir / name))
     written += write_timing_tables(run, out_dir)
-    written += write_timing_per_rho(run, fig_levels, out_dir)
     for path in written:
         print(path)
 
