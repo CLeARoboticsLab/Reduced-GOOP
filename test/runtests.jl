@@ -264,8 +264,8 @@ end
 	# The :fast_differentiation codegen path must produce the same KKT residual
 	# and Jacobian as the native Symbolics code generator: differentiation stays
 	# in Symbolics and only the compiled evaluators change. The hierarchy below
-	# includes an innermost prioritized inequality so the ifelse-based penalty
-	# terms (and their derivatives) are exercised through both generators.
+	# includes an innermost prioritized inequality so its preference slacks (and
+	# their rows) are exercised through both generators.
 	num_players = 3
 	kind = :quadratic
 	primal_dims = fill(PRIMAL_DIM, num_players)

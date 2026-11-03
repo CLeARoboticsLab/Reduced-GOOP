@@ -4,33 +4,34 @@ Also keeps track of several types of variables (preference slacks, interior
 point slacks, and inequality constraint duals) that must satisfy nonnegativity
 constraints that are not explicitly included in the KKT system.
 
-The KKT system is parameterized by a vector θ and a scalar ϵ > 0 which
-controls the complementarity relaxation of the interior point scheme.
+The KKT system is parameterized by a vector θ and a scalar ρ > 0 (the keyword `ϵ` of `F!`)
+which controls the complementarity relaxation of the interior point scheme.
 
 # The reduced system (`generate_slacked_reduced_kkt_system`)
 
 Player i has levels k = 1 (outermost) … Kⁱ (innermost) with objectives hₖ, its own
 equalities f(x, θ) = 0 and inequalities g(x, θ) ≥ 0. A level whose
-`is_prioritized_constraint` flag is set uses `smooth_piecewise_preference_objective`
-(max(−hₖ, 0)^(k+2)) in place of hₖ. Each level k carries its own copies λₖ, γₖ, σₖ
-and has the Lagrangian
+`is_prioritized_constraint` flag is set treats hₖ as a constraint hₖ ≥ 0 with preference
+slacks sₖ: it minimizes cₖ = 1ᵀsₖ subject to hₖ + sₖ ≥ 0 and sₖ ≥ 0 (otherwise cₖ = hₖ).
+Level k's inequalities Gₖ are g and, for every prioritized m ≥ k, hₘ + sₘ and sₘ. Each
+level k carries its own copies λₖ, γₖ, σₖ (γₖ and σₖ over all of Gₖ) and has the Lagrangian
 
-    Lₖ = hₖ − λₖᵀf − γₖᵀg − ψₖᵀπₖ₊₁ − Σ_{m>k} φₖ,ₘᵀ(g ⊙ γₘ),
+    Lₖ = cₖ − λₖᵀf − γₖᵀGₖ − ψₖᵀπₖ₊₁ − Σ_{m>k} φₖ,ₘᵀ(Gₘ ⊙ γₘ),
 
-where πₖ₊₁ = [∇ₓLₖ₊₁; πₖ₊₂; …] stacks the stationarity residuals of every level below
-k (the lower levels' policy, enforced through the multipliers ψₖ), and ∇ₓ is the gradient
-w.r.t. player i's own xⁱ only. The last two terms are absent at the innermost level.
-F stacks, for every player and level,
+where πₖ₊₁ = [∇Lₖ₊₁; πₖ₊₂; …] stacks the stationarity residuals of every level below
+k (the lower levels' policy, enforced through the multipliers ψₖ), and ∇ is the gradient
+w.r.t. player i's own xⁱ and, at a prioritized level, sₖ. The last two terms are absent at
+the innermost level. F stacks, for every player and level,
 
-    ∇ₓLₖ + η xⁱ = 0                     stationarity (η: Newton regularization)
+    ∇Lₖ + η [xⁱ; sₖ] = 0                stationarity (η: Newton regularization)
     f = 0                               innermost level only
-    g − σₖ = 0                          interior-point slack
-    σₖ ⊙ γₖ − ϵ𝟙 = 0                    relaxed complementarity
+    Gₖ − σₖ = 0                         interior-point slack
+    σₖ ⊙ γₖ − ρ𝟙 = 0                    relaxed complementarity
 
-over z = [x; s; σ; λ; γ; ψ; φ]. The solver keeps σ, γ (and s) positive, drives ϵ → 0,
-and recovers x from the primal block. φ enters only through the stationarity rows. The
-reduced path creates no preference slacks s. With `drop_higher_order_terms = true`
-(quasi), every term of ∇ₓLₖ that would be differentiated more than twice is set to zero.
+over z = [x; s; σ; λ; γ; ψ; φ]. The solver keeps σ, γ and s positive, drives ρ → 0,
+and recovers x from the primal block. φ enters only through the stationarity rows. With
+`drop_higher_order_terms = true` (quasi), every term of ∇Lₖ that would be differentiated
+more than twice is set to zero.
 
 For the Scholtes form of the same hierarchy (exact φ rows, ρ homotopy) see
 `ScholtesKKTSystem` in src/scholtes_kkt.jl.
@@ -286,31 +287,14 @@ function BuildGOOPKKTSystem(
     backend_options = (;),
     codegen = :native,
     fd_codegen_chunk_size = nothing,
-) where {T<:Union{SymbolicTracingUtils.FD.Node,SymbolicTracingUtils.Symbolics.Num}}
+) where {T<:SymbolicTracingUtils.Symbolics.Num}
     codegen in (:native, :fast_differentiation) ||
         error("Unknown codegen option: $(codegen). Use :native or :fast_differentiation.")
-    # The FD tracing backend already generates code through FD.
-    use_fd_codegen =
-        codegen === :fast_differentiation && T === SymbolicTracingUtils.Symbolics.Num
+    use_fd_codegen = codegen === :fast_differentiation
     isnothing(fd_codegen_chunk_size) ||
         use_fd_codegen ||
-        error(
-            "fd_codegen_chunk_size requires SymbolicsBackend with " *
-            "codegen = :fast_differentiation.",
-        )
+        error("fd_codegen_chunk_size requires codegen = :fast_differentiation.")
     @timeit TO "KKT executable construction" begin
-        if T == SymbolicTracingUtils.FD.Node
-            # FD.make_function only accepts vector-valued symbolic inputs, so the
-            # scalar ϵ and η are wrapped in 1-element vectors here. The generated
-            # function flattens its runtime arguments, so callers still pass scalars.
-            ϵ_arg = [ϵ_symbolic]
-            η_arg = [η_symbolic]
-        else
-            @assert T === SymbolicTracingUtils.Symbolics.Num
-            ϵ_arg = ϵ_symbolic
-            η_arg = η_symbolic
-        end
-
         F! = @timeit TO "residual function build" let
             _F! = if use_fd_codegen
                 _build_fd_codegen_function(
@@ -326,8 +310,8 @@ function BuildGOOPKKTSystem(
                     F_symbolic,
                     z_symbolic,
                     θ_symbolic,
-                    ϵ_arg,
-                    η_arg;
+                    ϵ_symbolic,
+                    η_symbolic;
                     in_place = true,
                     backend_options,
                 )
@@ -337,13 +321,10 @@ function BuildGOOPKKTSystem(
         end
 
         ∇F_z! = @timeit TO "Jacobian function construction" let
-            ∇F_symbolic = @timeit TO "Jacobian symbolic construction" begin
-                if T === SymbolicTracingUtils.Symbolics.Num
-                    _build_symbolics_sparse_jacobian(F_symbolic, z_symbolic)
-                else
-                    SymbolicTracingUtils.sparse_jacobian(F_symbolic, z_symbolic)
-                end
-            end
+            ∇F_symbolic = @timeit TO "Jacobian symbolic construction" _build_symbolics_sparse_jacobian(
+                F_symbolic,
+                z_symbolic,
+            )
             _∇F! = @timeit TO "Jacobian function build" if use_fd_codegen
                 # Generate code for the structural nonzeros only; the wrapper
                 # writes them straight into the sparse buffer, whose nzval
@@ -363,8 +344,8 @@ function BuildGOOPKKTSystem(
                     ∇F_symbolic,
                     z_symbolic,
                     θ_symbolic,
-                    ϵ_arg,
-                    η_arg;
+                    ϵ_symbolic,
+                    η_symbolic;
                     in_place = true,
                     backend_options,
                 )

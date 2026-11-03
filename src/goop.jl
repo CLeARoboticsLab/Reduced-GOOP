@@ -65,7 +65,7 @@ function Symbolics.gradient(f::QuasiLagrangianTerm, x::AbstractVector{<:Symbolic
     end
 
     expr = isnothing(f.duals) ? f.expr : -f.expr' * f.duals
-    QuasiLagrangianTerm(Symbolics.gradient(expr, x), f.duals, next_order)
+    QuasiLagrangianTerm(_fast_gradient(expr, x), f.duals, next_order)
 end
 
 function _push_quasi_lagrangian_term!(
@@ -114,46 +114,22 @@ function _quasi_gradient_from_terms(
     return ∇L, new_terms
 end
 
-"This is a new preference objective that avoids slack reformulation.
-Preference is encoded as h(x) ≥ 0. 
-    - If h(x) ≥ 0, preference is satisfied. 
-    - If h(x) < 0, preference is violated by an amount -h(x), which is minimized.
-Slack reformulation: min_{x,s} s such that s ≥ 0, s ≥ -h(x) <=> min_x max(0, -h(x)))
-Equivalently, we consider min_x ifelse(h(x) ≥ 0, 0, (-h(x))^(level+2)), where level is the priority level of the preference.
-"
-
-function smooth_piecewise_preference_objective(preference, level; ϵ = 0.0)
-    ifelse(preference ≥ ϵ, 0.0, (ϵ - preference)^(level + 2))
-end
-
-function smooth_piecewise_preference_objective(
-    preference::SymbolicTracingUtils.FD.Node,
-    level;
-    ϵ = 0.0,
-)
-    # FastDifferentiation cannot differentiate through ifelse, so use the
-    # algebraically identical branch-free form max(ϵ - preference, 0)^(level + 2).
-    violation = ϵ - preference
-    (0.5 * (violation + abs(violation)))^(level + 2)
-end
-
 """
 Construct the Reduced KKT system corresponding to a ParametricGOOP.
 
 `complementarity = :interior_point` (default) builds the interior-point system
-(`σ ∘ γ = ϵ`) and returns a `GOOPKKTSystem` for `InteriorPoint`. `complementarity =
+(`σ ∘ γ = ρ`) and returns a `GOOPKKTSystem` for `InteriorPoint`. `complementarity =
 :scholtes` builds the Scholtes-form system (explicit φ ≥ 0, relaxed `s ∘ γ + u = ρ`)
 and returns a `ScholtesKKTSystem` for `Scholtes`; it is opt-in, supports only
 `phi = true`, and generates code with FastDifferentiation unless `codegen` says
 otherwise, split into functions of `fd_codegen_chunk_size` expressions (default
 `SCHOLTES_FD_CHUNK_SIZE`; pass `typemax(Int)` for one function per block). See
-src/scholtes_kkt.jl. In Scholtes mode, prioritized constraint vectors introduce
-explicit preference slacks: minimize their sum subject to `h + slack ≥ 0` and
-`slack ≥ 0`, retaining these variables and inequalities at every upper level.
+src/scholtes_kkt.jl. In both modes, a prioritized constraint h ≥ 0 at level k introduces
+explicit preference slacks s: level k minimizes `sum(s)` subject to `h + s ≥ 0` and
+`s ≥ 0`, and every upper level keeps these inequalities with fresh multipliers.
 """
 function generate_slacked_reduced_kkt_system(
     goop::ParametricGOOP;
-    backend = SymbolicTracingUtils.SymbolicsBackend(),
     drop_higher_order_terms = false,
     backend_options = (;),
     codegen = nothing,
@@ -167,7 +143,7 @@ function generate_slacked_reduced_kkt_system(
             "complementarity must be :interior_point or :scholtes, got $complementarity",
         ),
     )
-    if complementarity === :scholtes # TODO: we ultimately want generated_slacked_reduced_kkt_system() to do Scholtes HERE. 
+    if complementarity === :scholtes # TODO: we ultimately want generated_slacked_reduced_kkt_system() to do Scholtes HERE.
         return generate_scholtes_reduced_kkt_system(
             goop;
             quasi = drop_higher_order_terms,
@@ -179,14 +155,8 @@ function generate_slacked_reduced_kkt_system(
         )
     end
     codegen = something(codegen, :native)
-    if drop_higher_order_terms &&
-       backend isa SymbolicTracingUtils.FastDifferentiationBackend
-        error(
-            "drop_higher_order_terms = true (the quasi variant) relies on Symbolics-only QuasiLagrangianTerm objects; use backend = SymbolicTracingUtils.SymbolicsBackend().",
-        )
-    end
-    # Main.@infiltrate
     # Symbolic variables for all primals and parameters.
+    backend = SymbolicTracingUtils.SymbolicsBackend()
     @timeit TO "symbolic variable construction" begin
         x =
             SymbolicTracingUtils.make_variables(backend, :x, sum(goop.primal_dims)) |>
@@ -194,24 +164,32 @@ function generate_slacked_reduced_kkt_system(
         θ =
             SymbolicTracingUtils.make_variables(backend, :θ, sum(goop.parameter_dims)) |>
             to_blockvector(goop.parameter_dims)
-        ϵ = only(SymbolicTracingUtils.make_variables(backend, :ϵ, 1))
+        ρ = only(SymbolicTracingUtils.make_variables(backend, :ρ, 1))
 
         η = only(SymbolicTracingUtils.make_variables(backend, :η, 1))
 
         symbolic_type = eltype(x)
     end
 
+    # The number of rows of each prioritized constraint h ≥ 0, per player and level (0 for a cost).
+    preference_dims = [
+        [
+            prioritized ? length(preference(x, θ)) : 0 for (preference, prioritized) in
+            zip(goop.preferences[player], goop.is_prioritized_constraint[player])
+        ] for player in 1:(goop.num_players)
+    ]
+
     # Keep track of all the preference (s) and interior point (σ) slacks we create.
     s = symbolic_type[]
     Σ = symbolic_type[]
 
-    # Keep track of all equality constraint duals (λ) that we create.
+    # Keep track of all equality constraint duals (λ) and of the duals (ϕ) of the lower levels'
+    # complementarity products that we create.
     Λ = symbolic_type[]
-    Φ = symbolic_type[] # 10/25: store duals for complementarity slackness
+    Φ = symbolic_type[]
 
     # Keep track of all inequality constraint duals (γ) that we create.
     Γ = symbolic_type[]
-    Γ_by_player = [symbolic_type[] for _ in 1:goop.num_players] # 10/25: store duals for complementarity slackness
 
     # Keep track of all lower level policy constraint duals (ψ) that we create.
     Ψ = symbolic_type[]
@@ -241,95 +219,53 @@ function generate_slacked_reduced_kkt_system(
         )
         push!(Λ, λ...)
 
+        # This level's inequalities G are g and, for every prioritized level from this one
+        # inward, h + s ≥ 0 and s ≥ 0; γ and σ have one entry per row of G (built below).
+        num_inequalities =
+            goop.inequality_dims[player] + 2 * sum(preference_dims[player][level:end])
         γ = SymbolicTracingUtils.make_variables(
             backend,
             Symbol("γ_$(player)_$(level)"),
-            goop.inequality_dims[player],
+            num_inequalities,
         )
         push!(Γ, γ...)
-        push!(Γ_by_player[player], γ...) # 10/25
 
-        # (1015)TODO Discuss: interior point slacks only at innermost level. Otherwise,  γ₂ is not enforced?
         σ = SymbolicTracingUtils.make_variables(
             backend,
             Symbol("σ_$(player)_$(level)"),
-            goop.inequality_dims[player],
+            num_inequalities,
         )
         push!(Σ, σ...)
+
+        # A prioritized constraint at this level has its own preference slacks.
+        preference_slack = SymbolicTracingUtils.make_variables(
+            backend,
+            Symbol("s_$(player)_$(level)"),
+            preference_dims[player][level],
+        )
+        push!(s, preference_slack...)
 
         # Base case is the inner-most layer.
         if length(preferences) == 1
             h = only(preferences)(x, θ)
 
             if only(is_prioritized_constraint)
-                # Highest priority is a constraint.
-                # preference_slack = SymbolicTracingUtils.make_variables(
-                # 	backend,
-                # 	Symbol("s_$(player)_$(level)"),
-                # 	length(h), # get the right dimension
-                # )
-                # push!(s, preference_slack...)
-
-                # σₚ = SymbolicTracingUtils.make_variables(
-                # 	backend,
-                # 	Symbol("σₚ_$(player)_$(level)"),
-                # 	length(h),
-                # )
-                # push!(Σ, σₚ...)
-
-                # σₚₛ = SymbolicTracingUtils.make_variables(
-                # 	backend,
-                # 	Symbol("σₚₛ_$(player)_$(level)"),
-                # 	length(h),
-                # )
-                # push!(Σ, σₚₛ...)
-
-                # γₚ = SymbolicTracingUtils.make_variables(
-                # 	backend,
-                # 	Symbol("γₚ_$(player)_$(level)"),
-                # 	length(h),
-                # )
-                # push!(Γ, γₚ...)
-
-                # μₛ = SymbolicTracingUtils.make_variables(
-                # 	backend,
-                # 	Symbol("μₛ_$(player)_$(level)"),
-                # 	length(h),
-                # )
-                # push!(Γ, μₛ...)
-
-                # L =
-                # 	sum(preference_slack) - γₚ' * (h .+ preference_slack) - μₛ' * preference_slack -
-                # 	(isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g)
-
-                L =
-                    sum(smooth_piecewise_preference_objective.(h, level)) -
-                    # γₚ' * (h .+ preference_slack) -
-                    (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g)
-
-                # vars = vcat(x[Block(player)], preference_slack)
-                vars = x[Block(player)]
+                # Highest priority is a constraint h ≥ 0: minimize sum(preference_slack)
+                # subject to h + preference_slack ≥ 0 and preference_slack ≥ 0.
+                preference_inequalities = [h .+ preference_slack; preference_slack]
+                G = [isnothing(g) ? symbolic_type[] : g; preference_inequalities]
+                @assert length(G) == num_inequalities
+                L = sum(preference_slack) - (isnothing(f) ? 0 : λ' * f) - γ' * G
+                vars = [x[Block(player)]; preference_slack]
 
                 ∇L, π_terms = if drop_higher_order_terms
                     lagrangian_terms = QuasiLagrangianTerm[]
-                    # _push_quasi_lagrangian_term!(lagrangian_terms, sum(preference_slack .^ 2))
-                    # _push_quasi_lagrangian_term!(
-                    # 	lagrangian_terms,
-                    # 	vcat(h .+ preference_slack, isnothing(P) ? symbolic_type[] : P),
-                    # 	γₚ,
-                    # )
-                    _push_quasi_lagrangian_term!(
-                        lagrangian_terms,
-                        sum(smooth_piecewise_preference_objective.(h, level)),
-                    )
+                    _push_quasi_lagrangian_term!(lagrangian_terms, sum(preference_slack))
                     _push_quasi_lagrangian_term!(lagrangian_terms, f, λ)
-                    _push_quasi_lagrangian_term!(lagrangian_terms, g, γ)
+                    _push_quasi_lagrangian_term!(lagrangian_terms, G, γ)
                     _quasi_gradient_from_terms(lagrangian_terms, vars)
                 else
-                    (@timeit TO "symbolic gradient construction" SymbolicTracingUtils.gradient(
-                        L,
-                        vars,
-                    )),
+                    (@timeit TO "symbolic gradient construction" _fast_gradient(L, vars)),
                     QuasiLagrangianTerm[]
                 end
                 F = Vector{symbolic_type}(
@@ -337,18 +273,20 @@ function generate_slacked_reduced_kkt_system(
                         !isnothing,
                         [
                             ∇L .+ η * vars
-                            isnothing(f) ? nothing : f
-                            # h .+ preference_slack .- σₚ
-                            # σₚ .* γₚ .- ϵ
-                            # preference_slack .- σₚₛ
-                            # σₚₛ .* μₛ .- ϵ
-                            (isnothing(g) ? nothing : g .- σ)
-                            (isnothing(g) ? nothing : σ .* γ .- ϵ)
+                            f
+                            G .- σ
+                            σ .* γ .- ρ
                         ],
                     ),
                 )
 
-                return (; F, π = ∇L, π_term_groups = [π_terms])
+                return (;
+                    F,
+                    π = ∇L,
+                    π_term_groups = [π_terms],
+                    preference_inequalities,
+                    complementary_slackness = G .* γ,
+                )
             else
                 @assert length(h) == 1 "Expected a single preference function at the base level, but got $(length(h))"
                 # Highest priority is a cost.
@@ -361,10 +299,7 @@ function generate_slacked_reduced_kkt_system(
                     _push_quasi_lagrangian_term!(lagrangian_terms, g, γ)
                     _quasi_gradient_from_terms(lagrangian_terms, x[Block(player)])
                 else
-                    (@timeit TO "symbolic gradient construction" SymbolicTracingUtils.gradient(
-                        L,
-                        x[Block(player)],
-                    )),
+                    (@timeit TO "symbolic gradient construction" _fast_gradient(L, x[Block(player)])),
                     QuasiLagrangianTerm[]
                 end
                 F = Vector{symbolic_type}(
@@ -374,21 +309,28 @@ function generate_slacked_reduced_kkt_system(
                             ∇L .+ η * x[Block(player)]
                             f
                             (isnothing(g) ? nothing : g .- σ)
-                            (isnothing(g) ? nothing : σ .* γ .- ϵ)
+                            (isnothing(g) ? nothing : σ .* γ .- ρ)
                         ],
                     ),
                 )
 
-                return (; F, π = ∇L, π_term_groups = [π_terms])
+                return (;
+                    F,
+                    π = ∇L,
+                    π_term_groups = [π_terms],
+                    preference_inequalities = symbolic_type[],
+                    complementary_slackness = isnothing(g) ? symbolic_type[] : g .* γ,
+                )
             end
         end
 
         # Handle higher levels via tail recursion.
-        (; F, π, π_term_groups) = construct_player_kkt_conditions(
-            preferences[2:end],
-            is_prioritized_constraint[2:end];
-            player,
-        )
+        (; F, π, π_term_groups, preference_inequalities, complementary_slackness) =
+            construct_player_kkt_conditions(
+                preferences[2:end],
+                is_prioritized_constraint[2:end];
+                player,
+            )
         h = first(preferences)(x, θ)
 
         ψ = SymbolicTracingUtils.make_variables(
@@ -398,181 +340,95 @@ function generate_slacked_reduced_kkt_system(
         )
         ψ_start = length(Ψ) + 1
         push!(Ψ, ψ...)
+        # π ends with the innermost level's stationarity rows: own x, then its preference slacks.
         append!(
             innermost_stationarity_dual_offsets,
-            (ψ_start + length(ψ) - goop.primal_dims[player]):(ψ_start + length(ψ) - 1),
+            (ψ_start + length(ψ) - preference_dims[player][end] - goop.primal_dims[player]):(ψ_start + length(ψ) - preference_dims[player][end] - 1),
         )
 
-        # 10/25: added duals for complementarity slackness for lower levels
+        # Duals of the lower levels' complementarity products Gₘ ⊙ γₘ, m > level.
         ϕ = SymbolicTracingUtils.make_variables(
             backend,
             Symbol("ϕ_$(player)_$(level)"),
-            goop.inequality_dims[player] * (num_levels - level), # ℓ = 1 to Kⁱ - k
+            length(complementary_slackness),
         )
         push!(Φ, ϕ...)
 
         if first(is_prioritized_constraint)
-            # Highest priority is a constraint.
-            # preference_slack = SymbolicTracingUtils.make_variables(
-            # 	backend,
-            # 	Symbol("s_$(player)_$(level)"),
-            # 	length(h),
-            # )
-            # push!(s, preference_slack...)
-
-            # σₚ = SymbolicTracingUtils.make_variables(
-            # 	backend,
-            # 	Symbol("σₚ_$(player)_$(level)"),
-            # 	length(h),
-            # )
-            # push!(Σ, σₚ...)
-
-            # σₚₛ = SymbolicTracingUtils.make_variables(
-            # 	backend,
-            # 	Symbol("σₚₛ_$(player)_$(level)"),
-            # 	length(h),
-            # )
-            # push!(Σ, σₚₛ...)
-
-            # γₚ = SymbolicTracingUtils.make_variables(
-            # 	backend,
-            # 	Symbol("γₚ_$(player)_$(level)"),
-            # 	length(h),
-            # )
-            # push!(Γ, γₚ...)
-
-            # μₛ = SymbolicTracingUtils.make_variables(
-            # 	backend,
-            # 	Symbol("μₛ_$(player)_$(level)"),
-            # 	length(h),
-            # )
-            # push!(Γ, μₛ...)
-
-            # Form reduced Lagrangian at this stage.
-            blocked_Γ_cs =
-                g === nothing ? nothing :
-                make_blocks(Γ_by_player[player], goop.inequality_dims[player])
-            # L =
-            # 	sum(preference_slack) - γₚ' * (h .+ preference_slack) - μₛ' * preference_slack -
-            # 	ψ' * π - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) -
-            # 	(isnothing(g) ? 0 : ϕ' * (repeat(g, num_levels - level) .* blocked_Γ_cs[Block(level+1):Block(num_levels)]))
-
+            # Current priority is a constraint h ≥ 0: minimize sum(preference_slack) subject to
+            # h + preference_slack ≥ 0 and preference_slack ≥ 0.
+            preference_inequalities =
+                [h .+ preference_slack; preference_slack; preference_inequalities]
+            G = [isnothing(g) ? symbolic_type[] : g; preference_inequalities]
+            @assert length(G) == num_inequalities
             L =
-                sum(smooth_piecewise_preference_objective.(h, level)) -
-                # γₚ' * (h .+ (preference_slack)) -
-                ψ' * π - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) - (
-                    isnothing(g) ? 0 :
-                    ϕ' * (
-                        repeat(g, num_levels - level) .*
-                        blocked_Γ_cs[Block(level + 1):Block(num_levels)]
-                    )
-                )
-
-            # vars = vcat(x[Block(player)], preference_slack)
-            vars = x[Block(player)]
+                sum(preference_slack) - ψ' * π - (isnothing(f) ? 0 : λ' * f) - γ' * G -
+                (isempty(complementary_slackness) ? 0 : ϕ' * complementary_slackness)
+            vars = [x[Block(player)]; preference_slack]
 
             ∇L, π_terms = if drop_higher_order_terms
                 lagrangian_terms = QuasiLagrangianTerm[]
-                # _push_quasi_lagrangian_term!(lagrangian_terms, sum(preference_slack .^ 2))
-                # _push_quasi_lagrangian_term!(
-                # 	lagrangian_terms,
-                # 	vcat(h .+ preference_slack, isnothing(P) ? symbolic_type[] : P),
-                # 	γₚ,
-                # )
-                _push_quasi_lagrangian_term!(
-                    lagrangian_terms,
-                    sum(smooth_piecewise_preference_objective.(h, level)),
-                )
+                _push_quasi_lagrangian_term!(lagrangian_terms, sum(preference_slack))
                 _append_quasi_policy_terms!(lagrangian_terms, π_term_groups, ψ)
                 _push_quasi_lagrangian_term!(lagrangian_terms, f, λ)
-                _push_quasi_lagrangian_term!(lagrangian_terms, g, γ)
+                _push_quasi_lagrangian_term!(lagrangian_terms, G, γ)
                 _push_quasi_lagrangian_term!(
                     lagrangian_terms,
-                    isnothing(g) ? nothing :
-                    repeat(g, num_levels - level) .*
-                    blocked_Γ_cs[Block(level + 1):Block(num_levels)],
+                    isempty(complementary_slackness) ? nothing : complementary_slackness,
                     ϕ,
                 )
                 _quasi_gradient_from_terms(lagrangian_terms, vars)
             else
-                (@timeit TO "symbolic gradient construction" SymbolicTracingUtils.gradient(
-                    L,
-                    vars,
-                )),
+                (@timeit TO "symbolic gradient construction" _fast_gradient(L, vars)),
                 QuasiLagrangianTerm[]
             end
-
-            F̃ = [
-                ∇L .+ η * vars
-                # h .+ preference_slack .- σₚ
-                # σₚ .* γₚ .- ϵ
-                # preference_slack .- σₚₛ
-                # σₚₛ .* μₛ .- ϵ
-                (isnothing(g) ? nothing : g .- σ)
-                (isnothing(g) ? nothing : σ .* γ .- ϵ)
-                F
-            ]
-
-            return (;
-                F = F̃,
-                π = vcat(∇L, π),
-                π_term_groups = vcat([π_terms], π_term_groups),
-            )
         else
             @assert length(h) == 1 "Expected a single preference function at the level $(level), but got $(length(h))"
             # Current priority is a cost.
-            # TODO: dual variables for preference inequalities
-            blocked_Γ_cs =
-                g === nothing ? nothing :
-                make_blocks(Γ_by_player[player], goop.inequality_dims[player])
+            G = [isnothing(g) ? symbolic_type[] : g; preference_inequalities]
+            @assert length(G) == num_inequalities
             L =
-                h - ψ' * π - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g) - (
-                    isnothing(g) ? 0 :
-                    ϕ' * (
-                        repeat(g, num_levels - level) .*
-                        blocked_Γ_cs[Block(level + 1):Block(num_levels)]
-                    )
-                )
+                h - ψ' * π - (isnothing(f) ? 0 : λ' * f) - (isempty(G) ? 0 : γ' * G) -
+                (isempty(complementary_slackness) ? 0 : ϕ' * complementary_slackness)
+            vars = x[Block(player)]
 
             ∇L, π_terms = if drop_higher_order_terms
                 lagrangian_terms = QuasiLagrangianTerm[]
                 _push_quasi_lagrangian_term!(lagrangian_terms, h)
                 _append_quasi_policy_terms!(lagrangian_terms, π_term_groups, ψ)
                 _push_quasi_lagrangian_term!(lagrangian_terms, f, λ)
-                _push_quasi_lagrangian_term!(lagrangian_terms, g, γ)
+                _push_quasi_lagrangian_term!(lagrangian_terms, isempty(G) ? nothing : G, γ)
                 _push_quasi_lagrangian_term!(
                     lagrangian_terms,
-                    isnothing(g) ? nothing :
-                    repeat(g, num_levels - level) .*
-                    blocked_Γ_cs[Block(level + 1):Block(num_levels)],
+                    isempty(complementary_slackness) ? nothing : complementary_slackness,
                     ϕ,
                 )
-                _quasi_gradient_from_terms(lagrangian_terms, x[Block(player)])
+                _quasi_gradient_from_terms(lagrangian_terms, vars)
             else
-                (@timeit TO "symbolic gradient construction" SymbolicTracingUtils.gradient(
-                    L,
-                    x[Block(player)],
-                )),
+                (@timeit TO "symbolic gradient construction" _fast_gradient(L, vars)),
                 QuasiLagrangianTerm[]
             end
-            F̃ = Vector{symbolic_type}(
-                filter!(
-                    !isnothing,
-                    [
-                        ∇L .+ η * x[Block(player)]
-                        (isnothing(g) ? nothing : g .- σ)
-                        (isnothing(g) ? nothing : σ .* γ .- ϵ)
-                        F
-                    ],
-                ),
-            )
-
-            return (;
-                F = F̃,
-                π = vcat(∇L, π),
-                π_term_groups = vcat([π_terms], π_term_groups),
-            )
         end
+
+        F̃ = Vector{symbolic_type}(
+            filter!(
+                !isnothing,
+                [
+                    ∇L .+ η * vars
+                    G .- σ
+                    σ .* γ .- ρ
+                    F
+                ],
+            ),
+        )
+
+        return (;
+            F = F̃,
+            π = vcat(∇L, π),
+            π_term_groups = vcat([π_terms], π_term_groups),
+            preference_inequalities,
+            complementary_slackness = [G .* γ; complementary_slackness],
+        )
     end
 
     # Recursively generate the rest of the KKT conditions for each player.
@@ -599,10 +455,10 @@ function generate_slacked_reduced_kkt_system(
         )
 
         # Pack all variables together.
-        z = Vector{symbolic_type}(vcat(x, s, Σ, Λ, Γ, Ψ, Φ)) # 10/25: added ϕ
+        z = Vector{symbolic_type}(vcat(x, s, Σ, Λ, Γ, Ψ, Φ))
         θ = Vector{symbolic_type}(θ)
 
-        idx = blockedrange(length.([x, s, Σ, Λ, Γ, Ψ, Φ])) # 10/25: added ϕ
+        idx = blockedrange(length.([x, s, Σ, Λ, Γ, Ψ, Φ]))
         primal_dims = idx[Block(1)] # x
         preference_slack_dims = idx[Block(2)] # s
         interior_point_slack_dims = vcat(idx[Block(3)]) # Σ
@@ -620,7 +476,7 @@ function generate_slacked_reduced_kkt_system(
         F,
         z,
         θ,
-        ϵ,
+        ρ,
         η,
         primal_dims,
         preference_slack_dims,
@@ -639,7 +495,6 @@ end
 "Construct the Reduced Quasi-KKT system corresponding to a ParametricGOOP."
 function generate_slacked_quasi_kkt_system(
     goop::ParametricGOOP;
-    backend = SymbolicTracingUtils.SymbolicsBackend(),
     backend_options = (;),
     codegen = nothing,
     fd_codegen_chunk_size = nothing,
@@ -649,7 +504,6 @@ function generate_slacked_quasi_kkt_system(
 )
     generate_slacked_reduced_kkt_system(
         goop;
-        backend,
         drop_higher_order_terms = true,
         backend_options,
         codegen,
@@ -942,11 +796,11 @@ function generate_slacked_complete_kkt_system(
 end
 
 # Helper functions
-# Note: the complete generator differentiates with `_fast_gradient`, not with the
-# `SymbolicTracingUtils.gradient` of `generate_slacked_reduced_kkt_system`, because it is faster
-# on large systems: both give the same expressions (checked string for string, and the compiled
-# residuals and Jacobians bitwise), and the intersection game's exact complete system builds in
-# 2.8 s with it against 7.2 s (2026-11-02).
+# Note: the reduced and complete generators differentiate with `_fast_gradient`, not with
+# `SymbolicTracingUtils.gradient`, because it is faster on large systems: both give the same
+# expressions (checked string for string, and the compiled residuals and Jacobians bitwise), and
+# the intersection game's exact complete system builds in 2.8 s with it against 7.2 s (2026-11-02).
+
 """
 `Symbolics.gradient(O, x)`, expression for expression, without walking all of `O` once per
 variable: `executediff` is called only on the terms of a sum that can contain `x[j]` (found
@@ -994,9 +848,6 @@ function _provably_distinct_leaf(v)
     SymbolicUtils.iscall(v) && SymbolicUtils.operation(v) === getindex || return false
     return all(i -> i isa Integer || SymbolicUtils.isconst(i), @view SymbolicUtils.arguments(v)[2:end])
 end
-
-make_blocks(vec, b) =
-    (@assert length(vec) % b == 0; BlockArray(vec, fill(b, length(vec) ÷ b)))
 
 function unflatten_trajectory(z, state_dimension, control_dimension)
     Z = reshape(z, state_dimension + control_dimension, :)
