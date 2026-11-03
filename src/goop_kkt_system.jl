@@ -4,7 +4,7 @@ Also keeps track of several types of variables (preference slacks, interior
 point slacks, and inequality constraint duals) that must satisfy nonnegativity
 constraints that are not explicitly included in the KKT system.
 
-The KKT system is parameterized by a vector θ and a scalar ρ > 0 (the keyword `ϵ` of `F!`)
+The KKT system is parameterized by a vector θ and a scalar ρ > 0 (the keyword `ρ` of `F!`)
 which controls the complementarity relaxation of the interior point scheme.
 
 # The reduced system (`generate_slacked_reduced_kkt_system`)
@@ -38,9 +38,9 @@ For the Scholtes form of the same hierarchy (exact φ rows, ρ homotopy) see
 """
 
 struct GOOPKKTSystem{T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11}
-    "A callable function that computes F!(val, z; θ, ϵ) in-place for 'val'"
+    "A callable function that computes F!(val, z; θ, ρ) in-place for 'val'"
     F!::T1
-    "A callable function that computes ∇F!(val, z; θ, ϵ) in-place for 'val'"
+    "A callable function that computes ∇F!(val, z; θ, ρ) in-place for 'val'"
     ∇F_z!::T2
     "Length of primal x vector"
     primal_dims::T3
@@ -274,7 +274,7 @@ function BuildGOOPKKTSystem(
     F_symbolic::Vector{T},
     z_symbolic::Vector{T},
     θ_symbolic::Vector{T},
-    ϵ_symbolic::T,
+    ρ_symbolic::T,
     primal_dims,
     preference_slack_dims,
     interior_point_slack_dims,
@@ -300,7 +300,7 @@ function BuildGOOPKKTSystem(
                     F_symbolic,
                     z_symbolic,
                     θ_symbolic,
-                    ϵ_symbolic;
+                    ρ_symbolic;
                     chunk_size = fd_codegen_chunk_size,
                 )
             else
@@ -308,13 +308,13 @@ function BuildGOOPKKTSystem(
                     F_symbolic,
                     z_symbolic,
                     θ_symbolic,
-                    ϵ_symbolic;
+                    ρ_symbolic;
                     in_place = true,
                     backend_options,
                 )
             end
 
-            (result, z; θ, ϵ) -> _F!(result, z, θ, ϵ)
+            (result, z; θ, ρ) -> _F!(result, z, θ, ρ)
         end
 
         ∇F_z! = @timeit TO "Jacobian function construction" let
@@ -330,16 +330,16 @@ function BuildGOOPKKTSystem(
                     SparseArrays.findnz(∇F_symbolic)[3],
                     z_symbolic,
                     θ_symbolic,
-                    ϵ_symbolic;
+                    ρ_symbolic;
                     chunk_size = fd_codegen_chunk_size,
                 )
-                (result, z, θ, ϵ) -> _Jvals!(SparseArrays.nonzeros(result), z, θ, ϵ)
+                (result, z, θ, ρ) -> _Jvals!(SparseArrays.nonzeros(result), z, θ, ρ)
             else
                 SymbolicTracingUtils.build_function(
                     ∇F_symbolic,
                     z_symbolic,
                     θ_symbolic,
-                    ϵ_symbolic;
+                    ρ_symbolic;
                     in_place = true,
                     backend_options,
                 )
@@ -350,7 +350,7 @@ function BuildGOOPKKTSystem(
                 constant_entries =
                     SymbolicTracingUtils.get_constant_entries(∇F_symbolic, z_symbolic)
                 SymbolicTracingUtils.SparseFunction(
-                    (result, z; θ, ϵ) -> _∇F!(result, z, θ, ϵ),
+                    (result, z; θ, ρ) -> _∇F!(result, z, θ, ρ),
                     rows,
                     cols,
                     size(∇F_symbolic),

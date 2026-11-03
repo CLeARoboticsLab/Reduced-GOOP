@@ -3,7 +3,9 @@ module CompleteKKTTests
 using Test, ReducedGOOP, Symbolics, BlockArrays, LinearAlgebra, SparseArrays
 include(joinpath(@__DIR__, "benchmark_problems.jl"))
 const RG = ReducedGOOP
-const BUILDERS = (RG.generated_exact_complete_kkt_system, RG.generated_perturbed_complete_kkt_system)
+exact(goop) = RG.generate_slacked_complete_kkt_system(goop; complementarity = :exact)
+perturbed(goop) = RG.generate_slacked_complete_kkt_system(goop; complementarity = :perturbed)
+const BUILDERS = (exact, perturbed)
 
 function evaluate(kkt, y, rho; theta = zeros(kkt.parameter_dimension))
     r = zeros(kkt.n_nc)
@@ -13,11 +15,11 @@ end
 
 "The values of the auxiliary slacks' defining expressions (`slack_expressions`) at `y`."
 function slack_values(kkt, y; theta = zeros(kkt.parameter_dimension))
-    θ = RG.SymbolicTracingUtils.make_variables(RG.SymbolicTracingUtils.SymbolicsBackend(), :θ,
-        kkt.parameter_dimension)
-    G! = RG._compile_scholtes_block(kkt.slack_expressions, kkt.vars, θ, Symbolics.variable(:complete_rho),
-        Symbolics.variable(:complete_unused_eta); codegen = :fast_differentiation, fd_codegen_chunk_size = 32,
-        backend_options = (;))[1]
+    backend = RG.SymbolicTracingUtils.SymbolicsBackend()
+    θ = RG.SymbolicTracingUtils.make_variables(backend, :θ, kkt.parameter_dimension)
+    ρ = only(RG.SymbolicTracingUtils.make_variables(backend, :ρ, 1))
+    G! = RG._compile_kkt_block(kkt.slack_expressions, kkt.vars, θ, ρ; codegen = :fast_differentiation,
+        fd_codegen_chunk_size = 32, backend_options = (;))[1]
     G = zeros(length(kkt.slack_expressions))
     G!(G, y, theta, 0.0)
     G
@@ -63,7 +65,7 @@ end
         is_prioritized_constraint = [[false,false]],
         equality_constraints = [(x,t) -> [x[2]-x[1]]],
         inequality_constraints = [(x,t) -> [x[1]+1, 2-x[1]+x[2]]])
-    k = RG.generated_exact_complete_kkt_system(p)
+    k = exact(p)
     inner, outer = k.levels[1][2], k.levels[1][1]
     x = k.vars[k.primal_dims]
     f, g = [x[2]-x[1]], [x[1]+1, 2-x[1]+x[2]]
@@ -79,8 +81,8 @@ end
     @test all(iszero, Symbolics.simplify.(reference-k.F_symbolic))
     @test iszero(Symbolics.simplify(L1-outer.L))
     @test all(iszero, Symbolics.simplify.(G1-k.G_symbolic))
-    @test length(inner.products) == 2
-    @test length(outer.products) == 4
+    @test length(inner.complementary_slackness) == 2
+    @test length(outer.complementary_slackness) == 4
     y = 0.5 .+ 0.1sin.(1:k.n)
     @test evaluate(k,y,1.0) == evaluate(k,y,1e-12)
     d = cos.(1:k.n); d ./= norm(d)
@@ -90,7 +92,7 @@ end
         preferences=[Function[(x,t)->x[1]^2/2;p.preferences[1]]],
         is_prioritized_constraint=[[false,false,false]],
         equality_constraints=p.equality_constraints,inequality_constraints=p.inequality_constraints)
-    k3 = RG.generated_exact_complete_kkt_system(p3)
+    k3 = exact(p3)
     top,middle,bottom = k3.levels[1]
     x = k3.vars[k3.primal_dims]
     f,g = [x[2]-x[1]],[x[1]+1,2-x[1]+x[2]]
@@ -113,12 +115,12 @@ end
 end
 
 @testset "Perturbed complete system: exact rows, level slacks, products equal to rho" begin
-    # generated_perturbed_complete_kkt_system keeps the exact recursion. At the top level each level k's
+    # The perturbed system keeps the exact recursion. At the top level each level k's
     # products with g use its own slacks σ_k, with g - σ_k = 0, and every product equals rho.
     for (levels, players, kind) in ((2, 1, :quadratic), (3, 3, :nonlinear))
         case = build_benchmark_problem(; num_players = players, levels, kind)
-        e = RG.generated_exact_complete_kkt_system(case.problem)
-        k = RG.generated_perturbed_complete_kkt_system(case.problem)
+        e = exact(case.problem)
+        k = perturbed(case.problem)
         K, m = length.(case.problem.preferences), case.problem.inequality_dims
         extra = sum((K .- 1) .* m)
         @test k.n == k.n_nc == e.n + extra
@@ -134,17 +136,14 @@ end
         end
         y[k.interior_point_slack_dims] .= slack_values(k, y)
         re, r0, r = evaluate(e, ye, 0.0), evaluate(k, y, 0.0), evaluate(k, y, 1e-3)
-        # Per player: the exact rows, then the slack rows (exact: m_i, perturbed: K_i m_i).
-        oe, ok = 0, 0
-        for i in 1:case.problem.num_players
-            n = length(e.levels[i][1].F)
-            @test r0[(ok+1):(ok+n)] ≈ re[(oe+1):(oe+n)] atol=1e-12
-            @test norm(r0[(ok+n+1):(ok+n+K[i]*m[i])]) <= 1e-12
-            oe, ok = oe + n + m[i], ok + n + K[i] * m[i]
-        end
-        @test (oe, ok) == (e.n_nc, k.n_nc)
+        # Every player's exact rows, then the slack rows of all players (exact: m_i, perturbed: K_i m_i each).
+        n = sum(length(e.levels[i][1].F) for i in 1:case.problem.num_players)
+        @test r0[1:n] ≈ re[1:n] atol=1e-12
+        @test norm(r0[(n+1):end]) <= 1e-12
+        @test (n + sum(m), n + sum(K .* m)) == (e.n_nc, k.n_nc)
         # rho shifts exactly the complementarity products, (2^K - 1) m_I per player here.
-        @test count(!iszero, r - r0) == sum(length(level.products) for player in e.levels for level in player)
+        @test count(!iszero, r - r0) ==
+              sum(length(level.complementary_slackness) for player in e.levels for level in player)
         @test all(≈(-1e-3), filter(!iszero, r - r0))
         d = cos.(1:k.n); d ./= norm(d)
         @test jacobian(k,y,1e-3)*d ≈ (evaluate(k,y+1e-6d,1e-3)-evaluate(k,y-1e-6d,1e-3))/2e-6 atol=1e-7
@@ -180,11 +179,7 @@ end
                     y[findfirst(isequal(v),k.vars)] = 1.0
                 end
             end
-            G! = RG._compile_scholtes_block(k.slack_expressions,k.vars,Symbolics.Num[],
-                Symbolics.variable(:complete_rho),Symbolics.variable(:complete_unused_eta);
-                codegen=:fast_differentiation,fd_codegen_chunk_size=32,backend_options=(;))[1]
-            G = zeros(length(k.slack_expressions)); G!(G,y,Float64[],0.0)
-            y[k.interior_point_slack_dims] .= G
+            y[k.interior_point_slack_dims] .= slack_values(k,y)
             @test norm(evaluate(k,y,0.0)) < 1e-12
             @test all(isfinite, jacobian(k,0.5 .+ y,1e-3))
         end
@@ -197,7 +192,7 @@ end
         eta_init=1e-4,eta_schedule=true,eta_max=1e4,proj_eps=1e-8)
     for levels in (2,3), players in (1,3), kind in (:quadratic,:nonlinear)
         case = build_benchmark_problem(;num_players=players,levels,kind)
-        k = RG.generated_exact_complete_kkt_system(case.problem)
+        k = exact(case.problem)
         @test k.n_comp == 0
         @test k.n_nc == k.n
         output = RG.solve(RG.Scholtes(),k,zeros(k.parameter_dimension);z₀=case.expected,options)
@@ -209,7 +204,7 @@ end
         @test output.iters > 1
     end
     case = build_benchmark_problem(;num_players=1,levels=2,kind=:quadratic)
-    k = RG.generated_exact_complete_kkt_system(case.problem)
+    k = exact(case.problem)
     # A start outside the sign box is rejected.
     output = RG.solve(RG.Scholtes(),k,zeros(k.parameter_dimension);z₀=case.expected,options)
     bad = copy(output.w);bad[first(k.nonnegative_dims)] = -1
@@ -220,7 +215,7 @@ end
 @testset "Complete/reduced unconstrained solution agreement" for levels in (2, 3)
 	case = build_unconstrained_quadratic_problem(; levels)
 
-	kkt = RG.generated_exact_complete_kkt_system(case.problem)
+	kkt = exact(case.problem)
 	complete = RG.solve(RG.Scholtes(), kkt, zeros(kkt.parameter_dimension);
 		z₀ = case.z₀,
 		options = RG.ScholtesOptions(; rho_schedule = [1e-9], tol = 1e-9,

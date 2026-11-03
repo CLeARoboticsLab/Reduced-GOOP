@@ -101,16 +101,17 @@ dual solution independently with `NonlinearSolve`.
 
 #### KKT-Based Formulations
 
-These functions construct nonlinear KKT systems represented as `GOOPKKTSystem`
-objects and solved by the interior-point method in `solver.jl`. The reduced
-generators also take `complementarity = :scholtes`, which returns a
-`ScholtesKKTSystem` for the Scholtes solver instead (see below):
+These functions construct nonlinear KKT systems. The reduced generators return
+`GOOPKKTSystem` objects, solved by the interior-point method in `solver.jl`, or,
+with `complementarity = :scholtes`, a `ScholtesKKTSystem` for the Scholtes solver
+(see below). The complete generator returns a `CompleteKKTSystem`, solved by the
+Scholtes solver:
 
-| Function                                    | Description                                                                                                                                                                                                       |
-| ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `generate_slacked_reduced_kkt_system(...)`  | Builds a reduced, slacked KKT system recursively. It introduces preference slacks, interior-point slacks, equality duals, inequality duals, lower-level policy multipliers, and complementarity-relaxation terms. |
-| `generate_slacked_quasi_kkt_system(...)`    | Calls the reduced generator with `drop_higher_order_terms = true`. The code implements this by propagating `QuasiLagrangianTerm` objects and truncating higher-order derivative contributions.                    |
-| `generate_slacked_complete_kkt_system(...)` | Builds a more explicit nested KKT system by carrying inner-level stationarity, inequality rows, and decision variables into outer-level KKT conditions.                                                           |
+| Function                                    | Description                                                                                                                                                                                                                                    |
+| ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `generate_slacked_reduced_kkt_system(...)`  | Builds a reduced, slacked KKT system recursively. It introduces preference slacks, interior-point slacks, equality duals, inequality duals, lower-level policy multipliers, and complementarity-relaxation terms.                              |
+| `generate_slacked_quasi_kkt_system(...)`    | Calls the reduced generator with `drop_higher_order_terms = true`. The code implements this by propagating `QuasiLagrangianTerm` objects and truncating higher-order derivative contributions.                                                 |
+| `generate_slacked_complete_kkt_system(...)` | Builds the complete KKT system, carrying inner-level stationarity, inequality rows and multipliers into the outer levels: `complementarity = :exact` (equations (2.12)–(2.17)) or `:perturbed` (equation (6.1), complementarity relaxed to ρ). |
 
 From the source, the reduced formulation appears to encode lower-level stationarity
 and complementarity information more compactly through recursively propagated

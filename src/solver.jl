@@ -268,7 +268,7 @@ function solve(
             @timeit TO "inner iteration loop" begin
                 total_iters += 1
                 # Compute the residual at the current iterate
-                @timeit TO "residual evaluation" mcp.F!(F, z; θ, ϵ)
+                @timeit TO "residual evaluation" mcp.F!(F, z; θ, ρ = ϵ)
                 kkt_error = norm(F, 2)
                 stopping_criterion = kkt_error <= tol
                 stopping_criterion && break
@@ -280,7 +280,7 @@ function solve(
                 ρ = NaN
 
                 if linesearch == :fraction_to_boundary
-                    @timeit TO "Jacobian evaluation" mcp.∇F_z!(∇F, z; θ, ϵ)
+                    @timeit TO "Jacobian evaluation" mcp.∇F_z!(∇F, z; θ, ρ = ϵ)
                     if use_klu
                         @timeit TO "KKT system assembly" _update_augmented_kkt!(
                             aug_cache,
@@ -387,7 +387,7 @@ function solve(
                                 ∇F,
                                 z;
                                 θ,
-                                ϵ,
+                                ρ = ϵ,
                             )
                             @timeit TO "KKT system assembly" _update_augmented_kkt!(
                                 aug_cache,
@@ -408,7 +408,7 @@ function solve(
                         end
                     else
                         # J is fixed at this iterate; only η changes between retries, so compute SVD once.
-                        @timeit TO "Jacobian evaluation" mcp.∇F_z!(∇F, z; θ, ϵ)
+                        @timeit TO "Jacobian evaluation" mcp.∇F_z!(∇F, z; θ, ρ = ϵ)
                         @timeit TO "KKT system assembly" _densify!(
                             Jdense,
                             ∇F,
@@ -524,7 +524,7 @@ function solve(
                                 F_trial,
                                 z_trial;
                                 θ,
-                                ϵ,
+                                ρ = ϵ,
                             )
                             F_z_next = norm(F_trial, 2)
                             trial_merit2 = F_z_next^2
@@ -543,7 +543,7 @@ function solve(
                                     F_trial,
                                     z_trial;
                                     θ,
-                                    ϵ,
+                                    ρ = ϵ,
                                 )
                                 F_z_next = norm(F_trial, 2)
                                 trial_merit2 = F_z_next^2
@@ -574,7 +574,7 @@ function solve(
                                     ∇F,
                                     z;
                                     θ,
-                                    ϵ,
+                                    ρ = ϵ,
                                 )
                                 @timeit TO "KKT system assembly" _update_augmented_kkt!(
                                     aug_cache,
@@ -668,7 +668,7 @@ function solve(
                     @. γ += α_γ * δγ
 
                     if is_fraction_to_boundary_linesearch
-                        @timeit TO "residual evaluation" mcp.F!(F, z; θ, ϵ)
+                        @timeit TO "residual evaluation" mcp.F!(F, z; θ, ρ = ϵ)
                     else
                         F .= F_trial # backtracking linesearch already evaluated the accepted point so reuse
                     end
@@ -715,7 +715,7 @@ function solve(
     end
 
     # Evaluate stopping criterion/convergence at the returned iterate.
-    @timeit TO "residual evaluation" mcp.F!(F, z; θ, ϵ)
+    @timeit TO "residual evaluation" mcp.F!(F, z; θ, ρ = ϵ)
     kkt_error = norm(F, 2)
     status = kkt_error <= tol ? :solved : :failed
 

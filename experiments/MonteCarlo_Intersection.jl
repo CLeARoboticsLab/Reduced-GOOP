@@ -17,8 +17,8 @@ For every objective variant and every sampled initial state:
                      solution, and report how far the trajectory moves.
 
 Terms
-  exact      generated_exact_complete_kkt_system: componentwise complementarity, no
-             relaxation, so it is solved once at ρ = 0.
+  exact      generate_slacked_complete_kkt_system(goop; complementarity = :exact): componentwise
+             complementarity, no relaxation, so it is solved once at ρ = 0.
   R, K₀      residual norm at the stage's ρ, and at ρ = 0; always reported as RMS,
              norm / √(number of equations).
   physical   the stacked trajectory z, ordered player, knot, [px, py, vx, vy, ax, ay];
@@ -621,7 +621,7 @@ function run(; overrides=(;))
     )
     variants = filter(v -> v.name in settings.objective_variants, objective_variants(settings))
     modes = filter(m -> m.name in settings.comparison_modes, [(; name=:fixed_primal), (; name=:warmstart)])
-    builders = [(; name=:exact, build=ReducedGOOP.generated_exact_complete_kkt_system)]
+    builders = [(; name=:exact, build=problem -> ReducedGOOP.generate_slacked_complete_kkt_system(problem; complementarity=:exact))]
     builders = filter(b -> b.name in settings.complete_formulations, builders)
     num_checks = length(builders) * length(modes)
     total, done = length(variants) * length(instances) * num_checks, 0
@@ -1078,9 +1078,9 @@ end
 """
 Compile `(y, θ, ρ) -> G`, the values that the complete system's auxiliary slacks σ must equal
 at a solution, so complete_initialization can start each σ on its defining equation. The
-symbols :complete_rho and :complete_unused_eta must match the names used when the complete
-system was built (ReducedGOOP's _generate_complete_kkt_system), so that the ρ inside
-`slack_expressions` binds to the ρ argument here.
+symbol ρ must be the one the complete system was built with (ReducedGOOP's
+generate_slacked_complete_kkt_system), so that a ρ inside `slack_expressions` binds to the ρ
+argument here.
 """
 function compile_slack_targets(kkt)
     backend = ReducedGOOP.SymbolicTracingUtils.SymbolicsBackend()
@@ -1093,13 +1093,12 @@ function compile_slack_targets(kkt)
         kkt.slack_expressions,
         kkt.vars,
         θ,
-        Symbolics.variable(:complete_rho),
-        Symbolics.variable(:complete_unused_eta);
+        only(ReducedGOOP.SymbolicTracingUtils.make_variables(backend, :ρ, 1));
         chunk_size=32,
     )
     function (y, θ, ρ)
         G = zeros(length(kkt.slack_expressions))
-        raw!(G, y, θ, ρ, 0.0)
+        raw!(G, y, θ, ρ)
         G
     end
 end
@@ -1145,7 +1144,7 @@ function fixed_primal_formulation(kkt)
     end
     nonnegative_dims = kkt.nonnegative_dims .- nx
     # ScholtesKKTSystem and CompleteKKTSystem are ReducedGOOP internals; this builds them the way
-    # _generate_complete_kkt_system does (src/scholtes_complete_kkt.jl), with no new codegen.
+    # BuildCompleteKKTSystem does (src/goop_kkt_system.jl), with no new codegen.
     no_rows = spzeros(0, length(free))
     inner = ReducedGOOP.ScholtesKKTSystem(
         length(free),                     # n: unknowns are the free columns

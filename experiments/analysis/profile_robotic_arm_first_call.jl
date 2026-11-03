@@ -69,7 +69,7 @@ function finite_difference_jacobian_check(mcp, J, z, θ; step = 1e-6)
     base = zeros(mcp.kkt_dimension)
     trial = similar(base)
     z_trial = copy(z)
-    mcp.F!(base, z; θ, ϵ = 0.1)
+    mcp.F!(base, z; θ, ρ = 0.1)
     rows = rowvals(J)
     values = nonzeros(J)
     structural_rows = falses(mcp.kkt_dimension)
@@ -78,7 +78,7 @@ function finite_difference_jacobian_check(mcp, J, z, θ; step = 1e-6)
     max_off_pattern_derivative = 0.0
     for col in axes(J, 2)
         z_trial[col] += step
-        mcp.F!(trial, z_trial; θ, ϵ = 0.1)
+        mcp.F!(trial, z_trial; θ, ρ = 0.1)
         z_trial[col] = z[col]
         fill!(structural_rows, false)
         for ptr in nzrange(J, col)
@@ -172,14 +172,14 @@ function main()
     F = zeros(mcp.kkt_dimension)
     J = mcp.∇F_z!.result_buffer
 
-    measure_call("residual first call", () -> mcp.F!(F, z; θ, ϵ = 0.1))
-    measure_call("residual second call", () -> mcp.F!(F, z; θ, ϵ = 0.1))
+    measure_call("residual first call", () -> mcp.F!(F, z; θ, ρ = 0.1))
+    measure_call("residual second call", () -> mcp.F!(F, z; θ, ρ = 0.1))
     measure_call(
         "Jacobian first call",
-        () -> mcp.∇F_z!(J, z; θ, ϵ = 0.1);
+        () -> mcp.∇F_z!(J, z; θ, ρ = 0.1);
         profile = true,
     )
-    measure_call("Jacobian second call", () -> mcp.∇F_z!(J, z; θ, ϵ = 0.1))
+    measure_call("Jacobian second call", () -> mcp.∇F_z!(J, z; θ, ρ = 0.1))
     verification = @timed finite_difference_jacobian_check(mcp, J, z, θ)
     println(
         "finite-difference verification: wall=",

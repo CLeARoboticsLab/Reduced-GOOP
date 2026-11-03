@@ -328,26 +328,26 @@ end
 
 	n = native.variable_dimension
 	m = sum(problem.parameter_dims)
-	for scale in (0.3, 1.7), ϵ in (0.1, 0.01)
+	for scale in (0.3, 1.7), ρ in (0.1, 0.01)
 		z = scale .* sin.(1:n)
 		θ = scale .* cos.(1:m)
 
 		F_native = zeros(native.kkt_dimension)
 		F_fd = zeros(fdgen.kkt_dimension)
-		native.F!(F_native, z; θ, ϵ)
-		fdgen.F!(F_fd, z; θ, ϵ)
+		native.F!(F_native, z; θ, ρ)
+		fdgen.F!(F_fd, z; θ, ρ)
 		@test isapprox(F_native, F_fd; atol = 1e-12, rtol = 1e-12)
 
 		J_native = copy(native.∇F_z!.result_buffer)
 		J_fd = copy(fdgen.∇F_z!.result_buffer)
 		F_fd_chunked = zeros(fdgen_chunked.kkt_dimension)
-		fdgen_chunked.F!(F_fd_chunked, z; θ, ϵ)
+		fdgen_chunked.F!(F_fd_chunked, z; θ, ρ)
 		@test isapprox(F_native, F_fd_chunked; atol = 1e-12, rtol = 1e-12)
 
 		J_fd_chunked = copy(fdgen_chunked.∇F_z!.result_buffer)
-		native.∇F_z!(J_native, z; θ, ϵ)
-		fdgen.∇F_z!(J_fd, z; θ, ϵ)
-		fdgen_chunked.∇F_z!(J_fd_chunked, z; θ, ϵ)
+		native.∇F_z!(J_native, z; θ, ρ)
+		fdgen.∇F_z!(J_fd, z; θ, ρ)
+		fdgen_chunked.∇F_z!(J_fd_chunked, z; θ, ρ)
 		@test isapprox(J_native, J_fd; atol = 1e-12, rtol = 1e-12)
 		@test isapprox(J_native, J_fd_chunked; atol = 1e-12, rtol = 1e-12)
 	end
@@ -397,12 +397,12 @@ end
 		n = kkt.variable_dimension
 		m = kkt.kkt_dimension
 		z = 0.3 .* sin.(1:n)
-		ϵ = 0.1
+		ρ = 0.1
 
 		F = zeros(m)
-		kkt.F!(F, z; θ, ϵ)
+		kkt.F!(F, z; θ, ρ)
 		J = kkt.∇F_z!.result_buffer
-		kkt.∇F_z!(J, z; θ, ϵ)
+		kkt.∇F_z!(J, z; θ, ρ)
 
 		# High-η cases lock in the √η-balanced augmented scaling: the naive
 		# [I J; Jᵀ -ηI] form loses the tiny ~1/η step to cancellation there.

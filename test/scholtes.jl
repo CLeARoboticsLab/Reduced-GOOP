@@ -1018,7 +1018,7 @@ end
 
 @testset "the perturbed reduced system (5.2), handed to Scholtes" begin
     # generate_interior_point_scholtes_kkt_system wraps the :interior_point system for Scholtes():
-    # the same residual and Jacobian at ϵ = ρ and η = 0, with the slacks σ and duals γ nonnegative.
+    # the same residual and Jacobian at the same ρ, with the slacks σ and duals γ nonnegative.
     for (levels, players, kind) in ((2, 1, :quadratic), (3, 3, :nonlinear))
         case = build_benchmark_problem(; num_players = players, levels, kind)
         legacy = RG.generate_slacked_reduced_kkt_system(case.problem; complementarity = :interior_point,
@@ -1031,11 +1031,11 @@ end
         y = 0.5 .+ 0.1 .* sin.(1:k.n)
         for ρ in (1e-3, 1e-9)
             r, rk = zeros(k.n_nc), zeros(k.n_nc)
-            legacy.F!(r, y; θ, ϵ = ρ)
+            legacy.F!(r, y; θ, ρ)
             k.F_nc!(rk, y, θ, ρ)
             @test rk == r
             J, Jk = copy(legacy.∇F_z!.result_buffer), copy(k.Jnc_buf)
-            legacy.∇F_z!(J, y; θ, ϵ = ρ)
+            legacy.∇F_z!(J, y; θ, ρ)
             k.J_nc!(Jk, y, θ, ρ)
             @test Jk == J
         end
@@ -1071,7 +1071,7 @@ end
             is_prioritized_constraint = [[false, false, false] for _ in 1:2],
             equality_constraints = [nothing, nothing],
             inequality_constraints = [(x, t) -> [0.5 - x[1] - 0.1x[3]], (x, t) -> [0.5 - x[3] - 0.1x[1]]])
-        for k in (RG.generate_interior_point_scholtes_kkt_system(goop), RG.generated_perturbed_complete_kkt_system(goop))
+        for k in (RG.generate_interior_point_scholtes_kkt_system(goop), RG.generate_slacked_complete_kkt_system(goop; complementarity = :perturbed))
             θ, w, scale, steps, fallbacks = zeros(k.parameter_dimension), nothing, sqrt(k.n_nc), [], 0
             step_trace = nt -> push!(steps, (; nt.rho, w = copy(nt.w), r = copy(nt.r), dw = copy(nt.dw),
                 nt.alpha, nt.accepted, nt.trial_norm, w_trial = copy(nt.w_trial), nt.eta))
@@ -1112,7 +1112,7 @@ end
     # Algorithm 5.1 has no rule for the Scholtes pairs, and the KLU backends always shift by η.
     @test_throws ArgumentError ssolve(prob_A, prob_A.z0; method = :pdip, linear_solver = :normal)
     case = build_benchmark_problem(; num_players = 1, levels = 2, kind = :quadratic)
-    k = RG.generated_perturbed_complete_kkt_system(case.problem)
+    k = RG.generate_slacked_complete_kkt_system(case.problem; complementarity = :perturbed)
     for options in (RG.ScholtesOptions(; method = :pdip, linear_solver = :klu_eta),
                     RG.ScholtesOptions(; method = :newton), RG.ScholtesOptions(; method = :pdip, beta = 1.0),
                     RG.ScholtesOptions(; method = :pdip, eta_pdip = 0.0))

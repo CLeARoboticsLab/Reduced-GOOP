@@ -309,7 +309,7 @@ function build_systems(class, num_levels, settings)
     if num_levels in levels_for(settings.complete_levels, class.name)
         print("Building the ρ-perturbed complete KKT system (6.1) for $label (symbolic construction, Jacobian and code generation)... ")
         flush(stdout)
-        construction = @timed ReducedGOOP.generated_perturbed_complete_kkt_system(problem)
+        construction = @timed ReducedGOOP.generate_slacked_complete_kkt_system(problem; complementarity=:perturbed)
         println("done in $(round(construction.time; digits=1)) s")
         kkt = construction.value
         @assert kkt.n == kkt.n_nc # square
