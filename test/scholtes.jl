@@ -1031,11 +1031,11 @@ end
         y = 0.5 .+ 0.1 .* sin.(1:k.n)
         for ρ in (1e-3, 1e-9)
             r, rk = zeros(k.n_nc), zeros(k.n_nc)
-            legacy.F!(r, y; θ, ϵ = ρ, η = 0.0)
+            legacy.F!(r, y; θ, ϵ = ρ)
             k.F_nc!(rk, y, θ, ρ)
             @test rk == r
             J, Jk = copy(legacy.∇F_z!.result_buffer), copy(k.Jnc_buf)
-            legacy.∇F_z!(J, y; θ, ϵ = ρ, η = 0.0)
+            legacy.∇F_z!(J, y; θ, ϵ = ρ)
             k.J_nc!(Jk, y, θ, ρ)
             @test Jk == J
         end

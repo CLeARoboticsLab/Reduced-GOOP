@@ -23,7 +23,7 @@ k (the lower levels' policy, enforced through the multipliers ψₖ), and ∇ is
 w.r.t. player i's own xⁱ and, at a prioritized level, sₖ. The last two terms are absent at
 the innermost level. F stacks, for every player and level,
 
-    ∇Lₖ + η [xⁱ; sₖ] = 0                stationarity (η: Newton regularization)
+    ∇Lₖ = 0                             stationarity
     f = 0                               innermost level only
     Gₖ − σₖ = 0                         interior-point slack
     σₖ ⊙ γₖ − ρ𝟙 = 0                    relaxed complementarity
@@ -275,7 +275,6 @@ function BuildGOOPKKTSystem(
     z_symbolic::Vector{T},
     θ_symbolic::Vector{T},
     ϵ_symbolic::T,
-    η_symbolic::T,
     primal_dims,
     preference_slack_dims,
     interior_point_slack_dims,
@@ -301,8 +300,7 @@ function BuildGOOPKKTSystem(
                     F_symbolic,
                     z_symbolic,
                     θ_symbolic,
-                    ϵ_symbolic,
-                    η_symbolic,
+                    ϵ_symbolic;
                     chunk_size = fd_codegen_chunk_size,
                 )
             else
@@ -310,14 +308,13 @@ function BuildGOOPKKTSystem(
                     F_symbolic,
                     z_symbolic,
                     θ_symbolic,
-                    ϵ_symbolic,
-                    η_symbolic;
+                    ϵ_symbolic;
                     in_place = true,
                     backend_options,
                 )
             end
 
-            (result, z; θ, ϵ, η) -> _F!(result, z, θ, ϵ, η)
+            (result, z; θ, ϵ) -> _F!(result, z, θ, ϵ)
         end
 
         ∇F_z! = @timeit TO "Jacobian function construction" let
@@ -333,19 +330,16 @@ function BuildGOOPKKTSystem(
                     SparseArrays.findnz(∇F_symbolic)[3],
                     z_symbolic,
                     θ_symbolic,
-                    ϵ_symbolic,
-                    η_symbolic,
+                    ϵ_symbolic;
                     chunk_size = fd_codegen_chunk_size,
                 )
-                (result, z, θ, ϵ, η) ->
-                    _Jvals!(SparseArrays.nonzeros(result), z, θ, ϵ, η)
+                (result, z, θ, ϵ) -> _Jvals!(SparseArrays.nonzeros(result), z, θ, ϵ)
             else
                 SymbolicTracingUtils.build_function(
                     ∇F_symbolic,
                     z_symbolic,
                     θ_symbolic,
-                    ϵ_symbolic,
-                    η_symbolic;
+                    ϵ_symbolic;
                     in_place = true,
                     backend_options,
                 )
@@ -356,7 +350,7 @@ function BuildGOOPKKTSystem(
                 constant_entries =
                     SymbolicTracingUtils.get_constant_entries(∇F_symbolic, z_symbolic)
                 SymbolicTracingUtils.SparseFunction(
-                    (result, z; θ, ϵ, η) -> _∇F!(result, z, θ, ϵ, η),
+                    (result, z; θ, ϵ) -> _∇F!(result, z, θ, ϵ),
                     rows,
                     cols,
                     size(∇F_symbolic),

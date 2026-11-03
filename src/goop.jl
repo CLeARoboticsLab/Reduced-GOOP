@@ -168,8 +168,6 @@ function generate_slacked_reduced_kkt_system(
             to_blockvector(goop.parameter_dims)
         ρ = only(SymbolicTracingUtils.make_variables(backend, :ρ, 1))
 
-        η = only(SymbolicTracingUtils.make_variables(backend, :η, 1))
-
         symbolic_type = eltype(x)
     end
 
@@ -274,7 +272,7 @@ function generate_slacked_reduced_kkt_system(
                     filter!(
                         !isnothing,
                         [
-                            ∇L .+ η * vars
+                            ∇L
                             f
                             G .- σ
                             σ .* γ .- ρ
@@ -308,7 +306,7 @@ function generate_slacked_reduced_kkt_system(
                     filter!(
                         !isnothing,
                         [
-                            ∇L .+ η * x[Block(player)]
+                            ∇L
                             f
                             (isnothing(g) ? nothing : g .- σ)
                             (isnothing(g) ? nothing : σ .* γ .- ρ)
@@ -416,7 +414,7 @@ function generate_slacked_reduced_kkt_system(
             filter!(
                 !isnothing,
                 [
-                    ∇L .+ η * vars
+                    ∇L
                     G .- σ
                     σ .* γ .- ρ
                     F
@@ -479,7 +477,6 @@ function generate_slacked_reduced_kkt_system(
         z,
         θ,
         ρ,
-        η,
         primal_dims,
         preference_slack_dims,
         interior_point_slack_dims,

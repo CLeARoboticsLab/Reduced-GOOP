@@ -58,7 +58,7 @@ println("total ψ coordinates: $(length(ψ_indices)) of $(kkt.variable_dimension
 
 residual(z) = (
     val = zeros(kkt.kkt_dimension);
-    kkt.F!(val, z; θ = collect(θ), ϵ = 0.1, η = 0.0);
+    kkt.F!(val, z; θ = collect(θ), ϵ = 0.1);
     val
 )
 
