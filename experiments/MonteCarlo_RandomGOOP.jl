@@ -366,11 +366,12 @@ function jit_warmup(systems, instance, settings)
     for (i, (system, formulation)) in enumerate(solved_systems(systems))
         context = "warm-up, $(class.name), K = $num_levels"
         timed = @timed solve_algorithm51(formulation, problem, θ, initial_guess, settings; context, io=devnull)
-        push!(
-            timings,
-            (; system, formulation=formulation.name, first_solve_seconds=timed.time, compile_seconds=timed.compile_time+timed.recompile_time),
+        compile_seconds = timed.compile_time + timed.recompile_time
+        push!(timings, (; system, formulation=formulation.name, first_solve_seconds=timed.time, compile_seconds))
+        print(
+            i == 1 ? "" : ", ",
+            "$system done in $(round(timed.time; digits=1)) s (compile_seconds $(round(compile_seconds; digits=1)) s)",
         )
-        print(i == 1 ? "" : ", ", "$system done in $(round(timed.time; digits=1)) s")
         flush(stdout)
     end
     println()
