@@ -433,7 +433,7 @@ function demo(;
     m = GOOP_kkt_system.n_nc + 2GOOP_kkt_system.n_comp
     residual_scale = sqrt(m)
     eq_cols = findall(
-        v -> startswith(string(v), "lam_") || startswith(string(v), "psi_"),
+        v -> startswith(string(v), "λ_") || startswith(string(v), "ψ_"),
         GOOP_kkt_system.vars,
     )
     residuals = ReducedGOOP.ScholtesResiduals(GOOP_kkt_system)

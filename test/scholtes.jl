@@ -307,7 +307,7 @@ end
         @test result.preference_slacks == result.w[k.preference_slack_dims]
         @test result.preference_slacks ≈ [-result.z[1], 1.0 + result.z[1]] atol = 1e-4
         @test sum(result.preference_slacks) ≈ 1.0 atol = 1e-5
-        eq_cols = findall(v -> startswith(string(v), "psi_"), k.vars)
+        eq_cols = findall(v -> startswith(string(v), "ψ_"), k.vars)
         w0 = RG.scholtes_warm_start(k, θ0, result.z, 1e-10;
             eq_cols, eq = result.w[eq_cols], preference_slacks = result.preference_slacks)
         @test w0[k.primal_dims] == result.z
@@ -380,7 +380,7 @@ end
 
 @testset "quasi_order = 1 keeps first-order information only" begin
     k1 = skkt(prob_E; quasi = true, quasi_order = 1)
-    psi_cols = findall(v -> startswith(string(v), "psi"), k1.vars)
+    psi_cols = findall(v -> startswith(string(v), "ψ_"), k1.vars)
     @test !isempty(psi_cols)
     @test isempty(intersect(Set(k1.S_nc[2]), Set(psi_cols)))
     Random.seed!(8)

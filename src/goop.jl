@@ -513,13 +513,14 @@ end
 
 """
 Construct the Reduced KKT system of a ParametricGOOP in Scholtes form (`complementarity =
-:scholtes` of `generate_slacked_reduced_kkt_system`). The Lagrangians are those of the
-interior-point system, except that the term of each lower level m's complementarity is
-`-φₘᵀ(ρ𝟙 - Gₘ ⊙ γₘ)` with `φₘ ≥ 0`. There are no slacks σ: the rows are the stationarity and
-equality rows F and the complementarity blocks a (every level's G, then every `ρ𝟙 - Gₘ ⊙ γₘ`) and
-b (their duals γ, then φ), whose level pairs the solver relaxes (`s ⊙ γ + u = ρ`) and whose φ
-pairs it keeps exact. Every Lagrangian is differentiated term by term, truncated after
-`quasi_order` derivatives with `drop_higher_order_terms`.
+:scholtes` of `generate_slacked_reduced_kkt_system`), with the variables, names and order of the
+interior-point system less its slacks σ. The Lagrangians are those of the interior-point system,
+except that the term of the lower levels' complementarity is `-ϕᵀ(ρ𝟙 - [Gₘ ⊙ γₘ]ₘ)` with
+`ϕ ≥ 0`. The rows are the stationarity and equality rows F and the complementarity blocks a
+(every level's G, then every `ρ𝟙 - Gₘ ⊙ γₘ`) and b (their duals γ, then ϕ), whose level pairs the
+solver relaxes (`s ⊙ γ + u = ρ`) and whose ϕ pairs it keeps exact. Every Lagrangian is
+differentiated term by term, truncated after `quasi_order` derivatives with
+`drop_higher_order_terms`.
 """
 function _generate_scholtes_reduced_kkt_system(
     goop::ParametricGOOP;
@@ -543,7 +544,7 @@ function _generate_scholtes_reduced_kkt_system(
         θ =
             SymbolicTracingUtils.make_variables(backend, :θ, sum(goop.parameter_dims)) |>
             to_blockvector(goop.parameter_dims)
-        ρ = Symbolics.variable(:scholtes_rho)
+        ρ = only(SymbolicTracingUtils.make_variables(backend, :ρ, 1))
 
         symbolic_type = eltype(x)
     end
@@ -559,17 +560,22 @@ function _generate_scholtes_reduced_kkt_system(
     # Keep track of all the preference slacks (s) we create.
     s = symbolic_type[]
 
-    # Keep track of all duals we create, per player: the innermost level's λ and γ, then each upper
-    # level's ψ, φ, λ and γ, innermost first (the old Scholtes order).
-    duals = symbolic_type[]
+    # Keep track of all equality constraint duals (λ) and of the duals (ϕ) of the lower levels'
+    # complementarity that we create.
+    Λ = symbolic_type[]
+    Φ = symbolic_type[]
 
     # Keep track of all inequality constraint duals (γ) that we create, and of a label (kind, player,
     # level, lower level, inequality) for each.
     Γ = symbolic_type[]
     labels = NamedTuple[]
 
-    # Keep track of the lower levels' complementarity pairs ρ𝟙 - Gₘ ⊙ γₘ ≥ 0, φ ≥ 0 that we create.
-    phi_pairs = NamedTuple[]
+    # Keep track of all lower level policy constraint duals (ψ) that we create.
+    Ψ = symbolic_type[]
+
+    # Keep track of the lower levels' complementarity pairs (ρ𝟙 - Gₘ ⊙ γₘ ≥ 0, ϕ ≥ 0) that we create:
+    # their rows of a and their labels (their rows of b are Φ).
+    ϕ_pairs = NamedTuple[]
 
     # Recursive function to construct a player's KKT conditions.
     function construct_player_kkt_conditions(
@@ -588,19 +594,23 @@ function _generate_scholtes_reduced_kkt_system(
             isnothing(goop.inequality_constraints[player]) ? nothing :
             goop.inequality_constraints[player](x, θ)
 
-        λ = symbolic_type[
-            Symbolics.variable(
-                Symbol("lam_p$(player)", level == num_levels ? "_K$j" : "_k$(level)_$j"),
-            ) for j in 1:goop.equality_dims[player]
-        ]
+        λ = SymbolicTracingUtils.make_variables(
+            backend,
+            Symbol("λ_$(player)_$(level)"),
+            goop.equality_dims[player],
+        )
+        push!(Λ, λ...)
 
         # This level's inequalities G are g and, for every prioritized level m from this one
-        # inward, h + s ≥ 0 and s ≥ 0; γ has one entry per row of G.
-        γ = symbolic_type[
-            Symbolics.variable(
-                Symbol("gam_p$(player)", level == num_levels ? "_K$j" : "_k$(level)_$j"),
-            ) for j in 1:goop.inequality_dims[player]
-        ]
+        # inward, h + s ≥ 0 and s ≥ 0; γ has one entry per row of G (built below), labelled alike.
+        num_inequalities =
+            goop.inequality_dims[player] + 2 * sum(preference_dims[player][level:end])
+        γ = SymbolicTracingUtils.make_variables(
+            backend,
+            Symbol("γ_$(player)_$(level)"),
+            num_inequalities,
+        )
+        push!(Γ, γ...)
         append!(
             labels,
             (
@@ -609,20 +619,6 @@ function _generate_scholtes_reduced_kkt_system(
             ),
         )
         for m in level:num_levels
-            append!(
-                γ,
-                symbolic_type[
-                    Symbolics.variable(Symbol("gam_preference_p$(player)_k$(level)_m$(m)_$j"))
-                    for j in 1:preference_dims[player][m]
-                ],
-            )
-            append!(
-                γ,
-                symbolic_type[
-                    Symbolics.variable(Symbol("mu_preference_p$(player)_k$(level)_m$(m)_$j"))
-                    for j in 1:preference_dims[player][m]
-                ],
-            )
             append!(
                 labels,
                 (
@@ -638,13 +634,13 @@ function _generate_scholtes_reduced_kkt_system(
                 ),
             )
         end
-        push!(Γ, γ...)
 
         # A prioritized constraint at this level has its own preference slacks.
-        preference_slack = symbolic_type[
-            Symbolics.variable(Symbol("preference_slack_p$(player)_k$(level)_$j")) for
-            j in 1:preference_dims[player][level]
-        ]
+        preference_slack = SymbolicTracingUtils.make_variables(
+            backend,
+            Symbol("s_$(player)_$(level)"),
+            preference_dims[player][level],
+        )
         push!(s, preference_slack...)
 
         # Base case is the inner-most layer.
@@ -656,7 +652,7 @@ function _generate_scholtes_reduced_kkt_system(
                 # subject to h + preference_slack ≥ 0 and preference_slack ≥ 0.
                 preference_inequalities = [h .+ preference_slack; preference_slack]
                 G = [isnothing(g) ? symbolic_type[] : g; preference_inequalities]
-                @assert length(G) == length(γ)
+                @assert length(G) == num_inequalities
                 vars = [x[Block(player)]; preference_slack]
 
                 lagrangian_terms = QuasiLagrangianTerm[]
@@ -674,7 +670,6 @@ function _generate_scholtes_reduced_kkt_system(
                         ],
                     ),
                 )
-                push!(duals, λ..., γ...)
 
                 return (;
                     F,
@@ -682,7 +677,7 @@ function _generate_scholtes_reduced_kkt_system(
                     π_term_groups = [π_terms],
                     preference_inequalities,
                     inequalities = G,
-                    complementary_slackness = [G .* γ],
+                    complementary_slackness = G .* γ,
                 )
             else
                 @assert length(h) == 1 "Expected a single preference function at the base level, but got $(length(h))"
@@ -706,7 +701,6 @@ function _generate_scholtes_reduced_kkt_system(
                         ],
                     ),
                 )
-                push!(duals, λ..., γ...)
 
                 return (;
                     F,
@@ -714,7 +708,7 @@ function _generate_scholtes_reduced_kkt_system(
                     π_term_groups = [π_terms],
                     preference_inequalities = symbolic_type[],
                     inequalities = isnothing(g) ? symbolic_type[] : g,
-                    complementary_slackness = [isnothing(g) ? symbolic_type[] : g .* γ],
+                    complementary_slackness = isnothing(g) ? symbolic_type[] : g .* γ,
                 )
             end
         end
@@ -728,32 +722,36 @@ function _generate_scholtes_reduced_kkt_system(
             )
         h = first(preferences)(x, θ)
 
-        ψ = symbolic_type[
-            Symbolics.variable(Symbol("psi_p$(player)_k$(level)_$j")) for j in eachindex(π)
-        ]
-        push!(duals, ψ...)
+        ψ = SymbolicTracingUtils.make_variables(
+            backend,
+            Symbol("ψ_$(player)_$(level)"),
+            length(π),
+        )
+        push!(Ψ, ψ...)
 
-        # Duals φₘ ≥ 0 of the lower levels' complementarity ρ𝟙 - Gₘ ⊙ γₘ ≥ 0, m = Kⁱ, …, level + 1.
-        φ_terms = QuasiLagrangianTerm[]
-        for (m, Gγ) in zip(num_levels:-1:(level + 1), reverse(complementary_slackness))
-            φ = symbolic_type[
-                Symbolics.variable(Symbol("phi_upper_p$(player)_k$(level)_m$(m)_$j")) for
-                j in eachindex(Gγ)
-            ]
-            push!(duals, φ...)
-            _push_quasi_lagrangian_term!(φ_terms, ρ .- Gγ, φ)
-            append!(
-                phi_pairs,
-                (
-                    (;
-                        a = ρ - Gγ[j],
-                        b = φ[j],
-                        label = (; kind = :phi_upper, player, level, lower_level = m, inequality = j),
-                    ) for j in eachindex(Gγ)
-                ),
-            )
-        end
-        push!(duals, λ..., γ...)
+        # Duals of the lower levels' relaxed complementarity ρ𝟙 - Gₘ ⊙ γₘ ≥ 0, m > level. For
+        # Scholtes ϕ ≥ 0: each ϕ is a coordinate of b, which the solver keeps nonnegative.
+        ϕ = SymbolicTracingUtils.make_variables(
+            backend,
+            Symbol("ϕ_$(player)_$(level)"),
+            length(complementary_slackness),
+        )
+        push!(Φ, ϕ...)
+        # Row i of each lower level m's Gₘ ⊙ γₘ, in the order of complementary_slackness.
+        lower_rows = [
+            (m, i) for m in (level + 1):num_levels for
+            i in 1:(goop.inequality_dims[player] + 2 * sum(preference_dims[player][m:end]))
+        ]
+        @assert length(lower_rows) == length(complementary_slackness)
+        append!(
+            ϕ_pairs,
+            (
+                (;
+                    a = ρ - complementary_slackness[j],
+                    label = (; kind = :phi_upper, player, level, lower_level = m, inequality = i),
+                ) for (j, (m, i)) in enumerate(lower_rows)
+            ),
+        )
 
         if first(is_prioritized_constraint)
             # Current priority is a constraint h ≥ 0: minimize sum(preference_slack) subject to
@@ -761,7 +759,7 @@ function _generate_scholtes_reduced_kkt_system(
             preference_inequalities =
                 [h .+ preference_slack; preference_slack; preference_inequalities]
             G = [isnothing(g) ? symbolic_type[] : g; preference_inequalities]
-            @assert length(G) == length(γ)
+            @assert length(G) == num_inequalities
             vars = [x[Block(player)]; preference_slack]
 
             lagrangian_terms = QuasiLagrangianTerm[]
@@ -769,13 +767,17 @@ function _generate_scholtes_reduced_kkt_system(
             _append_quasi_policy_terms!(lagrangian_terms, π_term_groups, ψ)
             _push_quasi_lagrangian_term!(lagrangian_terms, f, λ)
             _push_quasi_lagrangian_term!(lagrangian_terms, G, γ)
-            append!(lagrangian_terms, φ_terms)
+            _push_quasi_lagrangian_term!(
+                lagrangian_terms,
+                isempty(complementary_slackness) ? nothing : ρ .- complementary_slackness,
+                ϕ,
+            )
             ∇L, π_terms = _quasi_gradient_from_terms(lagrangian_terms, vars; truncation_order)
         else
             @assert length(h) == 1 "Expected a single preference function at the level $(level), but got $(length(h))"
             # Current priority is a cost.
             G = [isnothing(g) ? symbolic_type[] : g; preference_inequalities]
-            @assert length(G) == length(γ)
+            @assert length(G) == num_inequalities
             vars = x[Block(player)]
 
             lagrangian_terms = QuasiLagrangianTerm[]
@@ -783,7 +785,11 @@ function _generate_scholtes_reduced_kkt_system(
             _append_quasi_policy_terms!(lagrangian_terms, π_term_groups, ψ)
             _push_quasi_lagrangian_term!(lagrangian_terms, f, λ)
             _push_quasi_lagrangian_term!(lagrangian_terms, isempty(G) ? nothing : G, γ)
-            append!(lagrangian_terms, φ_terms)
+            _push_quasi_lagrangian_term!(
+                lagrangian_terms,
+                isempty(complementary_slackness) ? nothing : ρ .- complementary_slackness,
+                ϕ,
+            )
             ∇L, π_terms = _quasi_gradient_from_terms(lagrangian_terms, vars; truncation_order)
         end
 
@@ -793,7 +799,7 @@ function _generate_scholtes_reduced_kkt_system(
             π_term_groups = vcat([π_terms], π_term_groups),
             preference_inequalities,
             inequalities = [G; inequalities],
-            complementary_slackness = vcat([G .* γ], complementary_slackness),
+            complementary_slackness = [G .* γ; complementary_slackness],
         )
     end
 
@@ -812,19 +818,19 @@ function _generate_scholtes_reduced_kkt_system(
         F = Vector{symbolic_type}(reduce(vcat, (pair.F for pair in F_π_pair)))
         a = Vector{symbolic_type}([
             reduce(vcat, (pair.inequalities for pair in F_π_pair))
-            [pair.a for pair in phi_pairs]
+            [pair.a for pair in ϕ_pairs]
         ])
-        b = Vector{symbolic_type}([Γ; [pair.b for pair in phi_pairs]])
+        b = Vector{symbolic_type}([Γ; Φ])
         # The source level's h + s ≥ 0 row of each preference slack, in coordinate order.
         preference_slack_rows =
             findall(l -> l.kind === :preference && l.level == l.lower_level, labels)
-        append!(labels, (pair.label for pair in phi_pairs))
+        append!(labels, (pair.label for pair in ϕ_pairs))
 
         # Pack all variables together.
-        z = Vector{symbolic_type}(vcat(x, s, duals))
+        z = Vector{symbolic_type}(vcat(x, s, Λ, Γ, Ψ, Φ))
         θ = Vector{symbolic_type}(θ)
 
-        idx = blockedrange(length.([x, s, duals]))
+        idx = blockedrange(length.([x, s, Λ, Γ, Ψ, Φ]))
         primal_dims = idx[Block(1)] # x
         preference_slack_dims = idx[Block(2)] # s
     end

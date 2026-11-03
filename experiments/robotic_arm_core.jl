@@ -344,7 +344,7 @@ solver_options(ctx::RoboticArmContext, ρ; linear_solver = LINEAR_SOLVER, proj_e
 
 "Columns of y holding equality-like duals (λ, ψ): copied between solves by warm-z+eq."
 eq_columns(kkt) =
-    findall(v -> startswith(string(v), "lam_") || startswith(string(v), "psi_"), kkt.vars)
+    findall(v -> startswith(string(v), "λ_") || startswith(string(v), "ψ_"), kkt.vars)
 
 # The per-iteration series the convergence panels draw (the source's section 6.6): the
 # direction size ‖δw‖∞, η, the complementarity slackness ‖s ⊙ γ + u‖∞ over the relaxed

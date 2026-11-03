@@ -981,11 +981,11 @@ function solve_scholtes_reduced(reduced_kkt, problem, θ, initial_guess, setting
     # (src/scholtes_residual.jl). Settings hold RMS tolerances, so they are scaled by √m.
     m = reduced_kkt.n_nc + 2reduced_kkt.n_comp
     residual_scale = sqrt(m)
-    # λ (lam_*) and ψ (psi_*) are unsigned, so they carry over to the next ρ stage.
+    # λ (λ_*) and ψ (ψ_*) are unsigned, so they carry over to the next ρ stage.
     # scholtes_warm_start re-centres γ/φ, s and u for the new ρ, and each stage restarts η at
     # eta_0: the same warm-ρ chain as Intersection.demo.
     eq_cols = findall(
-        v -> startswith(string(v), "lam_") || startswith(string(v), "psi_"),
+        v -> startswith(string(v), "λ_") || startswith(string(v), "ψ_"),
         reduced_kkt.vars,
     )
     residuals = ReducedGOOP.ScholtesResiduals(reduced_kkt)
@@ -1183,10 +1183,10 @@ end
 Index map used to start complete solves: `complete_y[destination] .= reduced_w[source]`.
 Maps every preference slack and, for each player, the innermost level's multipliers of the
 ORIGINAL equalities (λ) and inequalities (γ). The reduced system names these by player, level
-and index (preference_slack_p1_k2_3, lam_p1_K3, gam_p1_K3; src/scholtes_kkt.jl), so each
-complete variable's counterpart is looked up by that name. Outer-level multipliers belong to
-different rows in the two systems (ψ/φ in reduced, inherited lower-level KKT rows in complete), so
-they start at 0 or positive_seed (see complete_initialization).
+and index (s_1_2[3], λ_1_3[1], γ_1_3[1]; src/goop.jl), so each complete variable's counterpart is
+looked up by that name. Outer-level multipliers belong to different rows in the two systems (ψ/ϕ in
+reduced, inherited lower-level KKT rows in complete), so they start at 0 or positive_seed (see
+complete_initialization).
 """
 function variable_mapping(reduced, complete)
     reduced_names = Dict(string(v) => j for (j, v) in enumerate(reduced.vars))
@@ -1199,14 +1199,14 @@ function variable_mapping(reduced, complete)
     end
     for (i, levels) in enumerate(complete.levels), (k, level) in enumerate(levels)
         for (j, v) in enumerate(level.preference_slack)
-            add_pair!("preference_slack_p$(i)_k$(k)_$j", v, "player $i level $k preference slack $j")
+            add_pair!("s_$(i)_$(k)[$j]", v, "player $i level $k preference slack $j")
         end
         k == length(levels) || continue
         for (j, v) in enumerate(level.lambda)
-            add_pair!("lam_p$(i)_K$j", v, "player $i innermost original equality multiplier $j")
+            add_pair!("λ_$(i)_$(k)[$j]", v, "player $i innermost original equality multiplier $j")
         end
         for (j, v) in enumerate(level.gamma)
-            add_pair!("gam_p$(i)_K$j", v, "player $i innermost original inequality multiplier $j")
+            add_pair!("γ_$(i)_$(k)[$j]", v, "player $i innermost original inequality multiplier $j")
         end
     end
     (;
