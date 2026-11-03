@@ -294,9 +294,10 @@ function build_systems(class, num_levels, settings)
     label = "$(class.name), K = $num_levels"
     # Both systems are handed to Scholtes() in the complete systems' container and solved alike
     # (solve_algorithm51). The reduced system's σ start at g(0), once per level (interior_point_slack_targets).
-    println("Building the reduced KKT system (5.2) for $label...")
+    print("Building the reduced KKT system (5.2) for $label (symbolic construction, Jacobian and code generation)... ")
     flush(stdout)
     construction = @timed ReducedGOOP.generate_interior_point_scholtes_kkt_system(problem)
+    println("done in $(round(construction.time; digits=1)) s")
     kkt = construction.value
     reduced = (;
         name=:interior_point,
@@ -306,9 +307,10 @@ function build_systems(class, num_levels, settings)
     )
     complete = nothing
     if num_levels in levels_for(settings.complete_levels, class.name)
-        println("Building the ρ-perturbed complete KKT system (6.1) for $label...")
+        print("Building the ρ-perturbed complete KKT system (6.1) for $label (symbolic construction, Jacobian and code generation)... ")
         flush(stdout)
         construction = @timed ReducedGOOP.generated_perturbed_complete_kkt_system(problem)
+        println("done in $(round(construction.time; digits=1)) s")
         kkt = construction.value
         @assert kkt.n == kkt.n_nc # square
         complete = (;
@@ -357,19 +359,21 @@ system, results discarded.
 function jit_warmup(systems, instance, settings)
     (; class, num_levels, problem) = systems
     (; θ, initial_guess) = instance_inputs(instance, settings)
-    print("Warm-up for $(class.name), K = $num_levels (untimed; compiles every solver path; results discarded)... ")
+    print("Warm-up for $(class.name), K = $num_levels (one untimed solve of each system on instance 1; results discarded)... ")
     flush(stdout)
     # One-time cost of each system's first solve: its wall time and the part spent compiling (setup.csv).
     timings = NamedTuple[]
-    seconds = @elapsed for (system, formulation) in solved_systems(systems)
+    for (i, (system, formulation)) in enumerate(solved_systems(systems))
         context = "warm-up, $(class.name), K = $num_levels"
         timed = @timed solve_algorithm51(formulation, problem, θ, initial_guess, settings; context, io=devnull)
         push!(
             timings,
             (; system, formulation=formulation.name, first_solve_seconds=timed.time, compile_seconds=timed.compile_time+timed.recompile_time),
         )
+        print(i == 1 ? "" : ", ", "$system done in $(round(timed.time; digits=1)) s")
+        flush(stdout)
     end
-    println("done in $(round(seconds; digits=1)) s")
+    println()
     timings
 end
 
