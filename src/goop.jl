@@ -58,13 +58,17 @@ mutable struct QuasiLagrangianTerm{T<:Symbolics.Num}
     deriv_order::Int
 end
 
-function Symbolics.gradient(f::QuasiLagrangianTerm, x::AbstractVector{<:Symbolics.Num})
+function Symbolics.gradient(
+    f::QuasiLagrangianTerm,
+    x::AbstractVector{<:Symbolics.Num};
+    truncation_order = 2,
+)
     next_order = f.deriv_order + 1
-    if f.deriv_order >= 2 # retain terms up to order 2
+    if f.deriv_order >= truncation_order # retain terms up to order truncation_order
         return QuasiLagrangianTerm(zero.(x), f.duals, next_order)
     end
 
-    expr = isnothing(f.duals) ? f.expr : -f.expr' * f.duals
+    expr = isnothing(f.duals) ? f.expr : -(f.expr' * f.duals)
     QuasiLagrangianTerm(_fast_gradient(expr, x), f.duals, next_order)
 end
 
@@ -101,12 +105,13 @@ end
 
 function _quasi_gradient_from_terms(
     terms::Vector{QuasiLagrangianTerm},
-    x::AbstractVector{<:Symbolics.Num},
+    x::AbstractVector{<:Symbolics.Num};
+    truncation_order = 2,
 )
     ∇L = zero.(x)
     new_terms = QuasiLagrangianTerm[]
     for term in terms
-        new_term = Symbolics.gradient(term, x)
+        new_term = Symbolics.gradient(term, x; truncation_order)
         ∇L .+= new_term.expr
         push!(new_terms, new_term)
     end
@@ -120,11 +125,10 @@ Construct the Reduced KKT system corresponding to a ParametricGOOP.
 `complementarity = :interior_point` (default) builds the interior-point system
 (`σ ∘ γ = ρ`) and returns a `GOOPKKTSystem` for `InteriorPoint`. `complementarity =
 :scholtes` builds the Scholtes-form system (explicit φ ≥ 0, relaxed `s ∘ γ + u = ρ`)
-and returns a `ScholtesKKTSystem` for `Scholtes`; it is opt-in, supports only
-`phi = true`, and generates code with FastDifferentiation unless `codegen` says
-otherwise, split into functions of `fd_codegen_chunk_size` expressions (default
-`SCHOLTES_FD_CHUNK_SIZE`; pass `typemax(Int)` for one function per block). See
-src/scholtes_kkt.jl. In both modes, a prioritized constraint h ≥ 0 at level k introduces
+and returns a `ScholtesKKTSystem` for `Scholtes`; it is opt-in and generates code
+with FastDifferentiation unless `codegen` says otherwise, split into functions of `fd_codegen_chunk_size` expressions (default
+`FD_CODEGEN_CHUNK_SIZE`; pass `typemax(Int)` for one function per block). See
+`_generate_scholtes_reduced_kkt_system`. In both modes, a prioritized constraint h ≥ 0 at level k introduces
 explicit preference slacks s: level k minimizes `sum(s)` subject to `h + s ≥ 0` and
 `s ≥ 0`, and every upper level keeps these inequalities with fresh multipliers.
 """
@@ -135,7 +139,6 @@ function generate_slacked_reduced_kkt_system(
     codegen = nothing,
     fd_codegen_chunk_size = nothing,
     complementarity::Symbol = :interior_point,
-    phi::Bool = true,
     quasi_order::Int = 2,
 )
     complementarity in (:interior_point, :scholtes) || throw(
@@ -143,15 +146,14 @@ function generate_slacked_reduced_kkt_system(
             "complementarity must be :interior_point or :scholtes, got $complementarity",
         ),
     )
-    if complementarity === :scholtes # TODO: we ultimately want generated_slacked_reduced_kkt_system() to do Scholtes HERE.
-        return generate_scholtes_reduced_kkt_system(
+    if complementarity === :scholtes
+        return _generate_scholtes_reduced_kkt_system(
             goop;
-            quasi = drop_higher_order_terms,
-            quasi_order,
-            phi,
-            codegen = something(codegen, :fast_differentiation),
-            fd_codegen_chunk_size = something(fd_codegen_chunk_size, SCHOLTES_FD_CHUNK_SIZE),
+            drop_higher_order_terms,
             backend_options,
+            codegen = something(codegen, :fast_differentiation),
+            fd_codegen_chunk_size = something(fd_codegen_chunk_size, FD_CODEGEN_CHUNK_SIZE),
+            quasi_order,
         )
     end
     codegen = something(codegen, :native)
@@ -499,7 +501,6 @@ function generate_slacked_quasi_kkt_system(
     codegen = nothing,
     fd_codegen_chunk_size = nothing,
     complementarity::Symbol = :interior_point,
-    phi::Bool = true,
     quasi_order::Int = 2,
 )
     generate_slacked_reduced_kkt_system(
@@ -509,8 +510,343 @@ function generate_slacked_quasi_kkt_system(
         codegen,
         fd_codegen_chunk_size,
         complementarity,
-        phi,
         quasi_order,
+    )
+end
+
+"""
+Construct the Reduced KKT system of a ParametricGOOP in Scholtes form (`complementarity =
+:scholtes` of `generate_slacked_reduced_kkt_system`). The Lagrangians are those of the
+interior-point system, except that the term of each lower level m's complementarity is
+`-φₘᵀ(ρ𝟙 - Gₘ ⊙ γₘ)` with `φₘ ≥ 0`. There are no slacks σ: the rows are the stationarity and
+equality rows F and the complementarity blocks a (every level's G, then every `ρ𝟙 - Gₘ ⊙ γₘ`) and
+b (their duals γ, then φ), whose level pairs the solver relaxes (`s ⊙ γ + u = ρ`) and whose φ
+pairs it keeps exact. Every Lagrangian is differentiated term by term, truncated after
+`quasi_order` derivatives with `drop_higher_order_terms`.
+"""
+function _generate_scholtes_reduced_kkt_system(
+    goop::ParametricGOOP;
+    drop_higher_order_terms = false,
+    backend_options = (;),
+    codegen = :fast_differentiation,
+    fd_codegen_chunk_size = FD_CODEGEN_CHUNK_SIZE,
+    quasi_order::Int = 2,
+)
+    quasi_order >= 1 || throw(ArgumentError("quasi_order must be >= 1, got $quasi_order"))
+    codegen in (:native, :fast_differentiation) ||
+        throw(ArgumentError("Unknown codegen option: $(codegen)."))
+    truncation_order = drop_higher_order_terms ? quasi_order : typemax(Int)
+
+    # Symbolic variables for all primals and parameters.
+    backend = SymbolicTracingUtils.SymbolicsBackend()
+    @timeit TO "symbolic variable construction" begin
+        x =
+            SymbolicTracingUtils.make_variables(backend, :x, sum(goop.primal_dims)) |>
+            to_blockvector(goop.primal_dims)
+        θ =
+            SymbolicTracingUtils.make_variables(backend, :θ, sum(goop.parameter_dims)) |>
+            to_blockvector(goop.parameter_dims)
+        ρ = Symbolics.variable(:scholtes_rho)
+
+        symbolic_type = eltype(x)
+    end
+
+    # The number of rows of each prioritized constraint h ≥ 0, per player and level (0 for a cost).
+    preference_dims = [
+        [
+            prioritized ? length(preference(x, θ)) : 0 for (preference, prioritized) in
+            zip(goop.preferences[player], goop.is_prioritized_constraint[player])
+        ] for player in 1:(goop.num_players)
+    ]
+
+    # Keep track of all the preference slacks (s) we create.
+    s = symbolic_type[]
+
+    # Keep track of all duals we create, per player: the innermost level's λ and γ, then each upper
+    # level's ψ, φ, λ and γ, innermost first (the old Scholtes order).
+    duals = symbolic_type[]
+
+    # Keep track of all inequality constraint duals (γ) that we create, and of a label (kind, player,
+    # level, lower level, inequality) for each.
+    Γ = symbolic_type[]
+    labels = NamedTuple[]
+
+    # Keep track of the lower levels' complementarity pairs ρ𝟙 - Gₘ ⊙ γₘ ≥ 0, φ ≥ 0 that we create.
+    phi_pairs = NamedTuple[]
+
+    # Recursive function to construct a player's KKT conditions.
+    function construct_player_kkt_conditions(
+        preferences,
+        is_prioritized_constraint;
+        player,
+    )
+        num_levels = length(goop.preferences[player]) # Kⁱ
+        @assert length(preferences) == length(is_prioritized_constraint)
+        level = 1 + num_levels - length(preferences)
+
+        f =
+            isnothing(goop.equality_constraints[player]) ? nothing :
+            goop.equality_constraints[player](x, θ)
+        g =
+            isnothing(goop.inequality_constraints[player]) ? nothing :
+            goop.inequality_constraints[player](x, θ)
+
+        λ = symbolic_type[
+            Symbolics.variable(
+                Symbol("lam_p$(player)", level == num_levels ? "_K$j" : "_k$(level)_$j"),
+            ) for j in 1:goop.equality_dims[player]
+        ]
+
+        # This level's inequalities G are g and, for every prioritized level m from this one
+        # inward, h + s ≥ 0 and s ≥ 0; γ has one entry per row of G.
+        γ = symbolic_type[
+            Symbolics.variable(
+                Symbol("gam_p$(player)", level == num_levels ? "_K$j" : "_k$(level)_$j"),
+            ) for j in 1:goop.inequality_dims[player]
+        ]
+        append!(
+            labels,
+            (
+                (; kind = :gamma, player, level, lower_level = 0, inequality = j) for
+                j in 1:goop.inequality_dims[player]
+            ),
+        )
+        for m in level:num_levels
+            append!(
+                γ,
+                symbolic_type[
+                    Symbolics.variable(Symbol("gam_preference_p$(player)_k$(level)_m$(m)_$j"))
+                    for j in 1:preference_dims[player][m]
+                ],
+            )
+            append!(
+                γ,
+                symbolic_type[
+                    Symbolics.variable(Symbol("mu_preference_p$(player)_k$(level)_m$(m)_$j"))
+                    for j in 1:preference_dims[player][m]
+                ],
+            )
+            append!(
+                labels,
+                (
+                    (; kind = :preference, player, level, lower_level = m, inequality = j) for
+                    j in 1:preference_dims[player][m]
+                ),
+            )
+            append!(
+                labels,
+                (
+                    (; kind = :preference_slack, player, level, lower_level = m, inequality = j)
+                    for j in 1:preference_dims[player][m]
+                ),
+            )
+        end
+        push!(Γ, γ...)
+
+        # A prioritized constraint at this level has its own preference slacks.
+        preference_slack = symbolic_type[
+            Symbolics.variable(Symbol("preference_slack_p$(player)_k$(level)_$j")) for
+            j in 1:preference_dims[player][level]
+        ]
+        push!(s, preference_slack...)
+
+        # Base case is the inner-most layer.
+        if length(preferences) == 1
+            h = only(preferences)(x, θ)
+
+            if only(is_prioritized_constraint)
+                # Highest priority is a constraint h ≥ 0: minimize sum(preference_slack)
+                # subject to h + preference_slack ≥ 0 and preference_slack ≥ 0.
+                preference_inequalities = [h .+ preference_slack; preference_slack]
+                G = [isnothing(g) ? symbolic_type[] : g; preference_inequalities]
+                @assert length(G) == length(γ)
+                vars = [x[Block(player)]; preference_slack]
+
+                lagrangian_terms = QuasiLagrangianTerm[]
+                _push_quasi_lagrangian_term!(lagrangian_terms, sum(preference_slack))
+                _push_quasi_lagrangian_term!(lagrangian_terms, f, λ)
+                _push_quasi_lagrangian_term!(lagrangian_terms, G, γ)
+                ∇L, π_terms =
+                    _quasi_gradient_from_terms(lagrangian_terms, vars; truncation_order)
+                F = Vector{symbolic_type}(
+                    filter!(
+                        !isnothing,
+                        [
+                            ∇L
+                            f
+                        ],
+                    ),
+                )
+                push!(duals, λ..., γ...)
+
+                return (;
+                    F,
+                    π = ∇L,
+                    π_term_groups = [π_terms],
+                    preference_inequalities,
+                    inequalities = G,
+                    complementary_slackness = [G .* γ],
+                )
+            else
+                @assert length(h) == 1 "Expected a single preference function at the base level, but got $(length(h))"
+                # Highest priority is a cost.
+
+                lagrangian_terms = QuasiLagrangianTerm[]
+                _push_quasi_lagrangian_term!(lagrangian_terms, h)
+                _push_quasi_lagrangian_term!(lagrangian_terms, f, λ)
+                _push_quasi_lagrangian_term!(lagrangian_terms, g, γ)
+                ∇L, π_terms = _quasi_gradient_from_terms(
+                    lagrangian_terms,
+                    x[Block(player)];
+                    truncation_order,
+                )
+                F = Vector{symbolic_type}(
+                    filter!(
+                        !isnothing,
+                        [
+                            ∇L
+                            f
+                        ],
+                    ),
+                )
+                push!(duals, λ..., γ...)
+
+                return (;
+                    F,
+                    π = ∇L,
+                    π_term_groups = [π_terms],
+                    preference_inequalities = symbolic_type[],
+                    inequalities = isnothing(g) ? symbolic_type[] : g,
+                    complementary_slackness = [isnothing(g) ? symbolic_type[] : g .* γ],
+                )
+            end
+        end
+
+        # Handle higher levels via tail recursion.
+        (; F, π, π_term_groups, preference_inequalities, inequalities, complementary_slackness) =
+            construct_player_kkt_conditions(
+                preferences[2:end],
+                is_prioritized_constraint[2:end];
+                player,
+            )
+        h = first(preferences)(x, θ)
+
+        ψ = symbolic_type[
+            Symbolics.variable(Symbol("psi_p$(player)_k$(level)_$j")) for j in eachindex(π)
+        ]
+        push!(duals, ψ...)
+
+        # Duals φₘ ≥ 0 of the lower levels' complementarity ρ𝟙 - Gₘ ⊙ γₘ ≥ 0, m = Kⁱ, …, level + 1.
+        φ_terms = QuasiLagrangianTerm[]
+        for (m, Gγ) in zip(num_levels:-1:(level + 1), reverse(complementary_slackness))
+            φ = symbolic_type[
+                Symbolics.variable(Symbol("phi_upper_p$(player)_k$(level)_m$(m)_$j")) for
+                j in eachindex(Gγ)
+            ]
+            push!(duals, φ...)
+            _push_quasi_lagrangian_term!(φ_terms, ρ .- Gγ, φ)
+            append!(
+                phi_pairs,
+                (
+                    (;
+                        a = ρ - Gγ[j],
+                        b = φ[j],
+                        label = (; kind = :phi_upper, player, level, lower_level = m, inequality = j),
+                    ) for j in eachindex(Gγ)
+                ),
+            )
+        end
+        push!(duals, λ..., γ...)
+
+        if first(is_prioritized_constraint)
+            # Current priority is a constraint h ≥ 0: minimize sum(preference_slack) subject to
+            # h + preference_slack ≥ 0 and preference_slack ≥ 0.
+            preference_inequalities =
+                [h .+ preference_slack; preference_slack; preference_inequalities]
+            G = [isnothing(g) ? symbolic_type[] : g; preference_inequalities]
+            @assert length(G) == length(γ)
+            vars = [x[Block(player)]; preference_slack]
+
+            lagrangian_terms = QuasiLagrangianTerm[]
+            _push_quasi_lagrangian_term!(lagrangian_terms, sum(preference_slack))
+            _append_quasi_policy_terms!(lagrangian_terms, π_term_groups, ψ)
+            _push_quasi_lagrangian_term!(lagrangian_terms, f, λ)
+            _push_quasi_lagrangian_term!(lagrangian_terms, G, γ)
+            append!(lagrangian_terms, φ_terms)
+            ∇L, π_terms = _quasi_gradient_from_terms(lagrangian_terms, vars; truncation_order)
+        else
+            @assert length(h) == 1 "Expected a single preference function at the level $(level), but got $(length(h))"
+            # Current priority is a cost.
+            G = [isnothing(g) ? symbolic_type[] : g; preference_inequalities]
+            @assert length(G) == length(γ)
+            vars = x[Block(player)]
+
+            lagrangian_terms = QuasiLagrangianTerm[]
+            _push_quasi_lagrangian_term!(lagrangian_terms, h)
+            _append_quasi_policy_terms!(lagrangian_terms, π_term_groups, ψ)
+            _push_quasi_lagrangian_term!(lagrangian_terms, f, λ)
+            _push_quasi_lagrangian_term!(lagrangian_terms, isempty(G) ? nothing : G, γ)
+            append!(lagrangian_terms, φ_terms)
+            ∇L, π_terms = _quasi_gradient_from_terms(lagrangian_terms, vars; truncation_order)
+        end
+
+        return (;
+            F = [∇L; F],
+            π = vcat(∇L, π),
+            π_term_groups = vcat([π_terms], π_term_groups),
+            preference_inequalities,
+            inequalities = [G; inequalities],
+            complementary_slackness = vcat([G .* γ], complementary_slackness),
+        )
+    end
+
+    # Recursively generate the rest of the KKT conditions for each player.
+    F_π_pair = @timeit TO "symbolic expression construction" [
+        construct_player_kkt_conditions(
+            goop.preferences[player],
+            goop.is_prioritized_constraint[player];
+            player,
+        ) for player in 1:(goop.num_players)
+    ]
+
+    # Flatten the F and inequality vectors for all players; the lower levels' complementarity pairs
+    # follow the inequalities in the blocks a and b.
+    @timeit TO "symbolic KKT vector assembly" begin
+        F = Vector{symbolic_type}(reduce(vcat, (pair.F for pair in F_π_pair)))
+        a = Vector{symbolic_type}([
+            reduce(vcat, (pair.inequalities for pair in F_π_pair))
+            [pair.a for pair in phi_pairs]
+        ])
+        b = Vector{symbolic_type}([Γ; [pair.b for pair in phi_pairs]])
+        # The source level's h + s ≥ 0 row of each preference slack, in coordinate order.
+        preference_slack_rows =
+            findall(l -> l.kind === :preference && l.level == l.lower_level, labels)
+        append!(labels, (pair.label for pair in phi_pairs))
+
+        # Pack all variables together.
+        z = Vector{symbolic_type}(vcat(x, s, duals))
+        θ = Vector{symbolic_type}(θ)
+
+        idx = blockedrange(length.([x, s, duals]))
+        primal_dims = idx[Block(1)] # x
+        preference_slack_dims = idx[Block(2)] # s
+    end
+
+    @timeit TO "Jacobian / KKT construction" BuildScholtesKKTSystem(
+        F,
+        a,
+        b,
+        z,
+        θ,
+        ρ,
+        primal_dims,
+        preference_slack_dims;
+        preference_slack_rows,
+        original_nc = length(Γ),
+        labels,
+        backend_options,
+        codegen,
+        fd_codegen_chunk_size,
     )
 end
 

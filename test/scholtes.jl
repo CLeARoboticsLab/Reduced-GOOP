@@ -936,8 +936,6 @@ end
 
 @testset "explicit gamma / nonnegative inequality phi" begin
     p = sproblem(ni = [1], objectives = [[z -> -z[1], z -> z[1]]], inequality = [z -> [z[1]]], z0 = [1.0])
-    @test_throws ArgumentError RG.generate_slacked_reduced_kkt_system(p.goop;
-        complementarity = :scholtes, phi = false)
     k = skkt(p); RG._set_theta!(k, θ0); rho = 0.1; RG._set_rho!(k, rho)
     @test all(!startswith(string(v), "Gam") for v in k.vars)
     @test k.original_nc == 2

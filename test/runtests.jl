@@ -583,11 +583,6 @@ end
 	@test all(isfinite, output.z)
 	@test isfinite(output.residual)
 
-	@test_throws ArgumentError ReducedGOOP.generate_slacked_reduced_kkt_system(
-		problem;
-		complementarity = :scholtes,
-		phi = false,
-	)
 	for bad in ((; projected_step = false), (; reuse_factorization_iters = 1))
 		@test_throws ArgumentError ReducedGOOP.solve(
 			ReducedGOOP.Scholtes(),
