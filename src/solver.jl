@@ -1069,3 +1069,287 @@ function fraction_to_the_boundary_linesearch(
 
     α
 end
+
+"""
+Solver tag for Algorithm 5.1 of manuscript/main.pdf, the primal-dual interior point method for the
+reduced KKT system: `solve(PDIP(), kkt, θ; z₀, options = PDIPOptions(...))`.
+"""
+struct PDIP <: SolverType end
+
+"""
+Options for `solve(PDIP(), …)`.
+
+  - `ρ_schedule`: the relaxation of each level. With `linesearch = :backtracking` the levels are
+    solved in turn. With `:fraction_to_boundary`, ρ starts at `first(ρ_schedule)` and, as in the old
+    interior-point solver, is multiplied by `1 - exp(-tightening_rate)` after a solved level and by
+    `1 + exp(-loosening_rate)` after an unsolved one (capped at 1), for at most `max_outer_iters` levels.
+  - `max_inner_iters`: Newton steps per level (Algorithm 5.1's t_max).
+  - `tol`: bar on ‖K₀‖ = ‖F(z; ρ = 0)‖, checked before every Newton step; below it the solve stops.
+    `tol_inner`: bar on ‖F(z; ρ)‖; below it the level is solved.
+  - `linesearch`: `:backtracking` (Algorithm 5.1: α ← β α while ‖F(z + α δz; ρ)‖ > ‖F(z; ρ)‖ or σ or γ
+    would not stay positive; the step fails below `min_step`) or `:fraction_to_boundary` (the old
+    solver's τ-rule: γ moves by α_γ, every other variable by α_σ, with no decrease test).
+  - `linear_solver`: `:svd` (default), `:sparseQR_J`, `:sparseQR_Jᵀ`, `:klu` or `:ldl`; see
+    `_pdip_newton_step!`.
+  - `η > 0`: the shift of `:klu` and `:ldl`, whose step is −Jᵀ(JJᵀ + ηI)⁻¹F (→ −J⁺F as η → 0).
+  - `record_convergence`: also return the per-iteration histories.
+"""
+Base.@kwdef struct PDIPOptions
+    ρ_schedule::Vector{Float64} = [10.0^(-k) for k in 0:10]
+    max_inner_iters::Int = 200
+    max_outer_iters::Int = 20
+    tol::Float64 = 1e-8
+    tol_inner::Float64 = 1e-11
+    linesearch::Symbol = :backtracking
+    linear_solver::Symbol = :svd
+    η::Float64 = 1e-12
+    β::Float64 = 0.5
+    min_step::Float64 = 1e-14
+    τ::Float64 = 0.995
+    tightening_rate::Float64 = 0.1
+    loosening_rate::Float64 = 0.5
+    record_convergence::Bool = false
+    verbose::Bool = false
+end
+
+"""
+    solve(PDIP(), kkt::GOOPKKTSystem, θ; z₀ = nothing, options = PDIPOptions())
+
+Algorithm 5.1 of manuscript/main.pdf: Newton's method on F(z; ρ) = 0 for each relaxation ρ, with the
+step J δz = −F (J = ∇F) and a line search that keeps the slacks σ and the inequality duals γ positive.
+The preference slacks s are not bounded directly: s ≥ 0 is a row of G (s − σ = 0).
+
+`z₀` is a full iterate (length `kkt.variable_dimension`, with σ, γ > 0), a primal one (length of
+`kkt.primal_dims`; then s, σ and γ start at 1 and every other variable at 0), or
+`nothing` (the same start with x = 0).
+
+Returns `(; status, termination_reason, z, x, ρ, residual, relaxed_residual, newton_steps,
+residual_evaluations, svd_fallbacks)`, and with `record_convergence` also `ρ_history`,
+`relaxed_residual_history`, `residual_history` (one entry per residual evaluation) and
+`step_size_history` (one per Newton step). `residual` is ‖K₀‖ = ‖F(z; ρ = 0)‖ at the returned `z`,
+`status` is `:solved` iff it is below `tol`, and `relaxed_residual` is ‖F(z; ρ)‖ at the last level.
+"""
+function solve(
+    ::PDIP,
+    kkt::GOOPKKTSystem,
+    θ::AbstractVector{<:Real};
+    z₀ = nothing,
+    options::PDIPOptions = PDIPOptions(),
+)
+    (; ρ_schedule, max_inner_iters, max_outer_iters, tol, tol_inner, linesearch, linear_solver, η) =
+        options
+    (; β, min_step, τ, tightening_rate, loosening_rate, record_convergence, verbose) = options
+    linesearch ∈ (:backtracking, :fraction_to_boundary) || throw(
+        ArgumentError(
+            "Unsupported linesearch $(linesearch). Use :backtracking or :fraction_to_boundary.",
+        ),
+    )
+    linear_solver ∈ (:svd, :sparseQR_J, :sparseQR_Jᵀ, :klu, :ldl) || throw(
+        ArgumentError(
+            "Unsupported linear_solver $(linear_solver). Use :svd, :sparseQR_J, :sparseQR_Jᵀ, :klu or :ldl.",
+        ),
+    )
+    η > 0 || throw(ArgumentError("η must be positive, got $η"))
+    isempty(ρ_schedule) && throw(ArgumentError("ρ_schedule is empty"))
+    0 < β < 1 && 0 < min_step < 1 ||
+        throw(ArgumentError("β and min_step must lie in (0, 1), got $β and $min_step"))
+
+    # Initial point: s, σ and γ at 1, every other variable at 0, unless z₀ gives them.
+    z = zeros(kkt.variable_dimension)
+    z[kkt.preference_slack_dims] .= 1.0
+    z[kkt.interior_point_slack_dims] .= 1.0
+    z[kkt.inequality_constraint_dual_dims] .= 1.0
+    if !isnothing(z₀)
+        if length(z₀) == kkt.variable_dimension
+            z .= z₀
+        elseif length(z₀) == length(kkt.primal_dims)
+            z[kkt.primal_dims] .= z₀
+        else
+            throw(
+                ArgumentError(
+                    "z₀ must have length $(kkt.variable_dimension) (full) or $(length(kkt.primal_dims)) (primal); got $(length(z₀)).",
+                ),
+            )
+        end
+    end
+    σ = @view z[kkt.interior_point_slack_dims]
+    γ = @view z[kkt.inequality_constraint_dual_dims]
+    all(>(0), σ) && all(>(0), γ) || throw(ArgumentError("z₀ must have σ > 0 and γ > 0."))
+
+    # Set up common memory.
+    J = kkt.∇F_z!.result_buffer
+    F = zeros(kkt.kkt_dimension) # F(z; ρ)
+    F_trial = zeros(kkt.kkt_dimension) # F(z + α δz; ρ)
+    F₀ = zeros(kkt.kkt_dimension) # F(z; 0), for ‖K₀‖
+    δz = zeros(kkt.variable_dimension)
+    z_trial = similar(z)
+    σ_trial = @view z_trial[kkt.interior_point_slack_dims]
+    γ_trial = @view z_trial[kkt.inequality_constraint_dual_dims]
+    δσ = @view δz[kkt.interior_point_slack_dims]
+    δγ = @view δz[kkt.inequality_constraint_dual_dims]
+    not_γ = setdiff(1:(kkt.variable_dimension), kkt.inequality_constraint_dual_dims)
+
+    ρ_history, relaxed_residual_history, residual_history, step_size_history =
+        Float64[], Float64[], Float64[], Float64[]
+    newton_steps, residual_evaluations, svd_fallbacks = 0, 0, 0
+    residual = Inf
+    termination_reason = :max_inner_iters
+    converged = false
+    ρ = first(ρ_schedule)
+    level = 1
+    while true
+        kkt.F!(F, z; θ, ρ)
+        relaxed_residual = norm(F)
+        level_solved = false
+        termination_reason = :max_inner_iters
+        for _ in 1:max_inner_iters
+            # Stopping tests: ‖K₀‖ < tol ends the solve, ‖F(z; ρ)‖ < tol_inner ends this level.
+            residual_evaluations += 1
+            kkt.F!(F₀, z; θ, ρ = 0.0)
+            residual = norm(F₀)
+            if record_convergence
+                push!(ρ_history, ρ)
+                push!(relaxed_residual_history, relaxed_residual)
+                push!(residual_history, residual)
+            end
+            if !isfinite(relaxed_residual)
+                termination_reason = :nonfinite_residual
+                break
+            end
+            if residual < tol
+                converged = true
+                break
+            end
+            if relaxed_residual < tol_inner
+                level_solved = true
+                termination_reason = :inner_tolerance_reached
+                break
+            end
+
+            # Newton step: J δz = −F.
+            kkt.∇F_z!(J, z; θ, ρ)
+            svd_fallbacks += _pdip_newton_step!(δz, J, F, linear_solver, η)
+
+            if linesearch === :backtracking
+                # Algorithm 5.1: α ← β α while ‖F(z + α δz; ρ)‖ > ‖F(z; ρ)‖ or σ or γ would not stay positive.
+                α = 1.0
+                accepted = false
+                while α >= min_step
+                    @. z_trial = z + α * δz
+                    if all(>(0), σ_trial) && all(>(0), γ_trial)
+                        kkt.F!(F_trial, z_trial; θ, ρ)
+                        if norm(F_trial) <= relaxed_residual
+                            accepted = true
+                            break
+                        end
+                    end
+                    α *= β
+                end
+                if !accepted
+                    termination_reason = :line_search_failed
+                    break
+                end
+                z .= z_trial
+                F .= F_trial
+            else
+                # Fraction to the boundary: γ moves by α_γ, every other variable by α_σ.
+                α_σ = fraction_to_the_boundary_linesearch(σ, δσ; τ, decay = β, tol = min_step)
+                α_γ = fraction_to_the_boundary_linesearch(γ, δγ; τ, decay = β, tol = min_step)
+                if isnan(α_σ) || isnan(α_γ)
+                    termination_reason = :line_search_failed
+                    break
+                end
+                @views z[not_γ] .+= α_σ .* δz[not_γ]
+                γ .+= α_γ .* δγ
+                kkt.F!(F, z; θ, ρ)
+                α = min(α_σ, α_γ)
+            end
+            relaxed_residual = norm(F)
+            newton_steps += 1
+            record_convergence && push!(step_size_history, α)
+        end
+        verbose && println(
+            "ρ = $ρ: $termination_reason, ‖F(z; ρ)‖ = $relaxed_residual, ‖K₀‖ = $residual",
+        )
+        converged && break
+
+        # The next level.
+        if linesearch === :backtracking
+            level == length(ρ_schedule) && break
+            level += 1
+            ρ = ρ_schedule[level]
+        else
+            level == max_outer_iters && break
+            level += 1
+            ρ *= level_solved ? 1 - exp(-tightening_rate) : 1 + exp(-loosening_rate)
+            ρ = min(ρ, 1.0)
+        end
+    end
+
+    # Evaluate the stopping criterion at the returned iterate.
+    kkt.F!(F₀, z; θ, ρ = 0.0)
+    residual = norm(F₀)
+    converged = residual < tol
+    converged && (termination_reason = :tolerance_reached)
+    result = (;
+        status = converged ? :solved : :failed,
+        termination_reason,
+        z,
+        x = z[kkt.primal_dims],
+        ρ,
+        residual,
+        relaxed_residual = norm(F),
+        newton_steps,
+        residual_evaluations,
+        svd_fallbacks,
+    )
+    record_convergence || return result
+    (; result..., ρ_history, relaxed_residual_history, residual_history, step_size_history)
+end
+
+"""
+The Newton step of Algorithm 5.1, δz with J δz = −F, by `linear_solver`. `:klu` and `:ldl` solve the
+balanced augmented system [√ηI J; Jᵀ −√ηI] [w; δz] = [−F; 0], so δz = −Jᵀ(JJᵀ + ηI)⁻¹F. Returns 1
+when the step fell back to the `:svd` step (`:sparseQR_Jᵀ` with J without full row rank, `:klu` or
+`:ldl` with a singular factorization), else 0.
+"""
+function _pdip_newton_step!(δz, J, F, linear_solver, η)
+    m, n = size(J)
+    if linear_solver === :svd
+        # :svd: the minimum-norm step −J⁺F by the dense pseudoinverse (Algorithm 5.1).
+        δz .= pinv(Matrix(J)) * (-F)
+    elseif linear_solver === :sparseQR_J
+        # :sparseQR_J: J \ (−F) by a sparse QR of J, a least-squares step, not the minimum-norm one.
+        δz .= J \ (-F)
+    elseif linear_solver === :sparseQR_Jᵀ
+        # :sparseQR_Jᵀ: −J⁺F by a sparse QR of Jᵀ, Jᵀ[prow, pcol] = QR, when J has full row rank.
+        QR = qr(SparseArrays.sparse(J'))
+        if rank(QR) < m
+            δz .= pinv(Matrix(J)) * (-F) # J without full row rank: the :svd step
+            return 1
+        end
+        c = -(UpperTriangular(QR.R)' \ F[QR.pcol]) # R₁ᵀ c = −Pcᵀ F
+        δz[QR.prow] .= QR.Q * [c; zeros(n - m)] # δz = Prᵀ Q [c; 0]
+    elseif linear_solver === :klu
+        # :klu: −Jᵀ(JJᵀ + ηI)⁻¹F by a sparse LU (KLU) of the augmented matrix [√ηI J; Jᵀ −√ηI].
+        K = [√η*SparseArrays.sparse(1.0I, m, m) J; J' -√η*SparseArrays.sparse(1.0I, n, n)]
+        solution = try
+            KLU.klu(K) \ [-F; zeros(n)]
+        catch err
+            err isa LinearAlgebra.SingularException || rethrow()
+            δz .= pinv(Matrix(J)) * (-F) # a singular factorization: the :svd step
+            return 1
+        end
+        δz .= view(solution, (m + 1):(m + n))
+    else
+        # :ldl: −Jᵀ(JJᵀ + ηI)⁻¹F by a sparse LDLᵀ (CHOLMOD) of the augmented matrix [√ηI J; Jᵀ −√ηI].
+        K = [√η*SparseArrays.sparse(1.0I, m, m) J; J' -√η*SparseArrays.sparse(1.0I, n, n)]
+        factor = ldlt(Symmetric(K, :L); check = false) # one triangle: J may store zeros
+        if !issuccess(factor)
+            δz .= pinv(Matrix(J)) * (-F) # a failed factorization: the :svd step
+            return 1
+        end
+        δz .= view(factor \ [-F; zeros(n)], (m + 1):(m + n))
+    end
+    return 0
+end
