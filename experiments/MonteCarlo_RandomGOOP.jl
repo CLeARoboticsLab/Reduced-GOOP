@@ -296,7 +296,7 @@ function build_systems(class, num_levels, settings)
     # (solve_algorithm51). The reduced system's σ start at g(0), once per level (interior_point_slack_targets).
     print("Building the reduced KKT system (5.2) for $label (symbolic construction, Jacobian and code generation)... ")
     flush(stdout)
-    construction = @timed ReducedGOOP.generate_interior_point_scholtes_kkt_system(problem)
+    construction = @timed ReducedGOOP._scholtes_engine_system(ReducedGOOP.generate_slacked_reduced_kkt_system(problem))
     println("done in $(round(construction.time; digits=1)) s")
     kkt = construction.value
     reduced = (;
@@ -309,14 +309,14 @@ function build_systems(class, num_levels, settings)
     if num_levels in levels_for(settings.complete_levels, class.name)
         print("Building the ρ-perturbed complete KKT system (6.1) for $label (symbolic construction, Jacobian and code generation)... ")
         flush(stdout)
-        construction = @timed ReducedGOOP.generate_slacked_complete_kkt_system(problem; complementarity=:perturbed)
+        construction = @timed ReducedGOOP._scholtes_engine_system(ReducedGOOP.generate_slacked_complete_kkt_system(problem; complementarity=:perturbed))
         println("done in $(round(construction.time; digits=1)) s")
         kkt = construction.value
         @assert kkt.n == kkt.n_nc # square
         complete = (;
             name=:perturbed,
             complete_kkt=kkt,
-            slack_targets=MCI.compile_slack_targets(kkt),
+            slack_targets=MCI.slack_target_values(kkt),
             construction_seconds=construction.time,
         )
     end

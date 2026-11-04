@@ -423,7 +423,7 @@ function build_systems(variant, builders, dynamics, settings)
         flush(stdout)
         complete_construction = @timed builder.build(problem)
         complete_kkt = complete_construction.value
-        slack_targets = compile_slack_targets(complete_kkt)
+        slack_targets = slack_target_values(complete_kkt)
         fixed = fixed_primal_formulation(complete_kkt)
         mapping = variable_mapping(reduced_kkt, complete_kkt)
         # The exact system is square; the fixed-primal Jacobian keeps every row but drops the
@@ -621,7 +621,9 @@ function run(; overrides=(;))
     )
     variants = filter(v -> v.name in settings.objective_variants, objective_variants(settings))
     modes = filter(m -> m.name in settings.comparison_modes, [(; name=:fixed_primal), (; name=:warmstart)])
-    builders = [(; name=:exact, build=problem -> ReducedGOOP.generate_slacked_complete_kkt_system(problem; complementarity=:exact))]
+    # The complete system in the container the Scholtes engine reads (ReducedGOOP's temporary
+    # _scholtes_engine_system), which every complete-system function below takes.
+    builders = [(; name=:exact, build=problem -> ReducedGOOP._scholtes_engine_system(ReducedGOOP.generate_slacked_complete_kkt_system(problem; complementarity=:exact)))]
     builders = filter(b -> b.name in settings.complete_formulations, builders)
     num_checks = length(builders) * length(modes)
     total, done = length(variants) * length(instances) * num_checks, 0
@@ -1076,29 +1078,14 @@ function solve_scholtes_reduced(reduced_kkt, problem, θ, initial_guess, setting
 end
 
 """
-Compile `(y, θ, ρ) -> G`, the values that the complete system's auxiliary slacks σ must equal
-at a solution, so complete_initialization can start each σ on its defining equation. The
-symbol ρ must be the one the complete system was built with (ReducedGOOP's
-generate_slacked_complete_kkt_system), so that a ρ inside `slack_expressions` binds to the ρ
-argument here.
+`(y, θ, ρ) -> G`, the values that the complete system's auxiliary slacks σ must equal at a
+solution (the system's compiled `slack_targets!`), so complete_initialization can start each σ on
+its defining equation.
 """
-function compile_slack_targets(kkt)
-    backend = ReducedGOOP.SymbolicTracingUtils.SymbolicsBackend()
-    θ = ReducedGOOP.SymbolicTracingUtils.make_variables(
-        backend,
-        :θ,
-        kkt.parameter_dimension,
-    )
-    raw! = ReducedGOOP._build_fd_codegen_function(
-        kkt.slack_expressions,
-        kkt.vars,
-        θ,
-        only(ReducedGOOP.SymbolicTracingUtils.make_variables(backend, :ρ, 1));
-        chunk_size=32,
-    )
+function slack_target_values(kkt)
     function (y, θ, ρ)
         G = zeros(length(kkt.slack_expressions))
-        raw!(G, y, θ, ρ)
+        kkt.slack_targets!(G, y; θ, ρ)
         G
     end
 end
@@ -1144,7 +1131,7 @@ function fixed_primal_formulation(kkt)
     end
     nonnegative_dims = kkt.nonnegative_dims .- nx
     # ScholtesKKTSystem and CompleteKKTSystem are ReducedGOOP internals; this builds them the way
-    # BuildCompleteKKTSystem does (src/goop_kkt_system.jl), with no new codegen.
+    # _scholtes_engine_system does (src/scholtes_complete_kkt.jl), with no new codegen.
     no_rows = spzeros(0, length(free))
     inner = ReducedGOOP.ScholtesKKTSystem(
         length(free),                     # n: unknowns are the free columns
@@ -1224,7 +1211,7 @@ Starting point for a complete solve from an accepted reduced solution. The order
  2. every nonnegative coordinate <- positive_seed;
  3. mapped preference slacks and multipliers <- reduced w (variable_mapping);
  4. nonnegative coordinates floored at positive_floor;
- 5. auxiliary slacks σ <- their defining expressions (compile_slack_targets) at ρ = 0, the
+ 5. auxiliary slacks σ <- their defining expressions (slack_target_values) at ρ = 0, the
     solve's only ρ, floored as in 4.
 """
 function complete_initialization(formulation, output, θ, settings)

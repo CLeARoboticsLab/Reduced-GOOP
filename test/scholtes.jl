@@ -1017,25 +1017,24 @@ end
 end
 
 @testset "the perturbed reduced system (5.2), handed to Scholtes" begin
-    # generate_interior_point_scholtes_kkt_system wraps the :interior_point system for Scholtes():
-    # the same residual and Jacobian at the same ρ, with the slacks σ and duals γ nonnegative.
+    # _scholtes_engine_system hands the :interior_point system to Scholtes(): the same residual and
+    # Jacobian at the same ρ, with the slacks σ and duals γ (nonnegative_dims) nonnegative.
     for (levels, players, kind) in ((2, 1, :quadratic), (3, 3, :nonlinear))
         case = build_benchmark_problem(; num_players = players, levels, kind)
-        legacy = RG.generate_slacked_reduced_kkt_system(case.problem; complementarity = :interior_point,
-            codegen = :fast_differentiation)
-        k = RG.generate_interior_point_scholtes_kkt_system(case.problem)
+        kkt = RG.generate_slacked_reduced_kkt_system(case.problem; complementarity = :interior_point)
+        k = RG._scholtes_engine_system(kkt)
         θ = zeros(k.parameter_dimension)
-        @test isequal(legacy.z_symbolic, k.vars)
-        @test (k.n_nc, k.n, k.n_comp) == (legacy.kkt_dimension, legacy.variable_dimension, 0)
-        @test k.nonnegative_dims == [legacy.interior_point_slack_dims; legacy.inequality_constraint_dual_dims]
+        @test isequal(kkt.z_symbolic, k.vars)
+        @test (k.n_nc, k.n, k.n_comp) == (kkt.kkt_dimension, kkt.variable_dimension, 0)
+        @test k.nonnegative_dims == [kkt.interior_point_slack_dims; kkt.inequality_constraint_dual_dims]
         y = 0.5 .+ 0.1 .* sin.(1:k.n)
         for ρ in (1e-3, 1e-9)
             r, rk = zeros(k.n_nc), zeros(k.n_nc)
-            legacy.F!(r, y; θ, ρ)
+            kkt.F!(r, y; θ, ρ)
             k.F_nc!(rk, y, θ, ρ)
             @test rk == r
-            J, Jk = copy(legacy.∇F_z!.result_buffer), copy(k.Jnc_buf)
-            legacy.∇F_z!(J, y; θ, ρ)
+            J, Jk = copy(kkt.∇F_z!.result_buffer), copy(k.Jnc_buf)
+            kkt.∇F_z!(J, y; θ, ρ)
             k.J_nc!(Jk, y, θ, ρ)
             @test Jk == J
         end
@@ -1071,7 +1070,8 @@ end
             is_prioritized_constraint = [[false, false, false] for _ in 1:2],
             equality_constraints = [nothing, nothing],
             inequality_constraints = [(x, t) -> [0.5 - x[1] - 0.1x[3]], (x, t) -> [0.5 - x[3] - 0.1x[1]]])
-        for k in (RG.generate_interior_point_scholtes_kkt_system(goop), RG.generate_slacked_complete_kkt_system(goop; complementarity = :perturbed))
+        for k in RG._scholtes_engine_system.((RG.generate_slacked_reduced_kkt_system(goop),
+                                              RG.generate_slacked_complete_kkt_system(goop; complementarity = :perturbed)))
             θ, w, scale, steps, fallbacks = zeros(k.parameter_dimension), nothing, sqrt(k.n_nc), [], 0
             step_trace = nt -> push!(steps, (; nt.rho, w = copy(nt.w), r = copy(nt.r), dw = copy(nt.dw),
                 nt.alpha, nt.accepted, nt.trial_norm, w_trial = copy(nt.w_trial), nt.eta))

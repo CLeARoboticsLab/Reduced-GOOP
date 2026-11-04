@@ -302,7 +302,7 @@ end
 		inequality_constraints = fill(nothing, num_players),
 	)
 
-	native = ReducedGOOP.generate_slacked_reduced_kkt_system(problem)
+	native = ReducedGOOP.generate_slacked_reduced_kkt_system(problem; codegen = :native)
 	fdgen = ReducedGOOP.generate_slacked_reduced_kkt_system(
 		problem;
 		codegen = :fast_differentiation,

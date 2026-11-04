@@ -82,41 +82,40 @@ generate_scholtes_complete_kkt_system(goop::ParametricGOOP; kwargs...) =
     _generate_complete_kkt_system(goop, :aggregate; kwargs...)
 
 """
-    generate_interior_point_scholtes_kkt_system(goop; codegen = :fast_differentiation, ...)
-
-The perturbed reduced KKT system, equation (5.2) of manuscript/main.pdf, exactly as
-`generate_slacked_reduced_kkt_system(goop; complementarity = :interior_point)` builds it:
-level-indexed slacks with g - σ = 0 and σ ⊙ γ = ϵ, and unsigned lifted multipliers ϕ. Its
-compiled residual and sparse Jacobian are handed to `Scholtes()`'s projected Newton engine in
-the complete systems' container, at ϵ = rho and η = 0 (so the interior-point solver's η-term
-vanishes), with the slacks σ and the inequality duals γ nonnegative. Solve it down a rho
-schedule, like the :aggregate complete system.
+The `CompleteKKTSystem` that the Scholtes engine reads (src/scholtes_solver.jl and the files it uses)
+for a `GOOPKKTSystem`: its compiled residual and Jacobian as the engine's positional `F_nc!(out, y,
+θ, ρ)` and `J_nc!`, no complementarity blocks (n_comp = 0), `nonnegative_dims` as the engine's
+direct sign bounds, K₀ as F at ρ = 0, and a fresh evaluation state (θ, ρ, Jacobian memo). It
+replaces the (5.2) wrapper and `BuildCompleteKKTSystem`, and goes when solver (2) reads
+`GOOPKKTSystem` itself (output/refactor/plan.md, steps 2.3 and 2.4). A caller that also evaluates
+the engine's residual objects (`ScholtesResiduals`, `_norm_K₀`) on a system builds this once and
+passes it to both, so that they share its evaluation state.
 """
-function generate_interior_point_scholtes_kkt_system(
-    goop::ParametricGOOP;
-    codegen = :fast_differentiation,
-    fd_codegen_chunk_size = SCHOLTES_FD_CHUNK_SIZE,
-)
-    kkt = generate_slacked_reduced_kkt_system(goop; complementarity = :interior_point, codegen, fd_codegen_chunk_size)
-    n, m, p = kkt.variable_dimension, kkt.kkt_dimension, sum(goop.parameter_dims)
-    F! = (out, y, θ, rho) -> (kkt.F!(out, y; θ, ρ = rho); out)
-    J! = (out, y, θ, rho) -> (kkt.∇F_z!(out, y; θ, ρ = rho); out)
+function _scholtes_engine_system(kkt::GOOPKKTSystem)
+    n, m, p = kkt.variable_dimension, kkt.kkt_dimension, kkt.parameter_dimension
+    F! = (out, y, θ, ρ) -> kkt.F!(out, y; θ, ρ)
+    J! = (out, y, θ, ρ) -> kkt.∇F_z!(out, y; θ, ρ)
     J = SymbolicTracingUtils.get_result_buffer(kkt.∇F_z!)
-    rows, cols, _ = SparseArrays.findnz(J)
-    empty_F!, empty_J!, empty_buffer = (out, y, θ, rho) -> out, (out, y, θ, rho) -> out, SparseArrays.spzeros(0, n)
+    no_F!, no_J!, no_buffer = (out, y, θ, ρ) -> out, (out, y, θ, ρ) -> out, SparseArrays.spzeros(0, n)
     system = ScholtesKKTSystem(n, m, 0, kkt.primal_dims, kkt.preference_slack_dims, Int[], p,
-        F!, empty_F!, empty_F!, J!, empty_J!, empty_J!, J, empty_buffer, copy(empty_buffer),
-        (rows, cols), (Int[], Int[]), (Int[], Int[]), Int[], 0, NamedTuple[], kkt.z_symbolic,
-        zeros(p), Ref(0.0), zeros(n), Ref(false))
-    CompleteKKTSystem(system, (; formulation = :interior_point, complete_residual! = F!,
-        F_symbolic = kkt.F_symbolic, z_symbolic = kkt.z_symbolic,
-        nonnegative_dims = [collect(kkt.preference_slack_dims); kkt.interior_point_slack_dims;
-            kkt.inequality_constraint_dual_dims],
-        interior_point_slack_dims = kkt.interior_point_slack_dims,
-        inequality_constraint_dual_dims = kkt.inequality_constraint_dual_dims,
-        equality_constraint_dual_dims = kkt.equality_constraint_dual_dims,
-        kkt_dimension = m, variable_dimension = n))
+        F!, no_F!, no_F!, J!, no_J!, no_J!, J, no_buffer, copy(no_buffer),
+        SparseArrays.findnz(J)[1:2], (Int[], Int[]), (Int[], Int[]), Int[], 0, NamedTuple[], kkt.z_symbolic,
+        zeros(p), Ref(kkt.complementarity === :perturbed ? 1e-9 : 0.0), zeros(n), Ref(false))
+    CompleteKKTSystem(system, (; formulation = kkt.complementarity, complete_residual! = F!,
+        kkt.F_symbolic, kkt.G_symbolic, kkt.z_symbolic, kkt.levels, kkt.slack_expressions,
+        kkt.slack_targets!, kkt.nonnegative_dims, kkt.interior_point_slack_dims,
+        kkt.inequality_constraint_dual_dims, kkt.equality_constraint_dual_dims,
+        kkt.kkt_dimension, kkt.variable_dimension))
 end
+
+"""
+    solve(Scholtes(), kkt::GOOPKKTSystem, θ; kwargs...)
+
+The Scholtes engine on a `GOOPKKTSystem`, through `_scholtes_engine_system` (a fresh evaluation
+state per call). Temporary, as `_scholtes_engine_system`.
+"""
+solve(::Scholtes, kkt::GOOPKKTSystem, θ::AbstractVector{<:Real}; kwargs...) =
+    solve(Scholtes(), _scholtes_engine_system(kkt), θ; kwargs...)
 
 function _generate_complete_kkt_system(
     goop::ParametricGOOP, formulation::Symbol;

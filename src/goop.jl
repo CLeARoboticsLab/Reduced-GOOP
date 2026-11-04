@@ -123,12 +123,12 @@ end
 Construct the Reduced KKT system corresponding to a ParametricGOOP.
 
 `complementarity = :interior_point` (default) builds the interior-point system
-(`σ ∘ γ = ρ`) and returns a `GOOPKKTSystem` for `InteriorPoint`. `complementarity =
+(`σ ∘ γ = ρ`) and returns a `GOOPKKTSystem` for `PDIP` (or `InteriorPoint`). `complementarity =
 :scholtes` builds the Scholtes-form system (explicit φ ≥ 0, relaxed `s ∘ γ + u = ρ`)
-and returns a `ScholtesKKTSystem` for `Scholtes`; it is opt-in and generates code
-with FastDifferentiation unless `codegen` says otherwise, split into functions of `fd_codegen_chunk_size` expressions (default
-`FD_CODEGEN_CHUNK_SIZE`; pass `typemax(Int)` for one function per block). See
-`_generate_scholtes_reduced_kkt_system`. In both modes, a prioritized constraint h ≥ 0 at level k introduces
+and returns a `ScholtesKKTSystem` for `Scholtes`; it is opt-in. See
+`_generate_scholtes_reduced_kkt_system`. Both generate code with FastDifferentiation unless
+`codegen` says otherwise, split into functions of `fd_codegen_chunk_size` expressions (default
+`FD_CODEGEN_CHUNK_SIZE`; pass `typemax(Int)` for one function per block). In both modes, a prioritized constraint h ≥ 0 at level k introduces
 explicit preference slacks s: level k minimizes `sum(s)` subject to `h + s ≥ 0` and
 `s ≥ 0`, and every upper level keeps these inequalities with fresh multipliers.
 """
@@ -156,7 +156,8 @@ function generate_slacked_reduced_kkt_system(
             quasi_order,
         )
     end
-    codegen = something(codegen, :native)
+    codegen = something(codegen, :fast_differentiation)
+    fd_codegen_chunk_size = something(fd_codegen_chunk_size, FD_CODEGEN_CHUNK_SIZE)
     # Symbolic variables for all primals and parameters.
     backend = SymbolicTracingUtils.SymbolicsBackend()
     @timeit TO "symbolic variable construction" begin
@@ -470,6 +471,8 @@ function generate_slacked_reduced_kkt_system(
         stationarity_offset = sum(length, (x, s, Σ, Λ, Γ))
         innermost_stationarity_dual_dims =
             stationarity_offset .+ innermost_stationarity_dual_offsets
+        # The sign box: σ and γ. s ≥ 0 is a row of G (s − σ = 0), not a bound.
+        nonnegative_dims = [interior_point_slack_dims; inequality_constraint_dual_dims]
     end
 
     @timeit TO "Jacobian / KKT construction" BuildGOOPKKTSystem(
@@ -485,6 +488,7 @@ function generate_slacked_reduced_kkt_system(
         stationarity_dual_dims,
         all_equality_stationarity_dual_dims,
         innermost_stationarity_dual_dims,
+        nonnegative_dims,
         backend_options,
         codegen,
         fd_codegen_chunk_size,
@@ -872,15 +876,16 @@ and passes up, with Cₖ = [Gₖ₊₁ ⊙ γₖ; (hₖ + sₖ) ⊙ γₚₖ; s�
 
 A prioritized level minimizes cₖ = 1ᵀsₖ subject to hₖ + sₖ ≥ 0 and sₖ ≥ 0; otherwise cₖ is
 the cost hₖ, and sₖ, γₚₖ and μₛₖ are empty. A player's residual is F₁, with its inequalities
-g and hₘ + sₘ written as equalities with nonnegative slacks σ; s, σ and every γ, γₚ, μₛ are
-sign-bounded coordinates.
+g, hₘ + sₘ and sₘ written as equalities with nonnegative slacks σ (σₚ for hₘ + sₘ, σₛ for sₘ);
+σ and every γ, γₚ, μₛ are sign-bounded coordinates (`nonnegative_dims`), s is not.
 
 `complementarity = :exact` is (2.12)–(2.17), with no relaxation. `complementarity =
 :perturbed` is (6.1): the same recursion, but each level k gets its own slacks σₖ on g
 (g − σₖ = 0), every product row is written with σₖ in place of g, and every product equals
 ρ. At ρ = 0 and σₖ = g its residual is the exact system's. Solve it down a ρ schedule.
 
-Returns a `CompleteKKTSystem` for `Scholtes()`.
+Returns a `GOOPKKTSystem` (`Scholtes()` solves it through `_scholtes_engine_system` until solver
+(2) reads it directly).
 """
 function generate_slacked_complete_kkt_system(
     goop::ParametricGOOP;
@@ -1016,7 +1021,9 @@ function generate_slacked_complete_kkt_system(
                 G[(length(g) + 1):end]
             ]
 
-            # The residual writes h + preference_slack ≥ 0 as an equality with slacks σₚ ≥ 0.
+            # The residual writes h + preference_slack ≥ 0 and preference_slack ≥ 0 as equalities
+            # with slacks σₚ ≥ 0 and σₛ ≥ 0, as the reduced system does, so preference_slack is
+            # not sign-bounded itself.
             σₚ = SymbolicTracingUtils.make_variables(
                 backend,
                 Symbol("σ̄ₚ_$(player)_$(level)"),
@@ -1024,6 +1031,13 @@ function generate_slacked_complete_kkt_system(
             )
             push!(Σ, σₚ...)
             push!(slack_expressions, (h .+ preference_slack)...)
+            σₛ = SymbolicTracingUtils.make_variables(
+                backend,
+                Symbol("σ̄ₛ_$(player)_$(level)"),
+                length(h),
+            )
+            push!(Σ, σₛ...)
+            push!(slack_expressions, preference_slack...)
         else
             @assert length(h) == 1 "Expected a single preference function at the level $(level), but got $(length(h))"
             # Current priority is a cost.
@@ -1113,8 +1127,10 @@ function generate_slacked_complete_kkt_system(
     interior_point_slack_dims = vcat(idx[Block(3)]) # Σ
     equality_constraint_dual_dims = vcat(idx[Block(4)]) # Λ
     inequality_constraint_dual_dims = vcat(idx[Block(5)]) # Γ
+    # The sign box: σ and every γ, γₚ, μₛ. s ≥ 0 is a slack row (s − σₛ = 0), not a bound.
+    nonnegative_dims = [interior_point_slack_dims; inequality_constraint_dual_dims]
 
-    @timeit TO "Jacobian / KKT construction" BuildCompleteKKTSystem(
+    @timeit TO "Jacobian / KKT construction" BuildGOOPKKTSystem(
         F,
         z,
         θ,
@@ -1124,10 +1140,11 @@ function generate_slacked_complete_kkt_system(
         interior_point_slack_dims,
         inequality_constraint_dual_dims;
         equality_constraint_dual_dims,
-        complementarity,
-        G_symbolic = G,
+        nonnegative_dims,
         slack_expressions,
+        G_symbolic = G,
         levels = [conditions.levels for conditions in player_kkt_conditions],
+        complementarity,
         backend_options,
         codegen,
         fd_codegen_chunk_size,

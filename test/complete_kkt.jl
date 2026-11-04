@@ -3,8 +3,10 @@ module CompleteKKTTests
 using Test, ReducedGOOP, Symbolics, BlockArrays, LinearAlgebra, SparseArrays
 include(joinpath(@__DIR__, "benchmark_problems.jl"))
 const RG = ReducedGOOP
-exact(goop) = RG.generate_slacked_complete_kkt_system(goop; complementarity = :exact)
-perturbed(goop) = RG.generate_slacked_complete_kkt_system(goop; complementarity = :perturbed)
+# The complete systems in the container the Scholtes engine reads (src/scholtes_complete_kkt.jl),
+# until solver (2) reads GOOPKKTSystem itself.
+exact(goop) = RG._scholtes_engine_system(RG.generate_slacked_complete_kkt_system(goop; complementarity = :exact))
+perturbed(goop) = RG._scholtes_engine_system(RG.generate_slacked_complete_kkt_system(goop; complementarity = :perturbed))
 const BUILDERS = (exact, perturbed)
 
 function evaluate(kkt, y, rho; theta = zeros(kkt.parameter_dimension))
@@ -15,13 +17,8 @@ end
 
 "The values of the auxiliary slacks' defining expressions (`slack_expressions`) at `y`."
 function slack_values(kkt, y; theta = zeros(kkt.parameter_dimension))
-    backend = RG.SymbolicTracingUtils.SymbolicsBackend()
-    θ = RG.SymbolicTracingUtils.make_variables(backend, :θ, kkt.parameter_dimension)
-    ρ = only(RG.SymbolicTracingUtils.make_variables(backend, :ρ, 1))
-    G! = RG._compile_kkt_block(kkt.slack_expressions, kkt.vars, θ, ρ; codegen = :fast_differentiation,
-        fd_codegen_chunk_size = 32, backend_options = (;))[1]
     G = zeros(length(kkt.slack_expressions))
-    G!(G, y, theta, 0.0)
+    kkt.slack_targets!(G, y; θ = theta, ρ = 0.0)
     G
 end
 
@@ -183,6 +180,38 @@ end
             @test norm(evaluate(k,y,0.0)) < 1e-12
             @test all(isfinite, jacobian(k,0.5 .+ y,1e-3))
         end
+    end
+end
+
+@testset "Sign box and slack rows of the reduced and complete systems" begin
+    # Every inequality, the preference slacks' s ≥ 0 included, is a row expression − σ = 0 with
+    # σ ≥ 0: the sign box (nonnegative_dims) is σ and the inequality duals, never s. For the complete
+    # systems, slack_targets! evaluates the expressions (slack_expressions) the slacks σ stand for.
+    p = RG.ParametricGOOP(BlockArray([0.0], [1]), BlockArray(Float64[], [0]);
+        preferences = [Function[(x, t) -> [1 - x[1]], (x, t) -> x[1]^2 / 2, (x, t) -> [x[1] + 2]]],
+        is_prioritized_constraint = [[true, false, true]], equality_constraints = [nothing],
+        inequality_constraints = [(x, t) -> [3 - x[1]]])
+    reduced = RG.generate_slacked_reduced_kkt_system(p)
+    complete_systems = (RG.generate_slacked_complete_kkt_system(p; complementarity = :exact),
+        RG.generate_slacked_complete_kkt_system(p; complementarity = :perturbed))
+    for k in (reduced, complete_systems...)
+        σ, s = k.z_symbolic[k.interior_point_slack_dims], k.z_symbolic[k.preference_slack_dims]
+        @test k.nonnegative_dims == [k.interior_point_slack_dims; k.inequality_constraint_dual_dims]
+        @test !isempty(s) && isempty(intersect(k.nonnegative_dims, k.preference_slack_dims))
+        # s ≥ 0 has its slack rows: every preference slack minus a slack σ is a row of F.
+        @test all(v -> any(w -> any(isequal(v - w), k.F_symbolic), σ), s)
+    end
+    @test isempty(reduced.slack_expressions)
+    for k in complete_systems
+        σ = k.z_symbolic[k.interior_point_slack_dims]
+        @test length(k.slack_expressions) == length(σ)
+        # Every slack row expression − σ is a row of F.
+        @test all(((e, v),) -> any(isequal(e - v), k.F_symbolic), zip(k.slack_expressions, σ))
+        y = 0.5 .+ 0.1 .* sin.(1:k.variable_dimension)
+        G = zeros(length(σ))
+        k.slack_targets!(G, y; θ = Float64[], ρ = 0.0)
+        values = Dict(k.z_symbolic .=> y)
+        @test G ≈ [Symbolics.value(Symbolics.substitute(e, values)) for e in k.slack_expressions]
     end
 end
 

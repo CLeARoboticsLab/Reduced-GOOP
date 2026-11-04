@@ -1086,8 +1086,8 @@ Options for `solve(PDIP(), …)`.
   - `max_inner_iters`: Newton steps per level (Algorithm 5.1's t_max).
   - `tol`: bar on ‖K₀‖ = ‖F(z; ρ = 0)‖, checked before every Newton step; below it the solve stops.
     `tol_inner`: bar on ‖F(z; ρ)‖; below it the level is solved.
-  - `linesearch`: `:backtracking` (Algorithm 5.1: α ← β α while ‖F(z + α δz; ρ)‖ > ‖F(z; ρ)‖ or σ or γ
-    would not stay positive; the step fails below `min_step`) or `:fraction_to_boundary` (the old
+  - `linesearch`: `:backtracking` (Algorithm 5.1: α ← β α while ‖F(z + α δz; ρ)‖ > ‖F(z; ρ)‖ or a
+    coordinate in `nonnegative_dims` would not stay positive; the step fails below `min_step`) or `:fraction_to_boundary` (the old
     solver's τ-rule: γ moves by α_γ, every other variable by α_σ, with no decrease test).
   - `linear_solver`: `:svd` (default), `:sparseQR_J`, `:sparseQR_Jᵀ`, `:klu` or `:ldl`; see
     `_pdip_newton_step!`.
@@ -1116,10 +1116,11 @@ end
     solve(PDIP(), kkt::GOOPKKTSystem, θ; z₀ = nothing, options = PDIPOptions())
 
 Algorithm 5.1 of manuscript/main.pdf: Newton's method on F(z; ρ) = 0 for each relaxation ρ, with the
-step J δz = −F (J = ∇F) and a line search that keeps the slacks σ and the inequality duals γ positive.
-The preference slacks s are not bounded directly: s ≥ 0 is a row of G (s − σ = 0).
+step J δz = −F (J = ∇F) and a line search that keeps `kkt.nonnegative_dims` positive: the slacks σ
+and the inequality duals γ, of the reduced or the complete system. The preference slacks s are not
+bounded directly: s ≥ 0 is a row of G (s − σ = 0).
 
-`z₀` is a full iterate (length `kkt.variable_dimension`, with σ, γ > 0), a primal one (length of
+`z₀` is a full iterate (length `kkt.variable_dimension`, positive on `nonnegative_dims`), a primal one (length of
 `kkt.primal_dims`; then s, σ and γ start at 1 and every other variable at 0), or
 `nothing` (the same start with x = 0).
 
@@ -1174,7 +1175,8 @@ function solve(
     end
     σ = @view z[kkt.interior_point_slack_dims]
     γ = @view z[kkt.inequality_constraint_dual_dims]
-    all(>(0), σ) && all(>(0), γ) || throw(ArgumentError("z₀ must have σ > 0 and γ > 0."))
+    all(>(0), view(z, kkt.nonnegative_dims)) ||
+        throw(ArgumentError("z₀ must be positive on nonnegative_dims (σ and γ)."))
 
     # Set up common memory.
     J = kkt.∇F_z!.result_buffer
@@ -1183,8 +1185,7 @@ function solve(
     F₀ = zeros(kkt.kkt_dimension) # F(z; 0), for ‖K₀‖
     δz = zeros(kkt.variable_dimension)
     z_trial = similar(z)
-    σ_trial = @view z_trial[kkt.interior_point_slack_dims]
-    γ_trial = @view z_trial[kkt.inequality_constraint_dual_dims]
+    nonnegative_trial = @view z_trial[kkt.nonnegative_dims] # @view to avoid copy of selected entries
     δσ = @view δz[kkt.interior_point_slack_dims]
     δγ = @view δz[kkt.inequality_constraint_dual_dims]
     not_γ = setdiff(1:(kkt.variable_dimension), kkt.inequality_constraint_dual_dims)
@@ -1231,12 +1232,13 @@ function solve(
             svd_fallbacks += _pdip_newton_step!(δz, J, F, linear_solver, η)
 
             if linesearch === :backtracking
-                # Algorithm 5.1: α ← β α while ‖F(z + α δz; ρ)‖ > ‖F(z; ρ)‖ or σ or γ would not stay positive.
+                # Algorithm 5.1: α ← β α while ‖F(z + α δz; ρ)‖ > ‖F(z; ρ)‖ or a coordinate in
+                # nonnegative_dims would not stay positive.
                 α = 1.0
                 accepted = false
                 while α >= min_step
                     @. z_trial = z + α * δz
-                    if all(>(0), σ_trial) && all(>(0), γ_trial)
+                    if all(>(0), nonnegative_trial) # keep σ and γ positive. 
                         kkt.F!(F_trial, z_trial; θ, ρ)
                         if norm(F_trial) <= relaxed_residual
                             accepted = true

@@ -101,11 +101,10 @@ dual solution independently with `NonlinearSolve`.
 
 #### KKT-Based Formulations
 
-These functions construct nonlinear KKT systems. The reduced generators return
-`GOOPKKTSystem` objects, solved by the interior-point method in `solver.jl`, or,
-with `complementarity = :scholtes`, a `ScholtesKKTSystem` for the Scholtes solver
-(see below). The complete generator returns a `CompleteKKTSystem`, solved by the
-Scholtes solver:
+These functions construct nonlinear KKT systems. The reduced and complete generators
+return `GOOPKKTSystem` objects, solved by the interior-point methods in `solver.jl`
+(`PDIP`, Algorithm 5.1) or by the Scholtes solver, or, with `complementarity =
+:scholtes`, a `ScholtesKKTSystem` for the Scholtes solver (see below):
 
 | Function                                    | Description                                                                                                                                                                                                                                    |
 | ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
