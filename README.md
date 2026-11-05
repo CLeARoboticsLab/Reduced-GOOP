@@ -209,10 +209,6 @@ solver's tests ported from ScholtesReducedGOOP.jl.
 | Warm-start tests              | Full-vector solver warm starts.                                                                                                                                                      |
 | Scholtes (`test/scholtes.jl`) | KKT blocks, residual and sign box, every linear backend, the projected bound rule, ρ schedules, certificate, multistart, non-unique answers, and exact inequalities at the solution. |
 
-`test/compare_with_scholtes.jl` compares every Scholtes solve in the suite against
-a recording of ScholtesReducedGOOP.jl's own tests (a development tool, not run by
-`Pkg.test()`).
-
 The tests verify convergence status, residual tolerances, known primal
 solutions, active/inactive constraint behavior, and linear-solver robustness.
 

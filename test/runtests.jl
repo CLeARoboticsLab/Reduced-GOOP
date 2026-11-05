@@ -545,7 +545,7 @@ end
 	)
 end
 
-@testset "Scholtes mode accepts prioritized-constraint levels (smoke)" begin
+@testset "The Scholtes system accepts prioritized-constraint levels (smoke)" begin
 	# Prioritized vectors introduce explicit preference slacks and their two
 	# inequality blocks, including the corresponding Scholtes complementarity.
 	num_players = 3
@@ -570,28 +570,23 @@ end
 		equality_constraints = fill(nothing, num_players),
 		inequality_constraints = fill(nothing, num_players),
 	)
-	kkt = ReducedGOOP.generate_slacked_reduced_kkt_system(problem; complementarity = :scholtes)
-	@test kkt isa ReducedGOOP.ScholtesKKTSystem
+	kkt = ReducedGOOP.generate_slacked_scholtes_reduced_kkt_system(problem)
+	@test kkt.kind === :scholtes
 	θ = zeros(num_players)
-	output = ReducedGOOP.solve(
-		ReducedGOOP.Scholtes(),
+	options = ReducedGOOP.ProjectedLMOptions(max_inner_iters = 50)
+	z₀ = ReducedGOOP.initialize_scholtes!(
+		zeros(kkt.variable_dimension),
 		kkt,
-		θ;
-		z₀ = reduce(vcat, expected_blocks),
-		options = ReducedGOOP.ScholtesOptions(max_inner = 50),
+		θ,
+		reduce(vcat, expected_blocks),
+		first(options.ρ_schedule);
+		warm = false,
 	)
+	output = ReducedGOOP.solve(ReducedGOOP.ProjectedLM(), kkt, θ; z₀, options)
 	@test all(isfinite, output.z)
 	@test isfinite(output.residual)
-
-	for bad in ((; projected_step = false), (; reuse_factorization_iters = 1))
-		@test_throws ArgumentError ReducedGOOP.solve(
-			ReducedGOOP.Scholtes(),
-			kkt,
-			θ;
-			options = ReducedGOOP.ScholtesOptions(; bad...),
-		)
-	end
 end
 
+include(joinpath(@__DIR__, "solver.jl"))
 include(joinpath(@__DIR__, "complete_kkt.jl"))
 include(joinpath(@__DIR__, "scholtes.jl"))

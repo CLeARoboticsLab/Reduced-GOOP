@@ -3,15 +3,13 @@ module CompleteKKTTests
 using Test, ReducedGOOP, Symbolics, BlockArrays, LinearAlgebra, SparseArrays
 include(joinpath(@__DIR__, "benchmark_problems.jl"))
 const RG = ReducedGOOP
-# The complete systems in the container the Scholtes engine reads (src/scholtes_complete_kkt.jl),
-# until solver (2) reads GOOPKKTSystem itself.
-exact(goop) = RG._scholtes_engine_system(RG.generate_slacked_complete_kkt_system(goop; complementarity = :exact))
-perturbed(goop) = RG._scholtes_engine_system(RG.generate_slacked_complete_kkt_system(goop; complementarity = :perturbed))
+exact(goop) = RG.generate_slacked_complete_kkt_system(goop; complementarity = :exact)
+perturbed(goop) = RG.generate_slacked_complete_kkt_system(goop; complementarity = :perturbed)
 const BUILDERS = (exact, perturbed)
 
 function evaluate(kkt, y, rho; theta = zeros(kkt.parameter_dimension))
-    r = zeros(kkt.n_nc)
-    kkt.F_nc!(r, y, theta, rho)
+    r = zeros(kkt.kkt_dimension)
+    kkt.F!(r, y; θ = theta, ρ = rho)
     r
 end
 
@@ -23,8 +21,8 @@ function slack_values(kkt, y; theta = zeros(kkt.parameter_dimension))
 end
 
 function jacobian(kkt, y, rho)
-    J = copy(kkt.Jnc_buf)
-    kkt.J_nc!(J, y, zeros(kkt.parameter_dimension), rho)
+    J = copy(kkt.∇F_z!.result_buffer)
+    kkt.∇F_z!(J, y; θ = zeros(kkt.parameter_dimension), ρ = rho)
     J
 end
 
@@ -64,7 +62,7 @@ end
         inequality_constraints = [(x,t) -> [x[1]+1, 2-x[1]+x[2]]])
     k = exact(p)
     inner, outer = k.levels[1][2], k.levels[1][1]
-    x = k.vars[k.primal_dims]
+    x = k.z_symbolic[k.primal_dims]
     f, g = [x[2]-x[1]], [x[1]+1, 2-x[1]+x[2]]
     L2 = cosh(x[1]-1)+x[2]^2/2-inner.lambda'*f-inner.gamma'*g
     F2 = [Symbolics.gradient(L2,x); f; g .* inner.gamma]
@@ -73,16 +71,16 @@ end
     F1 = [Symbolics.gradient(L1,[x;inner.lambda;inner.gamma]);
         G2 .* outer.gamma; F2]
     G1 = [g;outer.gamma;inner.gamma]
-    reference = [F1;g-k.vars[k.interior_point_slack_dims]]
-    @test length(reference) == k.n_nc == k.n
+    reference = [F1;g-k.z_symbolic[k.interior_point_slack_dims]]
+    @test length(reference) == k.kkt_dimension == k.variable_dimension
     @test all(iszero, Symbolics.simplify.(reference-k.F_symbolic))
     @test iszero(Symbolics.simplify(L1-outer.L))
     @test all(iszero, Symbolics.simplify.(G1-k.G_symbolic))
     @test length(inner.complementary_slackness) == 2
     @test length(outer.complementary_slackness) == 4
-    y = 0.5 .+ 0.1sin.(1:k.n)
+    y = 0.5 .+ 0.1sin.(1:k.variable_dimension)
     @test evaluate(k,y,1.0) == evaluate(k,y,1e-12)
-    d = cos.(1:k.n); d ./= norm(d)
+    d = cos.(1:k.variable_dimension); d ./= norm(d)
     @test jacobian(k,y,1.0)*d ≈ (evaluate(k,y+1e-6d,1.0)-evaluate(k,y-1e-6d,1.0))/2e-6 atol=1e-7
 
     p3 = RG.ParametricGOOP(BlockArray(zeros(2),[2]),BlockArray(Float64[],[0]);
@@ -91,7 +89,7 @@ end
         equality_constraints=p.equality_constraints,inequality_constraints=p.inequality_constraints)
     k3 = exact(p3)
     top,middle,bottom = k3.levels[1]
-    x = k3.vars[k3.primal_dims]
+    x = k3.z_symbolic[k3.primal_dims]
     f,g = [x[2]-x[1]],[x[1]+1,2-x[1]+x[2]]
     L3 = cosh(x[1]-1)+x[2]^2/2-bottom.lambda'*f-bottom.gamma'*g
     F3 = [Symbolics.gradient(L3,x);f;g .* bottom.gamma]
@@ -103,11 +101,11 @@ end
     L1 = x[1]^2/2-top.lambda'*F2-top.gamma'*G2
     z2 = [z3;middle.lambda;middle.gamma]
     reference = [Symbolics.gradient(L1,z2);G2 .* top.gamma;F2;
-        g-k3.vars[k3.interior_point_slack_dims]]
-    @test k3.n == k3.n_nc == length(reference)
+        g-k3.z_symbolic[k3.interior_point_slack_dims]]
+    @test k3.variable_dimension == k3.kkt_dimension == length(reference)
     @test all(iszero,Symbolics.simplify.(reference-k3.F_symbolic))
-    y = 0.5 .+ 0.1sin.(1:k3.n)
-    d = cos.(1:k3.n);d ./= norm(d)
+    y = 0.5 .+ 0.1sin.(1:k3.variable_dimension)
+    d = cos.(1:k3.variable_dimension);d ./= norm(d)
     @test jacobian(k3,y,1.0)*d ≈ (evaluate(k3,y+1e-6d,1.0)-evaluate(k3,y-1e-6d,1.0))/2e-6 atol=1e-7
 end
 
@@ -120,15 +118,15 @@ end
         k = perturbed(case.problem)
         K, m = length.(case.problem.preferences), case.problem.inequality_dims
         extra = sum((K .- 1) .* m)
-        @test k.n == k.n_nc == e.n + extra
+        @test k.variable_dimension == k.kkt_dimension == e.variable_dimension + extra
         @test length(k.nonnegative_dims) == length(e.nonnegative_dims) + extra
         # An exact point with its slacks on g; the perturbed point shares every other variable by name
         # (exact's σ_{i,1} is level 1's slacks here) and puts every level's slacks on g.
-        index = Dict(string(v) => j for (j, v) in enumerate(k.vars))
-        ye = 0.5 .+ 0.1sin.(1:e.n)
+        index = Dict(string(v) => j for (j, v) in enumerate(k.z_symbolic))
+        ye = 0.5 .+ 0.1sin.(1:e.variable_dimension)
         ye[e.interior_point_slack_dims] .= slack_values(e, ye)
-        y = zeros(k.n)
-        for (j, v) in enumerate(e.vars)
+        y = zeros(k.variable_dimension)
+        for (j, v) in enumerate(e.z_symbolic)
             y[index[string(v)]] = ye[j]
         end
         y[k.interior_point_slack_dims] .= slack_values(k, y)
@@ -137,25 +135,22 @@ end
         n = sum(length(e.levels[i][1].F) for i in 1:case.problem.num_players)
         @test r0[1:n] ≈ re[1:n] atol=1e-12
         @test norm(r0[(n+1):end]) <= 1e-12
-        @test (n + sum(m), n + sum(K .* m)) == (e.n_nc, k.n_nc)
+        @test (n + sum(m), n + sum(K .* m)) == (e.kkt_dimension, k.kkt_dimension)
         # rho shifts exactly the complementarity products, (2^K - 1) m_I per player here.
         @test count(!iszero, r - r0) ==
               sum(length(level.complementary_slackness) for player in e.levels for level in player)
         @test all(≈(-1e-3), filter(!iszero, r - r0))
-        d = cos.(1:k.n); d ./= norm(d)
+        d = cos.(1:k.variable_dimension); d ./= norm(d)
         @test jacobian(k,y,1e-3)*d ≈ (evaluate(k,y+1e-6d,1e-3)-evaluate(k,y-1e-6d,1e-3))/2e-6 atol=1e-7
         # Down a ρ chain from z = 0, one solve per stage, as experiments/MonteCarlo_RandomGOOP.jl does.
-        θ, w, scale = zeros(k.parameter_dimension), nothing, sqrt(k.n_nc)
+        θ, z, scale = zeros(k.parameter_dimension), zeros(length(case.expected)), sqrt(k.kkt_dimension)
         for ρ in (1.0, 1e-2, 1e-4, 1e-6, 1e-8, 1e-10)
-            options = RG.ScholtesOptions(; rho_schedule = [ρ], max_inner = 1000, tol = 0.0,
-                tol_inner = min(ρ, 1e-2) * scale, projected_step = true, proj_eps = 1e-8, linear_solver = :normal,
-                eta_schedule = true, eta_init = 1e-2, eta_min = 1e-8, eta_max = 1e4)
-            output = isnothing(w) ? RG.solve(RG.Scholtes(), k, θ; z₀ = zeros(length(case.expected)), options) :
-                     RG.solve(RG.Scholtes(), k, θ; w₀ = w, options)
-            w = output.w
+            options = RG.ProjectedLMOptions(; ρ_schedule = [ρ], max_inner_iters = 1000, tol = 0.0,
+                tol_inner = min(ρ, 1e-2) * scale, proj_eps = 1e-8, η = 1e-2, η_min = 1e-8, η_max = 1e4)
+            z = RG.solve(RG.ProjectedLM(), k, θ; z₀ = z, options).z
         end
-        @test norm(w[k.primal_dims] - case.expected) < 1e-5
-        @test minimum(w[k.nonnegative_dims]) >= 0
+        @test norm(z[k.primal_dims] - case.expected) < 1e-5
+        @test minimum(z[k.nonnegative_dims]) > 0
     end
 end
 
@@ -170,10 +165,10 @@ end
                 preferences=[Function[flag ? ((x,t)->[1-x[1]]) : ((x,t)->x[1]^2/2) for flag in flags]],
                 is_prioritized_constraint=[flags],equality_constraints=[nothing],inequality_constraints=[nothing])
             k = builder(p)
-            y = zeros(k.n)
+            y = zeros(k.variable_dimension)
             for level in k.levels[1]
                 for v in level.preference_mu
-                    y[findfirst(isequal(v),k.vars)] = 1.0
+                    y[findfirst(isequal(v),k.z_symbolic)] = 1.0
                 end
             end
             y[k.interior_point_slack_dims] .= slack_values(k,y)
@@ -183,7 +178,7 @@ end
     end
 end
 
-@testset "Sign box and slack rows of the reduced and complete systems" begin
+@testset "Sign box and slack rows of the reduced, complete and Scholtes systems" begin
     # Every inequality, the preference slacks' s ≥ 0 included, is a row expression − σ = 0 with
     # σ ≥ 0: the sign box (nonnegative_dims) is σ and the inequality duals, never s. For the complete
     # systems, slack_targets! evaluates the expressions (slack_expressions) the slacks σ stand for.
@@ -215,31 +210,40 @@ end
         values = Dict(k.z_symbolic .=> y)
         @test G ≈ [Symbolics.value(Symbolics.substitute(e, values)) for e in k.slack_expressions]
     end
+    # The Scholtes system's sign box is every complementarity pair's slack and multiplier (σ, γ; σ̂, ϕ) and
+    # the relaxed pairs' u; its s ≥ 0, too, is a slack row.
+    scholtes = RG.generate_slacked_scholtes_reduced_kkt_system(p)
+    @test (scholtes.kind, scholtes.complementarity) == (:scholtes, :scholtes)
+    pairs = scholtes.complementarity_pairs
+    @test sort(scholtes.nonnegative_dims) == sort([[pair.slack for pair in pairs]; [pair.multiplier for pair in pairs];
+        [pair.u_relaxation for pair in pairs if pair.u_relaxation != 0]])
+    @test isempty(intersect(scholtes.nonnegative_dims, scholtes.preference_slack_dims))
+    σ, s = scholtes.z_symbolic[scholtes.interior_point_slack_dims], scholtes.z_symbolic[scholtes.preference_slack_dims]
+    @test all(v -> any(w -> any(isequal(v - w), scholtes.F_symbolic), σ), s)
 end
 
-@testset "Scholtes projected engine solves the exact complete system" begin
+@testset "ProjectedLM solves the exact complete system" begin
     # The perturbed system is solved down a ρ chain in its own testset above.
-    options = RG.ScholtesOptions(;rho_schedule=[1e-9],max_inner=500,tol=1e-7,tol_inner=1e-10,
-        eta_init=1e-4,eta_schedule=true,eta_max=1e4,proj_eps=1e-8)
+    options = RG.ProjectedLMOptions(;ρ_schedule=[1e-9],max_inner_iters=500,tol=1e-7,tol_inner=1e-10,
+        η=1e-4,η_max=1e4,proj_eps=1e-8)
     for levels in (2,3), players in (1,3), kind in (:quadratic,:nonlinear)
         case = build_benchmark_problem(;num_players=players,levels,kind)
         k = exact(case.problem)
-        @test k.n_comp == 0
-        @test k.n_nc == k.n
-        output = RG.solve(RG.Scholtes(),k,zeros(k.parameter_dimension);z₀=case.expected,options)
+        @test k.kkt_dimension == k.variable_dimension
+        output = RG.solve(RG.ProjectedLM(),k,zeros(k.parameter_dimension);z₀=case.expected,options)
         @test output.status === :solved
-        @test norm(evaluate(k,output.w,1e-9)) < 1e-7
-        @test minimum(output.w[k.nonnegative_dims]) >= 0
-        @test output.z ≈ case.expected atol=1e-6 rtol=0
-        @test RG.is_feasible(case.problem,output.z,zeros(k.parameter_dimension);tol=1e-7).feasible
-        @test output.iters > 1
+        @test norm(evaluate(k,output.z,1e-9)) < 1e-7
+        @test minimum(output.z[k.nonnegative_dims]) > 0
+        @test output.x ≈ case.expected atol=1e-6 rtol=0
+        @test RG.is_feasible(case.problem,output.x,zeros(k.parameter_dimension);tol=1e-7).feasible
+        @test output.newton_steps > 0
     end
     case = build_benchmark_problem(;num_players=1,levels=2,kind=:quadratic)
     k = exact(case.problem)
     # A start outside the sign box is rejected.
-    output = RG.solve(RG.Scholtes(),k,zeros(k.parameter_dimension);z₀=case.expected,options)
-    bad = copy(output.w);bad[first(k.nonnegative_dims)] = -1
-    @test_throws ArgumentError RG.solve(RG.Scholtes(),k,zeros(k.parameter_dimension);w₀=bad,options)
+    output = RG.solve(RG.ProjectedLM(),k,zeros(k.parameter_dimension);z₀=case.expected,options)
+    bad = copy(output.z);bad[first(k.nonnegative_dims)] = -1
+    @test_throws ArgumentError RG.solve(RG.ProjectedLM(),k,zeros(k.parameter_dimension);z₀=bad,options)
 end
 
 
@@ -247,10 +251,10 @@ end
 	case = build_unconstrained_quadratic_problem(; levels)
 
 	kkt = exact(case.problem)
-	complete = RG.solve(RG.Scholtes(), kkt, zeros(kkt.parameter_dimension);
+	complete = RG.solve(RG.ProjectedLM(), kkt, zeros(kkt.parameter_dimension);
 		z₀ = case.z₀,
-		options = RG.ScholtesOptions(; rho_schedule = [1e-9], tol = 1e-9,
-			tol_inner = 1e-11, max_inner = 500, eta_init = 1e-6))
+		options = RG.ProjectedLMOptions(; ρ_schedule = [1e-9], tol = 1e-9,
+			tol_inner = 1e-11, max_inner_iters = 500, η = 1e-6))
 	reduced = solve_with_interior_point(
 		case.problem,
 		case.expected;
@@ -262,9 +266,9 @@ end
 	@test reduced.output.status === :solved
 	@test complete.residual <= 1e-8
 	@test reduced.output.kkt_error <= 1e-8
-	@test isapprox(complete.z, case.expected; atol = IP_ATOL, rtol = 0.0)
+	@test isapprox(complete.x, case.expected; atol = IP_ATOL, rtol = 0.0)
 	@test isapprox(reduced.primals, case.expected; atol = IP_ATOL, rtol = 0.0)
-	@test isapprox(reduced.primals, complete.z; atol = IP_ATOL, rtol = 0.0)
+	@test isapprox(reduced.primals, complete.x; atol = IP_ATOL, rtol = 0.0)
 end
 
 end

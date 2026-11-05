@@ -1,23 +1,30 @@
-# The Scholtes-mode test suite, translated from ScholtesReducedGOOP.jl's test/runtests.jl
+# The Scholtes test suite, translated from ScholtesReducedGOOP.jl's test/runtests.jl
 # (Jingqi Li). The problems are the source's, written against a flat primal `z` and
 # adapted to `ParametricGOOP` by `sproblem` (one block per player, no parameters).
 #
-# Not translated (φ = true only, _port_logs/DECISIONS.md D19): the effective-Γ
-# (`phi = false`) testset, the `:freeze` / `:ideal` bound rules, the `scholtes = false`
-# closure, the `:ldl` backend, `SolverWorkspace`, and the fixed-primal check that needs
-# the source's analysis environment. Backend names: the source's `:klu` is `:klu_eta`
-# here (same saddle matrix), `:pinv` is `:svd`; `:klu_sqrt_eta` is added where the
-# source loops over backends.
+# Part 1, "The Scholtes system": the system of `generate_slacked_scholtes_reduced_kkt_system`,
+# started by `initialize_scholtes!` and solved by `solve(ProjectedLM(), …)`. These are the
+# source's tests of the system and of its solves, moved off the Scholtes engine in step 2.6b
+# (output/refactor/plan.md); the solvers' own tests are in test/solver.jl.
+# Part 2, "The Scholtes engine": the source's tests of the engine's own features (its
+# Jacobian memo, certificate, multistart, non-monotone line search, refinement, in-place
+# Gram refresh and option checks), as ported; they go with the engine (src/scholtes_*.jl).
+#
+# From the engine's port, not translated (φ = true only, _port_logs/DECISIONS.md D19): the
+# effective-Γ (`phi = false`) testset, the `:freeze` / `:ideal` bound rules, the
+# `scholtes = false` closure, the `:ldl` backend, `SolverWorkspace`, and the fixed-primal
+# check that needs the source's analysis environment. Backend names in part 2: the source's
+# `:klu` is `:klu_eta` (same saddle matrix), `:pinv` is `:svd`; `:klu_sqrt_eta` is added
+# where the source loops over backends.
 
 using LinearAlgebra
 using Random
 using SparseArrays
 using BlockArrays: BlockArray
+using Symbolics: Symbolics
 
 const RG = ReducedGOOP
 const θ0 = Float64[]
-# The source's default solver options (its default backend is `:klu`).
-const SRC_DEFAULTS = RG.ScholtesOptions(linear_solver = :klu_eta)
 
 # --- the source's problem model, on ParametricGOOP --------------------------------------
 function sproblem(; ni, objectives, equality = nothing, inequality = nothing, z0 = nothing)
@@ -39,6 +46,76 @@ function sproblem(; ni, objectives, equality = nothing, inequality = nothing, z0
     (; goop, z0 = z0v, ni, N, np = sum(ni), Ki = length.(objectives),
        mEi = goop.equality_dims, mIi = goop.inequality_dims)
 end
+sfeasible(p, z) = RG.is_feasible(p.goop, z, θ0)
+
+# --- part 1: the Scholtes system, started by initialize_scholtes!, solved by ProjectedLM ------
+scholtes_kkt(p; quasi = false, quasi_order = 2) = RG.generate_slacked_scholtes_reduced_kkt_system(
+    p.goop; drop_higher_order_terms = quasi, quasi_order)
+
+"The cold start (the source's own start) at the primal `x` and the level ρ, or with `warm` the warm one."
+scholtes_start(k, x, ρ; warm = false, kwargs...) =
+    RG.initialize_scholtes!(zeros(k.variable_dimension), k, θ0, x, ρ; warm, kwargs...)
+
+"""
+`ProjectedLM` from the cold start at the primal `x` and the first level of `ρ_schedule` (by default the
+source's ladder 1, 0.1, …, 1e-10), with the other options given.
+"""
+function plm_solve(k, x; ρ_schedule = [10.0^(-j) for j in 0:10], kwargs...)
+    RG.solve(RG.ProjectedLM(), k, θ0; z₀ = scholtes_start(k, x, first(ρ_schedule)),
+        options = RG.ProjectedLMOptions(; ρ_schedule, kwargs...))
+end
+plm_solve(p::NamedTuple; kwargs...) = plm_solve(scholtes_kkt(p), p.z0; kwargs...)
+
+"F(z; ρ)."
+function residual(k, z, ρ)
+    F = zeros(k.kkt_dimension)
+    k.F!(F, z; θ = θ0, ρ)
+    F
+end
+
+"∇F(z; ρ)."
+function jacobian(k, z, ρ)
+    J = copy(k.∇F_z!.result_buffer)
+    k.∇F_z!(J, z; θ = θ0, ρ)
+    J
+end
+
+"The slack targets at z, one per complementarity pair: G for σ, then ρ𝟙 − Gₘ ⊙ γₘ for σ̂ (the engine's block a)."
+function targets(k, z, ρ)
+    a = zeros(length(k.slack_expressions))
+    k.slack_targets!(a, z; θ = θ0, ρ)
+    a
+end
+
+"Every complementarity pair's multiplier, γ then ϕ (the engine's block b)."
+multipliers(k, z) = z[[pair.multiplier for pair in k.complementarity_pairs]]
+
+"The relaxed pairs (σ ⊙ γ + u = ρ𝟙) and the exact ones (σ̂ ⊙ ϕ = 0), by position in `complementarity_pairs`."
+relaxed_pairs(k) = findall(pair -> pair.u_relaxation != 0, k.complementarity_pairs)
+exact_pairs(k) = findall(pair -> pair.u_relaxation == 0, k.complementarity_pairs)
+
+"The row of F that puts each pair's slack on its target: G − σ = 0, or ρ𝟙 − Gₘ ⊙ γₘ − σ̂ = 0."
+slack_rows(k) = [only(findall(isequal(e - k.z_symbolic[pair.slack]), k.F_symbolic))
+                 for (e, pair) in zip(k.slack_expressions, k.complementarity_pairs)]
+
+"The Jacobian of the slack targets at z: the slack rows of ∇F, less their −1 in the slack's own column."
+function target_jacobian(k, z, ρ)
+    Ja = Matrix(jacobian(k, z, ρ)[slack_rows(k), :])
+    for (j, pair) in enumerate(k.complementarity_pairs)
+        Ja[j, pair.slack] += 1.0
+    end
+    Ja
+end
+
+"Whether a row of F holds a slack σ or σ̂: the slack and product rows do, the stationarity rows do not."
+function slack_row_filter(k)
+    slacks = Set(Symbolics.unwrap.(k.z_symbolic[[pair.slack for pair in k.complementarity_pairs]]))
+    row -> any(in(slacks), Symbolics.get_variables(row))
+end
+
+# --- part 2: the engine's helpers, as ported -------------------------------------------------
+# The source's default solver options (its default backend is `:klu`).
+const SRC_DEFAULTS = RG.ScholtesOptions(linear_solver = :klu_eta)
 
 skkt(p; quasi = false, quasi_order = 2) = RG.generate_slacked_reduced_kkt_system(
     p.goop; complementarity = :scholtes, drop_higher_order_terms = quasi, quasi_order)
@@ -58,7 +135,6 @@ function ssolve(k, z0; w0 = nothing, trace = nothing, step_trace = nothing, kw..
              options = RG.ScholtesOptions(; kw...))
 end
 ssolve(p::NamedTuple, z0 = p.z0; kw...) = ssolve(skkt(p), z0; kw...)
-sfeasible(p, z) = RG.is_feasible(p.goop, z, θ0)
 F_nc(k, y) = (RG._set_theta!(k, θ0); RG._F_nc(k, y))
 a_of(k, y) = (RG._set_theta!(k, θ0); RG._a(k, y))
 b_of(k, y) = (RG._set_theta!(k, θ0); RG._b(k, y))
@@ -95,7 +171,7 @@ prob_single = sproblem(ni = [1, 1],
     objectives = [[z -> (z[1] - (1.0 + 0.25 * z[2]))^2], [z -> (z[2] - (-1.0 + 0.25 * z[1]))^2]],
     inequality = [z -> [z[1] + 2.0], z -> [z[2] + 2.0]], z0 = [0.0, 0.0])
 
-@testset "Scholtes (ported from ScholtesReducedGOOP.jl)" begin
+@testset "The Scholtes system (ported from ScholtesReducedGOOP.jl)" begin
 
 @testset "problem model" begin
     @test prob_C.N == 2 && prob_C.Ki == [2, 2]
@@ -106,12 +182,26 @@ prob_single = sproblem(ni = [1, 1],
     @test sfeasible(prob_A, [-3.0]).worst ≈ -1.0
 end
 
-@testset "reduced KKT shape" begin
-    k = skkt(prob_C)
-    @test k.n_nc + k.n_comp == 2 * (2 * 1 + 0 + 2 * 1 + 1)   # rows, incl. one exact φ pair per player
-    @test k.n == 2 + 2 * ((2 - 1) * 1 + 0 + 3)              # z, then duals per player
-    @test k.n_comp == 6
-    @test k.n == k.n_nc + k.n_comp                          # K = 2, no equalities: square
+@testset "the merit options are gone" begin
+    base = (; tol = 1e-6, η₀ = 0.0, ϵ₀ = 1e-9, max_inner_iters = 10, max_outer_iters = 1,
+            tightening_rate = 2.0, loosening_rate = 0.5, min_stepsize = 1e-20, verbose = false)
+    @test RG.InteriorPointOptions(; base...) isa RG.InteriorPointOptions
+    for kw in ((; use_feasibility_merit = true), (; feasibility_tol = 1e-3), (; μ₀ = 1.0),
+               (; μ_max = 1e4), (; mu_growth = 10.0))
+        @test_throws MethodError RG.InteriorPointOptions(; base..., kw...)
+    end
+end
+
+@testset "unknowns and rows" begin
+    k = scholtes_kkt(prob_C)
+    # Per player: level 1 relaxes its g (σ, γ, u) and slacks level 2's product (σ̂, ϕ); level 2 relaxes its g.
+    @test (length(relaxed_pairs(k)), length(exact_pairs(k))) == (2 * 2, 2 * 1)
+    # Rows: the stationarity of x at both levels, then two per pair (its slack row and its product).
+    @test k.kkt_dimension == 2 * 2 + 2 * length(k.complementarity_pairs)
+    # Unknowns: x, then per player ψ, σ, γ and u per relaxed pair, σ̂ and ϕ per exact one.
+    @test k.variable_dimension == 2 + 2 * (1 + 3 * 2 + 2 * 1)
+    # K = 2, no equalities: square but for the u's.
+    @test k.variable_dimension - k.kkt_dimension == length(relaxed_pairs(k))
 end
 
 @testset "explicit prioritized-constraint preference slacks" begin
@@ -124,7 +214,7 @@ end
         )
     end
     build_prioritized(goop; codegen = :fast_differentiation) =
-        RG.generate_slacked_reduced_kkt_system(goop; complementarity = :scholtes, codegen)
+        RG.generate_slacked_scholtes_reduced_kkt_system(goop; codegen)
 
     @testset "inherited constraints and current-level differentiation" begin
         # Preference variables and inequalities persist above their source level,
@@ -137,28 +227,29 @@ end
             K = length(flags)
             dimensions = [1 + (flags[level] ? 2 : 0) for level in 1:K]
             inequality_dimensions = [1 + 4count(identity, flags[level:K]) for level in 1:K]
+            labels = [pair.label for pair in k.complementarity_pairs]
+            relaxed, exact = relaxed_pairs(k), exact_pairs(k)
             @test k.primal_dims == 1:1
             @test length(k.preference_slack_dims) == 2count(identity, flags)
-            @test k.n_nc == sum(dimensions)
-            @test k.original_nc == sum(inequality_dimensions)
-            @test k.n_comp - k.original_nc ==
-                  sum((level - 1) * inequality_dimensions[level] for level in 2:K)
-            @test k.u_index[1:k.original_nc] == collect(1:k.original_nc)
-            @test all(iszero, k.u_index[(k.original_nc + 1):end])
-            @test all(l.kind === :phi_upper for l in k.labels[(k.original_nc + 1):end])
+            @test k.kkt_dimension == sum(dimensions) + 2length(labels)
+            @test relaxed == 1:sum(inequality_dimensions) # every level's G, then the lower products
+            @test length(exact) == sum((level - 1) * inequality_dimensions[level] for level in 2:K)
+            @test all(l.kind === :phi_upper for l in labels[exact])
 
-            RG._set_theta!(k, θ0); RG._set_rho!(k, 0.1)
-            columns = RG._gamma_columns(k)
-            @test length(unique(columns[1:k.original_nc])) == k.original_nc
-            y = zeros(k.n)
+            columns = [pair.multiplier for pair in k.complementarity_pairs]
+            @test allunique(columns[relaxed])
+            y = zeros(k.variable_dimension)
             y[1] = 0.25
             y[k.preference_slack_dims] .= 0.2 .+ 0.1 .* collect(1:length(k.preference_slack_dims))
-            y[columns[1:k.original_nc]] .= 0.01 .* collect(1:k.original_nc)
+            y[columns[relaxed]] .= 0.01 .* collect(1:length(relaxed))
             # Keeping all policy and phi multipliers zero isolates the direct terms.
-            values = F_nc(k, y)
-            a = a_of(k, y); b = b_of(k, y)
-            k.J_a!(k.Ja_buf, y, θ0, 0.1)
-            Ja = Matrix(k.Ja_buf)
+            values = residual(k, y, 0.1)
+            a, b = targets(k, y, 0.1), multipliers(k, y)
+            Ja = target_jacobian(k, y, 0.1)
+            # F lists a level's stationarity rows, then two rows per pair of that level (its slack row and its
+            # product), then the levels below: level ℓ's stationarity follows the rows of the levels above it.
+            level_rows(level) = dimensions[level] + 2count(l -> l.level == level, labels)
+            stationarity_row(level, component) = sum(level_rows, 1:(level - 1); init = 0) + 1 + component
             expected_slack_rows = Int[]
             slack_number = 0
             for source in 1:K
@@ -168,7 +259,7 @@ end
                     slack_column = k.preference_slack_dims[slack_number]
                     for level in 1:source
                         row(kind) = only(findall(l -> l.kind === kind && l.level == level &&
-                            l.lower_level == source && l.inequality == component, k.labels))
+                            l.lower_level == source && l.inequality == component, labels))
                         pref_row, bound_row = row(:preference), row(:preference_slack)
                         level == source && push!(expected_slack_rows, pref_row)
                         @test a[bound_row] == y[slack_column]
@@ -176,8 +267,7 @@ end
                         @test findall(!iszero, Ja[bound_row, :]) == [slack_column]
                         @test Ja[bound_row, slack_column] == Ja[pref_row, slack_column] == 1.0
                         if level == source
-                            stationarity_row = sum(dimensions[1:(level - 1)]; init = 0) + 1 + component
-                            @test values[stationarity_row] ≈ 1.0 - b[pref_row] - b[bound_row]
+                            @test values[stationarity_row(level, component)] ≈ 1.0 - b[pref_row] - b[bound_row]
                         end
                     end
                 end
@@ -186,43 +276,43 @@ end
             # Each exact phi pair bounds one lower-level relaxed product, including
             # products for h + preference_slack and preference_slack itself.
             inherited_rows = Int[]
-            for row in (k.original_nc + 1):k.n_comp
-                source_column = only(findall(!iszero, Ja[row, columns[1:k.original_nc]]))
+            for row in exact
+                source_column = only(findall(!iszero, Ja[row, columns[relaxed]]))
                 push!(inherited_rows, source_column)
-                @test k.labels[source_column].level == k.labels[row].lower_level
+                @test labels[source_column].level == labels[row].lower_level
                 @test a[row] ≈ 0.1 - a[source_column] * b[source_column]
             end
-            for row in 1:k.original_nc
-                @test count(==(row), inherited_rows) == k.labels[row].level - 1
+            for row in relaxed
+                @test count(==(row), inherited_rows) == labels[row].level - 1
             end
             # An inherited slack can affect an upper Lagrangian without acquiring
             # an upper stationarity equation: it is an induced variable there.
-            y[columns[(k.original_nc + 1):end]] .= 0.02
+            y[columns[exact]] .= 0.02
             for source in 1:K, component in 1:2, level in 1:(source - 1)
                 flags[source] || continue
                 source_slack = 2count(identity, flags[1:(source - 1)]) + component
                 slack_column = k.preference_slack_dims[source_slack]
-                original_rows = findall(l -> l.kind !== :phi_upper && l.level == level, k.labels)
-                phi_rows = findall(l -> l.kind === :phi_upper && l.level == level, k.labels)
+                original_rows = findall(l -> l.kind !== :phi_upper && l.level == level, labels)
+                phi_rows = findall(l -> l.kind === :phi_upper && l.level == level, labels)
                 function upper_lagrangian(at)
                     first_slack = 2count(identity, flags[1:(level - 1)]) + 1
                     objective = flags[level] ? sum(at[k.preference_slack_dims[
                         first_slack:(first_slack + 1)]]) : (at[1] - 0.5)^2
-                    av, bv = a_of(k, at), b_of(k, at)
+                    av, bv = targets(k, at, 0.1), multipliers(k, at)
                     objective - sum(av[row] * bv[row] for row in original_rows) -
                         sum(av[row] * bv[row] for row in phi_rows)
                 end
                 own_pref = only(findall(l -> l.kind === :preference && l.level == level &&
-                    l.lower_level == source && l.inequality == component, k.labels))
+                    l.lower_level == source && l.inequality == component, labels))
                 own_bound = only(findall(l -> l.kind === :preference_slack && l.level == level &&
-                    l.lower_level == source && l.inequality == component, k.labels))
+                    l.lower_level == source && l.inequality == component, labels))
                 contribution = 0.0
                 for lower in (level + 1):source, kind in (:preference, :preference_slack)
                     original_row = only(findall(l -> l.kind === kind && l.level == lower &&
-                        l.lower_level == source && l.inequality == component, k.labels))
+                        l.lower_level == source && l.inequality == component, labels))
                     inequality = original_row - sum(inequality_dimensions[1:(lower - 1)]; init = 0)
                     phi_row = only(findall(l -> l.kind === :phi_upper && l.level == level &&
-                        l.lower_level == lower && l.inequality == inequality, k.labels))
+                        l.lower_level == lower && l.inequality == inequality, labels))
                     contribution += y[columns[phi_row]] * b[original_row]
                 end
                 plus, minus = copy(y), copy(y)
@@ -243,25 +333,15 @@ end
         ], (false, true, true))
         native = build_prioritized(goop; codegen = :native)
         fd = build_prioritized(goop)
-        @test string.(native.vars) == string.(fd.vars)
-        y = 0.2 .* cos.(collect(1:native.n))
+        @test string.(native.z_symbolic) == string.(fd.z_symbolic)
+        y = 0.2 .* cos.(collect(1:(native.variable_dimension)))
         rho, h = 0.2, 1e-6
-        direction = sin.(collect(1:native.n))
-        for k in (native, fd)
-            RG._set_theta!(k, θ0); RG._set_rho!(k, rho)
-        end
-        for (evaluate, jacobian, buffer) in (
-            (F_nc, k -> k.J_nc!, k -> k.Jnc_buf),
-            (a_of, k -> k.J_a!, k -> k.Ja_buf),
-            (b_of, k -> k.J_b!, k -> k.Jb_buf),
-        )
-            @test evaluate(native, y) ≈ evaluate(fd, y) atol = 1e-12 rtol = 1e-12
-            jacobian(native)(buffer(native), y, θ0, rho)
-            jacobian(fd)(buffer(fd), y, θ0, rho)
-            @test Matrix(buffer(native)) ≈ Matrix(buffer(fd)) atol = 1e-12 rtol = 1e-12
-            numeric = (evaluate(fd, y + h * direction) - evaluate(fd, y - h * direction)) / (2h)
-            @test numeric ≈ buffer(fd) * direction atol = 2e-7 rtol = 2e-7
-        end
+        direction = sin.(collect(1:(native.variable_dimension)))
+        @test residual(native, y, rho) ≈ residual(fd, y, rho) atol = 1e-12 rtol = 1e-12
+        @test targets(native, y, rho) ≈ targets(fd, y, rho) atol = 1e-12 rtol = 1e-12
+        @test Matrix(jacobian(native, y, rho)) ≈ Matrix(jacobian(fd, y, rho)) atol = 1e-12 rtol = 1e-12
+        numeric = (residual(fd, y + h * direction, rho) - residual(fd, y - h * direction, rho)) / (2h)
+        @test numeric ≈ jacobian(fd, y, rho) * direction atol = 2e-7 rtol = 2e-7
     end
 
     @testset "sum of preference slacks preserves the L1 minimizer continuum" begin
@@ -273,129 +353,370 @@ end
             (x, θ) -> [x[1], -1.0 - x[1]],
         ], (false, true); inequality = nothing)
         k = build_prioritized(goop)
-        columns = RG._gamma_columns(k)
+        pairs = k.complementarity_pairs
         # Two full boundary certificates exhibit the L1 continuum without imposing
         # uniqueness on the reduced outer KKT system.
         for x in (-0.75, -0.5)
-            y = zeros(k.n)
-            y[1] = x
-            y[k.preference_slack_dims] .= [-x, 1.0 + x]
-            for (row, label) in enumerate(k.labels)
-                if label.kind === :preference
-                    y[columns[row]] = label.level == 2 ? 1.0 :
-                        (label.inequality == 1 ? 2(x + 0.75) : 0.0)
+            z = zeros(k.variable_dimension)
+            z[1] = x
+            z[k.preference_slack_dims] .= [-x, 1.0 + x]
+            for pair in pairs
+                if pair.label.kind === :preference
+                    z[pair.multiplier] = pair.label.level == 2 ? 1.0 :
+                        (pair.label.inequality == 1 ? 2(x + 0.75) : 0.0)
                 end
             end
-            RG._set_theta!(k, θ0); RG._set_rho!(k, 0.0)
-            a, b = a_of(k, y), b_of(k, y)
-            @test all(>=(0), a) && all(>=(0), b)
-            witness = [y; a; zeros(RG._n_u(k))]
-            residuals = RG.ScholtesResiduals(k)
-            @test norm(RG._resid!(residuals, zeros(residuals.m), zeros(k.n_comp), witness, 0.0)) == 0.0
-            @test sum(y[k.preference_slack_dims]) == 1.0
+            # The slacks on their targets at ρ = 0 (σ = G, σ̂ = −Gₘ ⊙ γₘ), ϕ = 0 and u = 0: a root of F(·; 0).
+            a = targets(k, z, 0.0)
+            @test all(>=(0), a) && all(>=(0), multipliers(k, z))
+            z[[pair.slack for pair in pairs]] .= a
+            @test norm(residual(k, z, 0.0)) == 0.0
+            @test sum(z[k.preference_slack_dims]) == 1.0
         end
-        cold = RG._initial_w(k, [-0.25], 0.1; gamma_cols = RG._gamma_columns(k))
+        cold = scholtes_start(k, [-0.25], 0.1)
         @test all(>(0), cold[k.preference_slack_dims])
-        @test all(>(0), a_of(k, cold[1:k.n])[1:k.original_nc])
-        options = RG.ScholtesOptions(rho_schedule = 10.0 .^ collect(-2:-1:-10),
-            linear_solver = :normal, max_inner = 1000, tol = 1e-7, tol_inner = 1e-11)
-        result = RG.solve(RG.Scholtes(), k, θ0; z₀ = [-0.25], options)
-        @test result.converged
-        @test length(result.z) == 1
-        @test result.z == result.w[k.primal_dims]
-        @test all(isfinite, result.z)
-        @test result.preference_slacks == result.w[k.preference_slack_dims]
-        @test result.preference_slacks ≈ [-result.z[1], 1.0 + result.z[1]] atol = 1e-4
-        @test sum(result.preference_slacks) ≈ 1.0 atol = 1e-5
-        eq_cols = findall(v -> startswith(string(v), "ψ_"), k.vars)
-        w0 = RG.scholtes_warm_start(k, θ0, result.z, 1e-10;
-            eq_cols, eq = result.w[eq_cols], preference_slacks = result.preference_slacks)
-        @test w0[k.primal_dims] == result.z
+        @test all(>(0), targets(k, cold, 0.1)[relaxed_pairs(k)])
+        result = plm_solve(k, [-0.25]; ρ_schedule = 10.0 .^ collect(-2:-1:-10), max_inner_iters = 1000,
+            tol = 1e-7, tol_inner = 1e-11)
+        @test result.status === :solved
+        @test length(result.x) == 1
+        @test result.x == result.z[k.primal_dims]
+        @test all(isfinite, result.x)
+        preference_slacks = result.z[k.preference_slack_dims]
+        @test preference_slacks ≈ [-result.x[1], 1.0 + result.x[1]] atol = 1e-4
+        @test sum(preference_slacks) ≈ 1.0 atol = 1e-5
+        eq_cols = findall(v -> startswith(string(v), "ψ_"), k.z_symbolic)
+        w0 = scholtes_start(k, result.x, 1e-10; warm = true, eq_cols, eq = result.z[eq_cols], preference_slacks)
+        @test w0[k.primal_dims] == result.x
         @test all(>(0), w0[k.preference_slack_dims])
-        @test all(>(0), a_of(k, w0[1:k.n])[1:k.original_nc])
-        @test all(w0[k.preference_slack_dims] .>= result.preference_slacks)
-        @test w0[k.preference_slack_dims] ≈ result.preference_slacks atol = 1e-7
-        for invalid_seed in ([1.0], [NaN, 1.0], [1.0, Inf])
-            @test_throws ArgumentError RG.scholtes_warm_start(k, θ0, result.z, 1e-10;
-                preference_slacks = invalid_seed)
-        end
-        for backend in (:normal, :klu_eta, :klu_sqrt_eta, :svd)
-            warm = RG.solve(RG.Scholtes(), k, θ0; w₀ = w0,
-                options = RG.ScholtesOptions(linear_solver = backend,
-                    rho_schedule = [1e-10], max_inner = 2, tol = 0.0, tol_inner = 0.0))
-            @test warm.z == warm.w[k.primal_dims]
-            @test length(warm.z) == 1
-            @test all(isfinite, warm.preference_slacks)
+        @test all(>(0), targets(k, w0, 1e-10)[relaxed_pairs(k)])
+        @test all(w0[k.preference_slack_dims] .>= preference_slacks)
+        @test w0[k.preference_slack_dims] ≈ preference_slacks atol = 1e-7
+        for linear_solver in (:normal, :klu, :ldl)
+            options = RG.ProjectedLMOptions(; linear_solver, ρ_schedule = [1e-10], max_inner_iters = 2, tol = 0.0,
+                tol_inner = 0.0)
+            warm = RG.solve(RG.ProjectedLM(), k, θ0; z₀ = w0, options)
+            @test warm.x == warm.z[k.primal_dims]
+            @test length(warm.x) == 1
+            @test all(isfinite, warm.z[k.preference_slack_dims])
         end
     end
 end
 
-@testset "quasi-stationarity: shape is unchanged" begin
-    for prob in (prob_C, prob_E, prob_F, prob_G)
-        ke, kq = skkt(prob; quasi = false), skkt(prob; quasi = true)
-        @test string.(kq.vars) == string.(ke.vars)
-        @test kq.n_nc == ke.n_nc && kq.n_comp == ke.n_comp
-        @test length(kq.S_nc[1]) <= length(ke.S_nc[1])
-        @test issubset(Set(zip(kq.S_nc...)), Set(zip(ke.S_nc...)))
+@testset "the quasi system: the same unknowns, only identically zero rows dropped" begin
+    # The quasi system keeps the full system's unknowns, complementarity pairs and slack targets, so the same
+    # starts serve both. Its truncation can leave stationarity rows identically zero; those are dropped, as in
+    # the interior-point quasi system (none on the source's problems, three on the 3-player benchmark).
+    benchmark = build_benchmark_problem(; num_players = 3, levels = 2, kind = :quadratic).problem
+    for (goop, dropped) in ((prob_C.goop, 0), (prob_E.goop, 0), (prob_F.goop, 0), (prob_G.goop, 0), (benchmark, 3))
+        ke = RG.generate_slacked_scholtes_reduced_kkt_system(goop)
+        kq = RG.generate_slacked_scholtes_reduced_kkt_system(goop; drop_higher_order_terms = true)
+        @test string.(kq.z_symbolic) == string.(ke.z_symbolic)
+        @test kq.complementarity_pairs == ke.complementarity_pairs
+        @test isequal(kq.slack_expressions, ke.slack_expressions)
+        @test kq.kkt_dimension == ke.kkt_dimension - dropped
+        @test !any(iszero, kq.F_symbolic)
+        # Every dropped row is a stationarity row: the slack and product rows are the full system's, in order.
+        has_slack = slack_row_filter(ke)
+        @test isequal(filter(has_slack, kq.F_symbolic), filter(has_slack, ke.F_symbolic))
+        @test count(has_slack, kq.F_symbolic) == 2length(kq.complementarity_pairs)
+        @test nnz(kq.∇F_z!.result_buffer) <= nnz(ke.∇F_z!.result_buffer)
     end
-    @test_throws ArgumentError skkt(prob_E; quasi = true, quasi_order = 0)
+    @test_throws ArgumentError scholtes_kkt(prob_E; quasi = true, quasi_order = 0)
 end
 
 @testset "quasi == reduced on quadratic objectives over affine constraints" begin
     Random.seed!(5)
     for prob in (prob_A, prob_B, prob_C, prob_D, prob_E, prob_F)
-        ke, kq = skkt(prob; quasi = false), skkt(prob; quasi = true)
-        RG._set_rho!(ke, 0.3); RG._set_rho!(kq, 0.3)
+        ke, kq = scholtes_kkt(prob; quasi = false), scholtes_kkt(prob; quasi = true)
+        @test kq.kkt_dimension == ke.kkt_dimension
         worst = 0.0
         for _ in 1:25
-            y = randn(ke.n)
-            worst = max(worst, maximum(abs, F_nc(kq, y) .- F_nc(ke, y)),
-                        maximum(abs, a_of(kq, y) .- a_of(ke, y); init = 0.0),
-                        maximum(abs, b_of(kq, y) .- b_of(ke, y); init = 0.0))
+            z = randn(ke.variable_dimension)
+            worst = max(worst, maximum(abs, residual(kq, z, 0.3) .- residual(ke, z, 0.3)),
+                        maximum(abs, targets(kq, z, 0.3) .- targets(ke, z, 0.3); init = 0.0))
         end
         @test worst == 0.0
-        @test kq.S_nc == ke.S_nc
+        @test findnz(kq.∇F_z!.result_buffer)[1:2] == findnz(ke.∇F_z!.result_buffer)[1:2]
     end
     for prob in (prob_E, prob_F)
-        re = ssolve(skkt(prob; quasi = false), prob.z0)
-        rq = ssolve(skkt(prob; quasi = true), prob.z0)
+        re = plm_solve(scholtes_kkt(prob; quasi = false), prob.z0)
+        rq = plm_solve(scholtes_kkt(prob; quasi = true), prob.z0)
         @test rq.z == re.z
-        @test rq.iters == re.iters
+        @test rq.residual_evaluations == re.residual_evaluations
     end
 end
 
 @testset "quasi truncates for real on non-quadratic data" begin
-    ke, kq = skkt(prob_G; quasi = false), skkt(prob_G; quasi = true)
-    RG._set_rho!(ke, 0.3); RG._set_rho!(kq, 0.3)
+    ke, kq = scholtes_kkt(prob_G; quasi = false), scholtes_kkt(prob_G; quasi = true)
     Random.seed!(6)
-    y = randn(ke.n)
-    @test !isapprox(F_nc(kq, y), F_nc(ke, y); atol = 1e-8)
-    @test length(kq.S_nc[1]) < length(ke.S_nc[1])
-    re, rq = ssolve(ke, prob_G.z0), ssolve(kq, prob_G.z0)
-    @test re.converged && rq.converged
-    @test rq.sign_min > 0
-    @test rq.z ≈ prob_G_z atol = 1e-5
-    @test rq.z ≈ re.z atol = 1e-6
+    z = randn(ke.variable_dimension)
+    @test !isapprox(residual(kq, z, 0.3), residual(ke, z, 0.3); atol = 1e-8)
+    @test nnz(kq.∇F_z!.result_buffer) < nnz(ke.∇F_z!.result_buffer)
+    re, rq = plm_solve(ke, prob_G.z0), plm_solve(kq, prob_G.z0)
+    @test re.status === :solved && rq.status === :solved
+    @test minimum(rq.z[kq.nonnegative_dims]) > 0
+    @test rq.x ≈ prob_G_z atol = 1e-5
+    @test rq.x ≈ re.x atol = 1e-6
 end
 
 @testset "quasi_order = 1 keeps first-order information only" begin
-    k1 = skkt(prob_E; quasi = true, quasi_order = 1)
-    psi_cols = findall(v -> startswith(string(v), "ψ_"), k1.vars)
+    k1 = scholtes_kkt(prob_E; quasi = true, quasi_order = 1)
+    psi_cols = findall(v -> startswith(string(v), "ψ_"), k1.z_symbolic)
     @test !isempty(psi_cols)
-    @test isempty(intersect(Set(k1.S_nc[2]), Set(psi_cols)))
+    # ψ multiplies the policy gradient π, whose derivative is second-order: no row depends on ψ.
+    @test all(j -> isempty(nzrange(k1.∇F_z!.result_buffer, j)), psi_cols)
     Random.seed!(8)
-    ke, kq = skkt(prob_G; quasi = false), skkt(prob_G; quasi = true, quasi_order = 10)
-    RG._set_rho!(ke, 0.3); RG._set_rho!(kq, 0.3)
-    y = randn(ke.n)
-    @test F_nc(kq, y) == F_nc(ke, y)
+    ke, kq = scholtes_kkt(prob_G; quasi = false), scholtes_kkt(prob_G; quasi = true, quasi_order = 10)
+    z = randn(ke.variable_dimension)
+    @test residual(kq, z, 0.3) == residual(ke, z, 0.3)
 end
 
 @testset "quasi composes with explicit Scholtes complementarity" begin
-    r = ssolve(skkt(prob_E; quasi = true), prob_E.z0)
-    @test r.converged && r.sign_min > 0
-    @test r.z[1] ≈ 0.5 atol = 1e-5
-    @test r.z[1] + r.z[2] ≈ 1.0 atol = 1e-5
+    k = scholtes_kkt(prob_E; quasi = true)
+    r = plm_solve(k, prob_E.z0)
+    @test r.status === :solved && minimum(r.z[k.nonnegative_dims]) > 0
+    @test r.x[1] ≈ 0.5 atol = 1e-5
+    @test r.x[1] + r.x[2] ≈ 1.0 atol = 1e-5
 end
+
+@testset "inactive constraint, all linear solvers" begin
+    k = scholtes_kkt(prob_A)
+    for linear_solver in (:normal, :klu, :ldl)
+        r = plm_solve(k, [1.0]; linear_solver)
+        @test r.status === :solved
+        @test r.x[1] ≈ 0.0 atol = 1e-6
+        @test minimum(r.z[k.nonnegative_dims]) > 0
+        @test r.svd_fallbacks == 0
+    end
+end
+
+@testset "active constraint and coupled game" begin
+    r = plm_solve(prob_B)
+    @test r.status === :solved && abs(r.x[1]) < 1e-5
+    r = plm_solve(prob_C)
+    @test r.status === :solved
+    @test r.x ≈ [0.8, -0.8] atol = 1e-5
+end
+
+@testset "warm start reproduces the solve" begin
+    k = scholtes_kkt(prob_C)
+    r1 = plm_solve(k, prob_C.z0)
+    r2 = RG.solve(RG.ProjectedLM(), k, θ0; z₀ = r1.z, options = RG.ProjectedLMOptions(; ρ_schedule = [r1.ρ], η = r1.η))
+    @test r2.status === :solved
+    @test r2.x ≈ r1.x atol = 1e-8
+    @test r2.residual_evaluations <= r1.residual_evaluations
+    @test_throws ArgumentError RG.solve(RG.ProjectedLM(), k, θ0; z₀ = zeros(3))
+end
+
+@testset "a start on the boundary is rejected, not silently accepted" begin
+    # prob_A's g(z) = z + 2 is 0 at z = −2, and the cold start needs g > 0 strictly; a start that is not
+    # positive on nonnegative_dims is refused by the solver.
+    k = scholtes_kkt(prob_A)
+    @test_throws ArgumentError plm_solve(k, [-2.0])
+    z = scholtes_start(k, [1.0], 1.0)
+    z[first(k.nonnegative_dims)] = 0.0
+    @test_throws ArgumentError RG.solve(RG.ProjectedLM(), k, θ0; z₀ = z)
+end
+
+@testset "the projected steps stay in the sign box and lower ‖F‖" begin
+    # Every iterate is positive on nonnegative_dims (σ, γ, ϕ, σ̂, u), and every accepted step lowers
+    # ‖F(z; ρ)‖ strictly within a stage.
+    for prob in (prob_A, prob_B, prob_single)
+        k = scholtes_kkt(prob)
+        r = plm_solve(k, prob.z0; record_convergence = true)
+        @test r.status === :solved
+        @test minimum(r.z[k.nonnegative_dims]) > 0
+        history, ρs = r.relaxed_residual_history, r.ρ_history
+        @test all(history[i + 1] < history[i] for i in 1:(length(history) - 1) if ρs[i + 1] == ρs[i])
+    end
+    @test_throws ArgumentError plm_solve(prob_A; τ = 1.5)
+end
+
+@testset "every linear solver solves with the projected steps" begin
+    for prob in (prob_A, prob_single), linear_solver in (:normal, :klu, :ldl)
+        k = scholtes_kkt(prob)
+        r = plm_solve(k, prob.z0; linear_solver)
+        @test r.status === :solved
+        @test minimum(r.z[k.nonnegative_dims]) > 0
+    end
+end
+
+@testset "an explicit ρ_schedule is honoured exactly" begin
+    k = scholtes_kkt(prob_C)
+    r = plm_solve(k, prob_C.z0; ρ_schedule = [1.0, 1e-3], max_inner_iters = 40, record_convergence = true)
+    @test r.ρ in (1.0, 1e-3)
+    @test issubset(r.ρ_history, [1.0, 1e-3])
+    @test minimum(r.z[k.nonnegative_dims]) > 0
+end
+
+@testset "the returned ρ is the level the walk actually ended on" begin
+    sched = [1.0, 1e-2, 1e-4]
+    for prob in (prob_A, prob_C, prob_D)
+        k = scholtes_kkt(prob)
+        r = plm_solve(k, prob.z0; ρ_schedule = sched, tol = 0.0)
+        @test r.ρ == sched[end]
+        @test minimum(r.z[k.nonnegative_dims]) > 0
+    end
+    rc = plm_solve(prob_A; ρ_schedule = sched)
+    @test rc.status === :solved && rc.ρ in sched
+end
+
+@testset "inequalities hold exactly at a Scholtes solution" begin
+    # Active constraints (prob_B, prob_D's and prob_E's box) end ON their bound, not past
+    # it. prob_F is left out: it does not converge under the default options, in the
+    # source either (Step 1 reference: ‖K₀‖ ≈ 4e-4).
+    for prob in (prob_B, prob_C, prob_D, prob_E)
+        r = plm_solve(prob)
+        @test r.status === :solved
+        @test sfeasible(prob, r.x).worst >= -1e-8
+    end
+end
+
+@testset "the rectangularity surplus, exactly" begin
+    surplus(K, n, mE) = ((K - 1) * (K - 2) ÷ 2) * n + (K - 1) * mE
+    mk(K, n, mE, mI) = sproblem(ni = [n],
+        objectives = [[let k = k; z -> sum(z[i]^2 for i in 1:n) + k * z[1]; end for k in 1:K]],
+        equality = mE > 0 ? [let m = mE; z -> [z[j] - 0.1j for j in 1:m]; end] : nothing,
+        inequality = mI > 0 ? [let m = mI; z -> [z[j] + 2.0 for j in 1:m]; end] : nothing,
+        z0 = zeros(n))
+    # Each complementarity pair adds its slack and two rows (its slack row and its product), and each
+    # relaxed one also its u: the unknowns beyond the rows are the reduced system's surplus and the u's.
+    excess(k) = k.variable_dimension - k.kkt_dimension - length(relaxed_pairs(k))
+    for K in 2:4, n in (2, 4), mE in (0, 1), mI in (1, 2)
+        @test excess(scholtes_kkt(mk(K, n, mE, mI))) == surplus(K, n, mE)
+    end
+    for K in 3:4, n in (2,), mE in (0, 1), mI in (0, 1)
+        @test excess(scholtes_kkt(mk(K, n, mE, mI))) > 0
+    end
+    for n in (2, 4), mI in (1, 2)
+        @test excess(scholtes_kkt(mk(2, n, 0, mI))) == 0
+        @test excess(scholtes_kkt(mk(2, n, 1, mI))) > 0
+    end
+end
+
+@testset "explicit gamma / nonnegative inequality phi" begin
+    p = sproblem(ni = [1], objectives = [[z -> -z[1], z -> z[1]]], inequality = [z -> [z[1]]], z0 = [1.0])
+    k = scholtes_kkt(p)
+    rho = 0.1
+    pairs = k.complementarity_pairs
+    @test all(!startswith(string(v), "Gam") for v in k.z_symbolic)
+    @test length(relaxed_pairs(k)) == 2
+    @test length(pairs) == 3 && exact_pairs(k) == [3]
+    cols = [pair.multiplier for pair in pairs]
+    w = scholtes_start(k, p.z0, rho)
+    @test all(>(0), w[k.nonnegative_dims])
+    @test all(>(0), w[cols])
+    @test targets(k, w, rho)[3] ≈ 0.9rho
+    # exact boundary witness: γ₁ = 0, γ₂ = 1, φ = 1, z = ρ; σ on G (= ρ), σ̂ on ρ − G₂γ₂ (= 0), u = ρ − σ ⊙ γ
+    y = zeros(k.variable_dimension)
+    y[1] = rho
+    y[cols] = [0.0, 1.0, 1.0]
+    y[[pair.slack for pair in pairs]] .= targets(k, y, rho)
+    for pair in pairs[relaxed_pairs(k)]
+        y[pair.u_relaxation] = rho - y[pair.slack] * y[pair.multiplier]
+    end
+    @test norm(residual(k, y, rho)) < 1e-14
+    yy = copy(y)
+    yy[cols[3]] = -1
+    @test residual(k, yy, rho)[1] ≈ -2
+    # A start outside the sign box (ϕ < 0, or γ < 0) is refused.
+    @test_throws ArgumentError RG.solve(RG.ProjectedLM(), k, θ0; z₀ = yy)
+    yy = copy(w)
+    yy[cols[1]] = -0.02
+    @test_throws ArgumentError RG.solve(RG.ProjectedLM(), k, θ0; z₀ = yy)
+    v = sin.(1.0:(k.variable_dimension))
+    h = 1e-6
+    @test norm((residual(k, w + h * v, rho) - residual(k, w - h * v, rho)) / (2h) - jacobian(k, w, rho) * v) < 1e-8
+    # K₀ is F at ρ = 0 with u = 0.
+    K = zeros(k.kkt_dimension)
+    k.K₀!(K, w; θ = θ0)
+    wzero = copy(w)
+    wzero[[pair.u_relaxation for pair in pairs[relaxed_pairs(k)]]] .= 0
+    @test K == residual(k, wzero, 0.0)
+    # One projected step of every linear solver keeps ϕ (and the rest of the sign box) positive.
+    for linear_solver in (:normal, :klu, :ldl)
+        options = RG.ProjectedLMOptions(; ρ_schedule = [rho], max_inner_iters = 1, tol = 0.0, tol_inner = 0.0,
+            linear_solver)
+        r = RG.solve(RG.ProjectedLM(), k, θ0; z₀ = w, options)
+        @test r.newton_steps == 1
+        @test all(isfinite, r.z)
+        @test r.z[cols[3]] > 0
+        @test minimum(r.z[k.nonnegative_dims]) > 0
+    end
+    p3 = sproblem(ni = [1], objectives = [[z -> z[1], z -> z[1], z -> z[1]]], inequality = [z -> [z[1]]], z0 = [1.0])
+    k3 = scholtes_kkt(p3)
+    @test length(relaxed_pairs(k3)) == 3
+    @test length(k3.complementarity_pairs) == 6
+    @test all(pair -> pair.label.kind === :phi_upper && pair.u_relaxation == 0, k3.complementarity_pairs[4:end])
+    r = plm_solve(k, p.z0; ρ_schedule = [0.1, 0.01], max_inner_iters = 1000, tol = 0.0, tol_inner = 1e-9)
+    @test norm(residual(k, r.z, r.ρ)) < 1e-8
+    @test r.x[1] ≈ 0.01 atol = 1e-8
+    @test maximum(abs, [r.z[pair.slack] * r.z[pair.multiplier] for pair in pairs[exact_pairs(k)]]) < 1e-8
+    @test minimum(r.z[k.nonnegative_dims]) > 0
+    single = sproblem(ni = [1], objectives = [[z -> z[1]]], inequality = [z -> [z[1]]], z0 = [1.0])
+    r = plm_solve(single)
+    @test r.status === :solved && abs(r.x[1]) < 1e-5
+    emptyprob = sproblem(ni = [1], objectives = [[z -> z[1]^2]], z0 = [1.0])
+    r = plm_solve(emptyprob)
+    @test r.status === :solved && abs(r.x[1]) < 1e-7
+    # ρ enters the exact pairs' targets ρ𝟙 − Gₘ ⊙ γₘ.
+    @test targets(k, w, 0.2)[3] - targets(k, w, 0.1)[3] ≈ 0.1
+end
+
+@testset "initialize_scholtes!: the warm and cold starts" begin
+    # Warm (a continuation start): s = max(seed, margin, margin − h) with margin = max(s_floor, 0.1ρ),
+    # σ = max(G, s_floor), γ = 0.1ρ / max(σ, ρ), σ̂ = max(ρ𝟙 − Gₘ ⊙ γₘ, min(s_floor, 0.1ρ)),
+    # ϕ = 0.1ρ / max(σ̂, ρ), u = max(ρ − σ ⊙ γ, 1e-6ρ). Cold (the source's start): margin 1 and no seed,
+    # σ = G > 0, γ = 0.1ρ / σ, σ̂ = ρ𝟙 − Gₘ ⊙ γₘ, ϕ = 0.1ρ / σ̂, u likewise. G, ρ𝟙 − Gₘ ⊙ γₘ and h are the
+    # system's slack targets.
+    prioritized = RG.ParametricGOOP(BlockArray([0.0], [1]), BlockArray(Float64[], [0]);
+        preferences = [Function[(x, t) -> [1 - x[1]], (x, t) -> x[1]^2 / 2, (x, t) -> [x[1] + 2]]],
+        is_prioritized_constraint = [[true, false, true]], equality_constraints = [nothing],
+        inequality_constraints = [(x, t) -> [3 - x[1]]])
+    kp = RG.generate_slacked_scholtes_reduced_kkt_system(prioritized)
+    s_floor = 1e-8
+    for (k, x) in ((scholtes_kkt(prob_E), [0.1, 0.2]), (kp, [0.5])), ρ in (1.0, 1e-3), warm in (true, false)
+        z = scholtes_start(k, x, ρ; warm)
+        pairs, a = k.complementarity_pairs, targets(k, z, ρ)
+        @test z[k.primal_dims] == x
+        @test all(>(0), z[k.nonnegative_dims])
+        unslacked = copy(z)
+        unslacked[k.preference_slack_dims] .= 0.0
+        h = targets(k, unslacked, ρ)[k.preference_slack_rows]
+        margin = warm ? max(s_floor, 0.1ρ) : 1.0
+        @test z[k.preference_slack_dims] == max.(margin, margin .- h)
+        for j in relaxed_pairs(k)
+            pair = pairs[j]
+            σ, γ, target = z[pair.slack], z[pair.multiplier], a[j]
+            @test σ == (warm ? max(target, s_floor) : target)
+            @test γ == (warm ? 0.1ρ / max(σ, ρ) : 0.1 * ρ / σ)
+            @test z[pair.u_relaxation] == max(ρ - σ * γ, 1e-6ρ)
+        end
+        for j in exact_pairs(k)
+            pair = pairs[j]
+            σ̂, ϕ, target = z[pair.slack], z[pair.multiplier], a[j]
+            @test σ̂ == (warm ? max(target, min(s_floor, 0.1ρ)) : target)
+            @test ϕ == (warm ? 0.1ρ / max(σ̂, ρ) : 0.1 * ρ / σ̂)
+        end
+        # The cold start puts every slack on its target: the slack rows of F hold.
+        warm || @test maximum(abs, residual(k, z, ρ)[slack_rows(k)]) <= 1e-14
+    end
+    # The multipliers kept from a previous stage, and a seed for the preference slacks.
+    k = scholtes_kkt(prob_E)
+    eq_cols = findall(v -> startswith(string(v), "ψ_"), k.z_symbolic)
+    eq = 0.1 .* collect(1:length(eq_cols))
+    @test scholtes_start(k, [0.1, 0.2], 1e-3; warm = true, eq_cols, eq)[eq_cols] == eq
+    seed = fill(5.0, length(kp.preference_slack_dims))
+    @test scholtes_start(kp, [0.5], 1e-3; warm = true, preference_slacks = seed)[kp.preference_slack_dims] == seed
+    # Only the Scholtes system has the pairs and slack targets the start reads.
+    @test_throws ArgumentError RG.initialize_scholtes!(zeros(1), RG.generate_slacked_reduced_kkt_system(prob_E.goop),
+        θ0, [0.1, 0.2], 1e-3)
+end
+
+end
+
+@testset "The Scholtes engine (ported from ScholtesReducedGOOP.jl; goes with src/scholtes_*.jl)" begin
 
 @testset "compiled functions agree in and out of place" begin
     k = skkt(prob_C)
@@ -425,25 +746,6 @@ end
     RG._fill_jacobians!(k, y1)
     RG._gamma_columns(k)
     @test !k.Jvalid[]
-end
-
-@testset "inactive constraint, all backends" begin
-    k = skkt(prob_A)
-    for ls in (:klu_eta, :klu_sqrt_eta, :normal, :svd)
-        r = ssolve(k, [1.0]; linear_solver = ls)
-        @test r.converged
-        @test r.z[1] ≈ 0.0 atol = 1e-6
-        @test r.sign_min > 0
-        @test r.klu_fallbacks == 0 || ls in (:klu_eta, :klu_sqrt_eta)
-    end
-end
-
-@testset "active constraint and coupled game" begin
-    r = ssolve(skkt(prob_B), prob_B.z0)
-    @test r.converged && abs(r.z[1]) < 1e-5
-    r = ssolve(prob_C)
-    @test r.converged
-    @test r.z ≈ [0.8, -0.8] atol = 1e-5
 end
 
 @testset "the certificate separates a solve from a stall" begin
@@ -485,63 +787,6 @@ end
     @test minimum(L[end]) <= minimum(L[1])
 end
 
-@testset "termination diagnostics" begin
-    k = skkt(prob_A)
-    converged = ssolve(k, prob_A.z0; rho_schedule = [1e-3], tol = Inf)
-    @test converged.status == :solved
-    @test converged.termination_reason == :tolerance_reached
-
-    inner = ssolve(k, prob_A.z0; rho_schedule = [1e-3], tol = 0.0, tol_inner = Inf)
-    @test inner.status == :failed
-    @test inner.termination_reason == :inner_tolerance_reached
-    @test inner.iters == 1
-
-    empty_run = ssolve(k, prob_A.z0; rho_schedule = [1e-3], max_inner = 0, tol = 0.0)
-    @test empty_run.termination_reason == :no_iterations
-    @test empty_run.iters == 0
-    @test isempty(empty_run.history)
-
-    free = sproblem(ni = [1], objectives = [[z -> z[1]^2]], z0 = [1.0])
-    kfree = skkt(free)
-    budget = ssolve(kfree, free.z0; rho_schedule = [1e-3], max_inner = 1,
-                   tol = 0.0, tol_inner = 0.0, linear_solver = :normal)
-    @test budget.termination_reason == :max_inner
-    @test budget.iters == 1
-    @test budget.relaxed_residual ≈ norm(F_nc(kfree, budget.w))
-    @test budget.relaxed_residual < budget.history[end]
-    # A final accepted step can meet tol after the last loop-entry check.
-    last_step = ssolve(kfree, free.z0; rho_schedule = [1e-3], max_inner = 1,
-                      tol = 1e-6, tol_inner = 0.0, linear_solver = :normal)
-    @test last_step.converged
-    @test last_step.termination_reason == :tolerance_reached
-
-    nonfinite = ssolve(kfree, free.z0; rho_schedule = [1e-3], w0 = [NaN])
-    @test nonfinite.status == :failed
-    @test nonfinite.termination_reason == :nonfinite_residual
-    @test isnan(nonfinite.relaxed_residual)
-
-    # Fault injection: no projected trial with a NaN direction can pass Armijo.
-    stalled = ssolve(kfree, free.z0; rho_schedule = [1e-3], tol = 0.0,
-                     tol_inner = 0.0, trace = nt -> fill!(nt.dw, NaN))
-    @test stalled.status == :failed
-    @test stalled.termination_reason == :line_search_failed
-    @test stalled.w == free.z0
-end
-
-@testset "warm start reproduces the solve" begin
-    k = skkt(prob_C)
-    r1 = ssolve(k, prob_C.z0)
-    r2 = ssolve(k, prob_C.z0; w0 = r1.w, rho_schedule = [r1.rho])
-    @test r2.converged
-    @test r2.z ≈ r1.z atol = 1e-8
-    @test r2.iters <= r1.iters
-    @test_throws ArgumentError ssolve(k, prob_C.z0; w0 = zeros(3))
-end
-
-@testset "a start on the boundary is rejected, not silently accepted" begin
-    @test_throws ArgumentError ssolve(prob_A, [-2.0])
-end
-
 @testset "non-monotone line search" begin
     k = skkt(prob_C)
     r1 = ssolve(k, prob_C.z0; nonmonotone = 1)
@@ -556,17 +801,6 @@ end
     r0 = ssolve(k, prob_C.z0; nonmonotone = 3)
     @test r0.converged && r0.sign_min > 0
     @test_throws ArgumentError ssolve(k, prob_C.z0; nonmonotone = 0)
-end
-
-@testset "the projected bound rule stays in the sign box" begin
-    for prob in (prob_A, prob_B, prob_single)
-        r = ssolve(skkt(prob), prob.z0)
-        @test r.converged
-        @test r.sign_min > 0
-    end
-    @test_throws ArgumentError ssolve(prob_A, prob_A.z0; projected_step = false)
-    @test_throws ArgumentError ssolve(prob_A, prob_A.z0; tau = 1.5)
-    @test_throws ArgumentError ssolve(prob_A, prob_A.z0; proj_eps = -1.0)
 end
 
 @testset "schedules" begin
@@ -603,28 +837,6 @@ end
     @test_throws ArgumentError RG.random_starts(prob_A.goop, θ0, 5; center = [-10.0], radius = 0.1)
 end
 
-@testset "the rectangularity surplus, exactly" begin
-    surplus(K, n, mE) = ((K - 1) * (K - 2) ÷ 2) * n + (K - 1) * mE
-    mk(K, n, mE, mI) = sproblem(ni = [n],
-        objectives = [[let k = k; z -> sum(z[i]^2 for i in 1:n) + k * z[1]; end for k in 1:K]],
-        equality = mE > 0 ? [let m = mE; z -> [z[j] - 0.1j for j in 1:m]; end] : nothing,
-        inequality = mI > 0 ? [let m = mI; z -> [z[j] + 2.0 for j in 1:m]; end] : nothing,
-        z0 = zeros(n))
-    rows(k) = k.n_nc + k.n_comp
-    for K in 2:4, n in (2, 4), mE in (0, 1), mI in (1, 2)
-        k = skkt(mk(K, n, mE, mI))
-        @test k.n - rows(k) == surplus(K, n, mE)
-    end
-    for K in 3:4, n in (2,), mE in (0, 1), mI in (0, 1)
-        k = skkt(mk(K, n, mE, mI))
-        @test k.n > rows(k)
-    end
-    for n in (2, 4), mI in (1, 2)
-        sq = skkt(mk(2, n, 0, mI)); @test sq.n == rows(sq)
-        re = skkt(mk(2, n, 1, mI)); @test re.n > rows(re)
-    end
-end
-
 @testset "refinement brings :normal onto the saddle-point step" begin
     k = skkt(prob_C)
     r = ssolve(k, prob_C.z0; rho_schedule = [1.0], max_inner = 3)
@@ -643,14 +855,6 @@ end
     fine = norm(step_for(:normal, 4) - ref) / norm(ref)
     @test fine <= raw * (1 + 1e-9) + 1e-15
     raw > 1e-10 && @test fine < raw / 10
-end
-
-@testset "every backend solves with the projected rule -- no crashes" begin
-    for prob in (prob_A, prob_single), ls in (:klu_eta, :klu_sqrt_eta, :normal, :svd)
-        r = ssolve(skkt(prob), prob.z0; linear_solver = ls)
-        @test r.converged
-        @test r.sign_min > 0
-    end
 end
 
 @testset "the Jacobian memo can never serve stale values" begin
@@ -709,313 +913,10 @@ end
     end
 end
 
-@testset "an explicit rho_schedule is honoured exactly" begin
-    r = ssolve(skkt(prob_C), prob_C.z0; rho_schedule = [1.0, 1e-3], max_inner = 40)
-    @test r.rho >= 1e-3 - 1e-15
-    @test r.sign_min > 0
 end
 
-@testset "every backend computes the same least-squares step" begin
-    Random.seed!(4)
-    for prob in (prob_C, prob_E)
-        k = skkt(prob); RG._set_theta!(k, θ0); RG._set_rho!(k, 0.5)
-        res = RG.ScholtesResiduals(k)
-        w = RG._initial_w(k, prob.z0, 0.5; gamma_cols = RG._gamma_columns(k))
-        w .+= 0.01 .* randn(length(w))
-        w[(k.n + 1):end] .= abs.(w[(k.n + 1):end]) .+ 0.2
-        Rv, bv = zeros(res.m), zeros(res.nc)
-        RG._resid!(res, Rv, bv, w, 0.5)
-        J = copy(RG._augmented_dense!(RG._build_augmented_dense(k; scholtes = true), k,
-                 view(w, 1:k.n), view(w, (k.n + 1):(k.n + k.n_comp)), bv, ones(length(w))))
-        p = size(J, 2)
-        F = svd(J)
-        pnv = -F.V * ((F.S .> 1e-10 * F.S[1]) .* (F.U' * Rv) ./ max.(F.S, 1e-300))
-        tik3 = -F.V * ((F.S ./ (F.S .^ 2 .+ 1e-6)) .* (F.U' * Rv))
-        base = nothing
-        for ls in (:klu_eta, :normal, :svd)
-            sweeps = ls === :normal ? 2 : 0
-            ctx, _ = step_ctx(k, ls; eta_init = 1e-8, refine = sweeps)
-            d = ctx.solve(w, bv, Rv)
-            @test length(d) == p && all(isfinite, d)
-            defect = norm(J * d + Rv) / norm(Rv)
-            if ls === :normal
-                @test isfinite(defect)
-            else
-                base === nothing && (base = defect)
-                @test abs(defect - base) <= 1e-8 + 1e-5 * base
-            end
-            ctx2, _ = step_ctx(k, ls; eta_init = 1e-3, refine = sweeps)
-            d2 = ctx2.solve(w, bv, Rv)
-            ref = ls === :svd ? pnv : tik3
-            @test norm(d2 - ref) <= 1e-6 * max(norm(ref), 1e-12)
-        end
-        # `:klu_sqrt_eta` at η = 1e-6 builds the same matrix as `:klu_eta` at 1e-3.
-        ctx3, _ = step_ctx(k, :klu_sqrt_eta; eta_init = 1e-6)
-        @test norm(ctx3.solve(w, bv, Rv) - tik3) <= 1e-6 * max(norm(tik3), 1e-12)
-    end
-end
-
-@testset "what the projected rule promises the line search at alpha = 1" begin
-    Random.seed!(5)
-    for prob in (prob_A, prob_B, prob_single)
-        k = skkt(prob); RG._set_theta!(k, θ0); RG._set_rho!(k, 0.5)
-        res = RG.ScholtesResiduals(k)
-        w = RG._initial_w(k, prob.z0, 0.5; gamma_cols = RG._gamma_columns(k))
-        w .+= 0.01 .* randn(length(w))
-        w[(k.n + 1):end] .= abs.(w[(k.n + 1):end]) .+ 0.2
-        Rv, bv = zeros(res.m), zeros(res.nc)
-        RG._resid!(res, Rv, bv, w, 0.5)
-        ctx, _ = step_ctx(k, :klu_eta)
-        rule = RG._ProjectedRule(ctx.nw)
-        d = RG._bounded_step!(rule, ctx, w, bv, Rv)
-        wt = similar(w)
-        RG._project!(rule, wt, w, 1.0, d)
-        @test isfinite(RG._merit!(res, zeros(res.m), zeros(res.nc), wt, 0.5))
-        g = copy(ctx.Jtmul(w, bv, Rv))
-        @test dot(g, d) <= 1e-9 * max(1.0, norm(g) * norm(d))
-    end
-end
-
-@testset "the returned rho is the level the walk actually ended on" begin
-    sched = [1.0, 1e-2, 1e-4]
-    for prob in (prob_A, prob_C, prob_D)
-        r = ssolve(skkt(prob), prob.z0; rho_schedule = sched, tol = 0.0)
-        @test r.rho == sched[end]
-        @test r.sign_min > 0
-    end
-    rc = ssolve(skkt(prob_A), prob_A.z0; rho_schedule = sched)
-    @test rc.converged && rc.rho in sched
-end
-
-@testset "line-search-driven eta schedule" begin
-    options = (; gain_low = 0.25, gain_high = 0.75, eta_min = 1e-8, eta_max = 1e2,
-               tightening_rate = 1.2, loosening_rate = 3.0)
-    up, down = 1 + exp(-3.0), 1 - exp(-1.2)
-    next_eta(eta, gain, alpha) = RG._scheduled_eta(eta, gain, alpha; options...)
-    @test next_eta(1.0, 0.25, 1.0) ≈ up
-    @test next_eta(1.0, 0.75, 1.0) == 1.0
-    @test next_eta(1.0, 0.8, 1.0) ≈ down
-    @test next_eta(1.0, 1.0, 0.5) ≈ up
-    @test next_eta(1.0, 1.0, 0.99) ≈ down
-    @test next_eta(1.0, -Inf, 0.0) ≈ up
-    @test next_eta(1e2, -1.0, 1.0) == 1e2
-    @test next_eta(1e-8, 1.0, 1.0) == 1e-8
-    @test RG._gain_reductions([1.0], [0.0], 1.0, 1.0) == (0.0, 0.0, -Inf)
-
-    p = sproblem(ni = [1], objectives = [[z -> z[1]^2]], z0 = [1.0])
-    k = skkt(p)
-    for backend in (:normal, :klu_eta, :klu_sqrt_eta)
-        seen = NamedTuple[]
-        rr = ssolve(k, p.z0; linear_solver = backend, eta_schedule = true, eta_init = 0.1,
-                    rho_schedule = [1.0, 0.1], max_inner = 1, tol = 0.0, tol_inner = 0.0,
-                    step_trace = nt -> push!(seen, (; rho = nt.rho, eta = nt.eta,
-                        eta_next = nt.eta_next, gain = nt.gain_ratio, alpha = nt.alpha)))
-        @test length(seen) == 2
-        @test all(t -> t.alpha == 1.0 && t.gain ≈ 1.0, seen)
-        @test seen[1].eta ≈ 0.1
-        @test seen[1].eta_next ≈ 0.1down
-        @test seen[2].eta ≈ seen[1].eta_next
-        @test rr.eta ≈ seen[2].eta_next ≈ 0.1down^2
-        restarted = Float64[]
-        ssolve(k, p.z0; w0 = rr.w, linear_solver = backend, eta_schedule = true,
-               eta_init = rr.eta, rho_schedule = [0.01], max_inner = 1, tol = 0.0,
-               tol_inner = 0.0, trace = nt -> push!(restarted, nt.eta))
-        @test only(restarted) ≈ rr.eta
-    end
-
-    k = skkt(prob_C)
-    snapshots = NamedTuple[]
-    result = ssolve(k, prob_C.z0; linear_solver = :normal, eta_schedule = true, eta_init = 1e-3,
-                    rho_schedule = [1e-2], max_inner = 12, tol = 0.0, tol_inner = 0.0,
-                    step_trace = nt -> push!(snapshots, (; nt..., w = copy(nt.w),
-                        w_trial = copy(nt.w_trial), r = copy(nt.r), b = copy(nt.b))))
-    dc = RG._build_augmented_dense(k; scholtes = true)
-    @test !isempty(snapshots)
-    for nt in snapshots
-        if nt.accepted
-            J = RG._augmented_dense!(dc, k, view(nt.w, 1:k.n),
-                view(nt.w, (k.n + 1):(k.n + k.n_comp)), nt.b, ones(length(nt.w)))
-            jd = J * (nt.w_trial - nt.w)
-            predicted = -dot(nt.r, jd) - dot(jd, jd) / 2
-            actual = (norm(nt.r)^2 - nt.trial_norm^2) / 2
-            @test nt.pred_reduction ≈ predicted atol = 1e-12 rtol = 1e-9
-            @test nt.actual_reduction ≈ actual atol = 1e-12 rtol = 1e-9
-            @test nt.gain_ratio ≈ (predicted > 0 ? actual / predicted : -Inf)
-        else
-            @test nt.gain_ratio == -Inf
-            @test nt.actual_reduction == nt.pred_reduction == 0.0
-        end
-        @test nt.eta_next ≈ next_eta(nt.eta, nt.gain_ratio, nt.alpha)
-    end
-    @test result.eta == snapshots[end].eta_next
-
-    # The normal backend's sticky floor must be bypassable.
-    RG._set_theta!(k, θ0)
-    ctx, bk = step_ctx(k, :normal; eta_init = 1e-3, eta_sticky = false)
-    w = RG._initial_w(k, prob_C.z0, 1e-2; gamma_cols = RG._gamma_columns(k))
-    res = RG.ScholtesResiduals(k)
-    rv, bv = zeros(res.m), zeros(res.nc)
-    RG._resid!(res, rv, bv, w, 1e-2)
-    bk.normal.eta[] = 1.0
-    ctx.solve(w, bv, rv)
-    @test bk.eta_used == 1e-3
-
-    for schedule in (false, true)
-        rr = ssolve(p; linear_solver = :svd, eta_schedule = schedule, eta_init = 0.1)
-        @test rr.eta == 0.1
-    end
-    for kw in ((; eta_init = 0.0), (; eta_min = -1.0), (; eta_min = 2.0, eta_max = 1.0),
-               (; gain_low = 0.8, gain_high = 0.5), (; tightening_rate = -1.0),
-               (; loosening_rate = Inf))
-        @test_throws ArgumentError ssolve(p; eta_schedule = true, kw...)
-    end
-end
-
-@testset "effective Tikhonov parameter in solver traces" begin
-    k = skkt(prob_C)
-    for backend in (:normal, :klu_eta, :klu_sqrt_eta, :svd)
-        before, after = Float64[], Float64[]
-        ssolve(k, prob_C.z0; linear_solver = backend, eta_init = 1e-3, rho_schedule = [1e-2],
-               max_inner = 3, tol = 0.0, tol_inner = 0.0,
-               trace = nt -> push!(before, nt.eta), step_trace = nt -> push!(after, nt.eta))
-        @test !isempty(before)
-        @test isequal(before, after)
-        @test backend === :svd ? all(isnan, before) : all(==(1e-3), before)
-    end
-    RG._set_theta!(k, θ0)
-    ctx, bk = step_ctx(k, :normal; eta_init = 1e-8)
-    w = RG._initial_w(k, prob_C.z0, 1e-2; gamma_cols = RG._gamma_columns(k))
-    res = RG.ScholtesResiduals(k)
-    rv, bv = zeros(res.m), zeros(res.nc)
-    RG._resid!(res, rv, bv, w, 1e-2)
-    bk.normal.eta[] = 1e-3
-    ctx.solve(w, bv, rv)
-    @test bk.eta_used == bk.normal.eta_fac[] == 1e-3
-    @test ctx.eta[] == 1e-8
-    ctx.coldiag(w, bv)
-    @test bk.eta_used == 1e-3
-end
-
-@testset "the reported residual is the residual OF the returned point" begin
-    for prob in (prob_A, prob_C, prob_E), rf in (0, 2), ls in (:klu_eta, :normal)
-        k = skkt(prob)
-        r = ssolve(k, prob.z0; refine = rf, linear_solver = ls)
-        res = RG.ScholtesResiduals(k)
-        Rv = zeros(res.m); bv = zeros(res.nc)
-        RG._resid!(res, Rv, bv, r.w, r.rho)
-        @test r.residual ≈ RG._norm_K₀(res, Rv, r.w, r.rho) atol = 0 rtol = 1e-12
-        # _norm_K₀ is the sequential sum of squares of _K₀!'s entries, bit for bit.
-        K = RG._K₀!(zeros(res.m), res, Rv, r.w, r.rho)
-        @test sqrt(foldl((acc, v) -> acc + v^2, K; init = 0.0)) == RG._norm_K₀(res, Rv, r.w, r.rho)
-        @test r.sign_min ≈ RG._sign_min(res, r.w, bv) atol = 0 rtol = 1e-12
-        @test r.z == r.w[1:prob.np]
-        k.n_comp == 0 || @test r.shortfall ≈ maximum(abs, r.s .* bv) atol = 0 rtol = 1e-12
-    end
-end
-
-@testset "inequalities hold exactly at a Scholtes solution" begin
-    # Active constraints (prob_B, prob_D's and prob_E's box) end ON their bound, not past
-    # it. prob_F is left out: it does not converge under the default options, in the
-    # source either (Step 1 reference: ‖K₀‖ ≈ 4e-4).
-    for prob in (prob_B, prob_C, prob_D, prob_E)
-        r = ssolve(skkt(prob), prob.z0; linear_solver = :normal)
-        @test r.converged
-        @test sfeasible(prob, r.z).worst >= -1e-8
-    end
-end
-
-@testset "the merit options are gone" begin
-    base = (; tol = 1e-6, η₀ = 0.0, ϵ₀ = 1e-9, max_inner_iters = 10, max_outer_iters = 1,
-            tightening_rate = 2.0, loosening_rate = 0.5, min_stepsize = 1e-20, verbose = false)
-    @test RG.InteriorPointOptions(; base...) isa RG.InteriorPointOptions
-    for kw in ((; use_feasibility_merit = true), (; feasibility_tol = 1e-3), (; μ₀ = 1.0),
-               (; μ_max = 1e4), (; mu_growth = 10.0))
-        @test_throws MethodError RG.InteriorPointOptions(; base..., kw...)
-    end
-end
-
-@testset "explicit gamma / nonnegative inequality phi" begin
-    p = sproblem(ni = [1], objectives = [[z -> -z[1], z -> z[1]]], inequality = [z -> [z[1]]], z0 = [1.0])
-    k = skkt(p); RG._set_theta!(k, θ0); rho = 0.1; RG._set_rho!(k, rho)
-    @test all(!startswith(string(v), "Gam") for v in k.vars)
-    @test k.original_nc == 2
-    @test k.n_comp == 3 && k.u_index == [1, 2, 0]
-    cols = RG._gamma_columns(k)
-    res = RG.ScholtesResiduals(k)
-    w = RG._initial_w(k, p.z0, rho; gamma_cols = cols)
-    rv = zeros(res.m); bv = zeros(res.nc)
-    @test isfinite(RG._merit!(res, rv, bv, w, rho))
-    @test all(>(0), w[cols])
-    @test a_of(k, w[1:k.n])[3] ≈ 0.9rho
-    # exact boundary witness: γ₁ = 0, γ₂ = 1, φ = 1, z = ρ
-    y = zeros(k.n); y[1] = rho; y[cols] = [0.0, 1.0, 1.0]
-    ww = [y; rho; rho; 0.0; rho; 0.0]
-    @test norm(RG._resid!(res, rv, bv, ww, rho)) < 1e-14
-    ww[cols[3]] = -1
-    @test F_nc(k, ww[1:k.n])[1] ≈ -2
-    @test isinf(RG._merit!(res, rv, bv, ww, rho))
-    w[cols[1]] = -0.02
-    @test !isfinite(RG._merit!(res, rv, bv, w, rho))
-    w[cols[1]] = 0.02
-    w[cols[3]] = -0.1
-    @test isinf(RG._merit!(res, rv, bv, w, rho))
-    w[cols[3]] = 0.1
-    RG._resid!(res, rv, bv, w, rho)
-    dense = RG._build_augmented_dense(k; scholtes = true)
-    J = copy(RG._augmented_dense!(dense, k, w[1:k.n], w[(k.n + 1):(k.n + k.n_comp)], bv, ones(length(w))))
-    v = sin.(1.0:length(w)); h = 1e-6
-    rp = copy(RG._resid!(res, rv, bv, w + h * v, rho)); rm = copy(RG._resid!(res, rv, bv, w - h * v, rho))
-    @test norm((rp - rm) / (2h) - J * v) < 1e-8
-    RG._resid!(res, rv, bv, w, rho)
-    k₀ = RG._norm_K₀(res, rv, w, rho)
-    K = RG._K₀!(zeros(res.m), res, rv, w, rho)
-    wzero = copy(w); wzero[(k.n + k.n_comp + 1):end] .= 0
-    @test k₀ ≈ norm(RG._resid!(res, rv, bv, wzero, 0.0))
-    @test K ≈ RG._resid!(res, rv, bv, wzero, 0.0)
-    RG._set_rho!(k, rho)
-    RG._resid!(res, rv, bv, w, rho)
-    for backend in (:normal, :klu_eta, :klu_sqrt_eta, :svd)
-        ctx, _ = step_ctx(k, backend)
-        rule = RG._ProjectedRule(ctx.nw)
-        d = RG._bounded_step!(rule, ctx, w, bv, rv)
-        @test all(isfinite, d)
-        @test cols[3] in rule.idx
-        @test cols[1] in rule.idx
-        trial = similar(w); RG._project!(rule, trial, w, 1.0, d)
-        @test trial[cols[3]] > 0
-    end
-    p3 = sproblem(ni = [1], objectives = [[z -> z[1], z -> z[1], z -> z[1]]], inequality = [z -> [z[1]]], z0 = [1.0])
-    k3 = skkt(p3)
-    @test k3.original_nc == 3
-    @test k3.n_comp == 6
-    @test all(l.kind === :phi_upper for l in k3.labels[4:end])
-    @test all(iszero, k3.u_index[4:end])
-    k = skkt(p)
-    r = ssolve(k, p.z0; rho_schedule = [0.1, 0.01], linear_solver = :normal, max_inner = 1000,
-               tol = 0.0, tol_inner = 1e-9)
-    res = RG.ScholtesResiduals(k)
-    rv = RG._resid!(res, zeros(res.m), zeros(res.nc), r.w, r.rho)
-    @test norm(rv) < 1e-8
-    @test r.z[1] ≈ 0.01 atol = 1e-8
-    @test maximum(abs, r.s[3:end] .* b_of(k, r.w[1:k.n])[3:end]) < 1e-8
-    @test r.sign_min > 0
-    single = sproblem(ni = [1], objectives = [[z -> z[1]]], inequality = [z -> [z[1]]], z0 = [1.0])
-    r = ssolve(single)
-    @test r.converged && abs(r.z[1]) < 1e-5
-    emptyprob = sproblem(ni = [1], objectives = [[z -> z[1]^2]], z0 = [1.0])
-    r = ssolve(emptyprob)
-    @test r.converged && abs(r.z[1]) < 1e-7
-    # a parameter change invalidates the memo even when y is unchanged
-    k = skkt(p); RG._set_theta!(k, θ0); cols = RG._gamma_columns(k)
-    w = RG._initial_w(k, p.z0, 0.1; gamma_cols = cols)
-    RG._fill_jacobians!(k, w[1:k.n]); @test k.Jvalid[]
-    a = copy(a_of(k, w[1:k.n])); RG._set_rho!(k, 0.2)
-    @test !k.Jvalid[]
-    @test a_of(k, w[1:k.n])[3] - a[3] ≈ 0.1
-end
-
-end
-
+# The adapter's row-for-row check, while the adapter lives (the intersection study's complete checks use it
+# until step 2.6c; it goes in 2.6e).
 @testset "the perturbed reduced system (5.2), handed to Scholtes" begin
     # _scholtes_engine_system hands the :interior_point system to Scholtes(): the same residual and
     # Jacobian at the same ρ, with the slacks σ and duals γ (nonnegative_dims) nonnegative.
@@ -1053,70 +954,5 @@ end
         # a wiring error (signs, ρ in place of ϵ) would miss by O(1).
         @test norm(w[k.primal_dims] - case.expected) < 1e-5
         @test minimum(w[k.nonnegative_dims]) >= 0
-    end
-end
-
-@testset "method = :pdip (Algorithm 5.1) on the perturbed reduced and complete systems" begin
-    # Two players, three levels: ‖z‖² on top, (b_i − 0.3)²/2, and the innermost φ(a_i − 1), with the coupled
-    # constraint a_i + 0.1 a_j <= 0.5, whose normal lies in the innermost objective's column space. The
-    # equilibrium is unique, z* = (5/11, 0.3, 5/11, 0.3), and the constraint is active with γ_i = 6/11 > 0.
-    # The lifted multipliers are not, so J is rank-deficient and J⁺ is taken through its Tikhonov limit.
-    # (The benchmark problems violate the column-space rule, and Algorithm 5.1 jams on them.)
-    expected = [5 / 11, 0.3, 5 / 11, 0.3]
-    for innermost in (d -> d^2 / 2, d -> cosh(d) - 1)
-        goop = RG.ParametricGOOP(BlockArray(zeros(4), [2, 2]), BlockArray(Float64[], [0]);
-            preferences = [Function[(x, t) -> sum(abs2, x), (x, t) -> (x[2i] - 0.3)^2 / 2, (x, t) -> innermost(x[2i - 1] - 1)]
-                           for i in 1:2],
-            is_prioritized_constraint = [[false, false, false] for _ in 1:2],
-            equality_constraints = [nothing, nothing],
-            inequality_constraints = [(x, t) -> [0.5 - x[1] - 0.1x[3]], (x, t) -> [0.5 - x[3] - 0.1x[1]]])
-        for k in RG._scholtes_engine_system.((RG.generate_slacked_reduced_kkt_system(goop),
-                                              RG.generate_slacked_complete_kkt_system(goop; complementarity = :perturbed)))
-            θ, w, scale, steps, fallbacks = zeros(k.parameter_dimension), nothing, sqrt(k.n_nc), [], 0
-            step_trace = nt -> push!(steps, (; nt.rho, w = copy(nt.w), r = copy(nt.r), dw = copy(nt.dw),
-                nt.alpha, nt.accepted, nt.trial_norm, w_trial = copy(nt.w_trial), nt.eta))
-            # Down a ρ chain from z = 0, one solve per stage, as experiments/MonteCarlo_RandomGOOP.jl does.
-            for ρ in 10.0 .^ (0:-1:-10)
-                options = RG.ScholtesOptions(; rho_schedule = [ρ], max_inner = 1000, tol = 0.0,
-                    tol_inner = min(ρ, 1e-2) * scale, method = :pdip, linear_solver = :normal)
-                output = isnothing(w) ? RG.solve(RG.Scholtes(), k, θ; z₀ = zeros(4), options, step_trace) :
-                         RG.solve(RG.Scholtes(), k, θ; w₀ = w, options, step_trace)
-                w, fallbacks = output.w, fallbacks + output.klu_fallbacks
-            end
-            accepted = filter(s -> s.accepted, steps)
-            @test length(accepted) == length(steps)
-            @test fallbacks == 0
-            @test all(s -> any(j -> s.eta == 1e-6 * 100.0^j, 0:5), steps)
-            @test all(s -> s.w_trial ≈ s.w + s.alpha * s.dw, accepted)
-            @test all(s -> s.trial_norm <= norm(s.r), accepted)
-            @test all(s -> minimum(s.w_trial[k.nonnegative_dims]) > 0, accepted)
-            # Every step of the first stage is the pseudoinverse step of Algorithm 5.1, though J is rank-deficient.
-            for s in filter(s -> s.rho == 1.0, steps)
-                J = Matrix(k.J_nc!(copy(k.Jnc_buf), s.w, θ, s.rho))
-                @test rank(J) < size(J, 1)
-                @test s.dw ≈ -pinv(J) * s.r rtol = 1e-8
-            end
-            @test norm(w[k.primal_dims] - expected) < 1e-8
-            @test minimum(w[k.nonnegative_dims]) > 0
-            # The ‖K₀‖ < tol stop (the experiment's early stop), checked before every Newton step: with tol far above
-            # ‖K₀‖, a solve stops at its first residual evaluation, with the exact J⁺ (:svd) and its Tikhonov limit.
-            for linear_solver in (:svd, :normal)
-                options = RG.ScholtesOptions(; rho_schedule = [1.0], max_inner = 1000, tol = 1e10, tol_inner = 1e-10,
-                    method = :pdip, linear_solver)
-                output = RG.solve(RG.Scholtes(), k, θ; z₀ = zeros(4), options)
-                @test output.iters == 1
-                @test output.termination_reason === :tolerance_reached
-            end
-        end
-    end
-    # Algorithm 5.1 has no rule for the Scholtes pairs, and the KLU backends always shift by η.
-    @test_throws ArgumentError ssolve(prob_A, prob_A.z0; method = :pdip, linear_solver = :normal)
-    case = build_benchmark_problem(; num_players = 1, levels = 2, kind = :quadratic)
-    k = RG.generate_slacked_complete_kkt_system(case.problem; complementarity = :perturbed)
-    for options in (RG.ScholtesOptions(; method = :pdip, linear_solver = :klu_eta),
-                    RG.ScholtesOptions(; method = :newton), RG.ScholtesOptions(; method = :pdip, beta = 1.0),
-                    RG.ScholtesOptions(; method = :pdip, eta_pdip = 0.0))
-        @test_throws ArgumentError RG.solve(RG.Scholtes(), k, zeros(k.parameter_dimension);
-            z₀ = zeros(length(case.expected)), options)
     end
 end
