@@ -1,29 +1,16 @@
+# solver.jl -- the solvers of a `GOOPKKTSystem`: `PDIP` (Algorithm 5.1, the primal-dual interior point
+# method) and `ProjectedLM` (the projected Levenberg–Marquardt method). Both are called as
+# `solve(Solver(), kkt, θ; z₀, options)` and return a NamedTuple, and both take their Newton step from
+# `_newton_step!` (section 3).
+
 using LinearAlgebra
 
 abstract type SolverType end
 
-"""Helper function to compute the step size `α` which solves:
-                   α* = max(α ∈ [0, 1] : v + α δ ≥ (1 - τ) v).
-"""
-function fraction_to_the_boundary_linesearch(
-    v,
-    δ;
-    max_stepsize = 1.0,
-    τ = 0.995,
-    decay = 0.5,
-    tol = 1e-4,
-)
-    α = max_stepsize
-    while any(@. v + α * δ < (1 - τ) * v)
-        if α < tol
-            return NaN
-        end
-
-        α *= decay
-    end
-
-    α
-end
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
+# 1. PDIP: Algorithm 5.1
+# Followed by its helper, the fraction-to-the-boundary line search.
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 """
 Solver tag for the primal-dual interior point method: 
@@ -215,8 +202,8 @@ function solve(
                 F .= F_trial
             else
                 # Fraction to the boundary: γ moves by α_γ, every other variable by α_σ.
-                α_σ = fraction_to_the_boundary_linesearch(σ, δσ; τ, decay = β, tol = min_step)
-                α_γ = fraction_to_the_boundary_linesearch(γ, δγ; τ, decay = β, tol = min_step)
+                α_σ = _fraction_to_the_boundary(σ, δσ; τ, decay = β, tol = min_step)
+                α_γ = _fraction_to_the_boundary(γ, δγ; τ, decay = β, tol = min_step)
                 if isnan(α_σ) || isnan(α_γ)
                     termination_reason = :line_search_failed
                     break
@@ -268,6 +255,34 @@ function solve(
     record_convergence || return result
     (; result..., ρ_history, relaxed_residual_history, residual_history, step_size_history)
 end
+
+"""Helper function to compute the step size `α` which solves:
+                   α* = max(α ∈ [0, 1] : v + α δ ≥ (1 - τ) v).
+"""
+function _fraction_to_the_boundary(
+    v,
+    δ;
+    max_stepsize = 1.0,
+    τ = 0.995,
+    decay = 0.5,
+    tol = 1e-4,
+)
+    α = max_stepsize
+    while any(@. v + α * δ < (1 - τ) * v)
+        if α < tol
+            return NaN
+        end
+
+        α *= decay
+    end
+
+    α
+end
+
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
+# 2. ProjectedLM: the projected Levenberg–Marquardt method
+# Followed by its helpers, the gain ratio and the η schedule.
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 """
 Solver tag for the projected Levenberg–Marquardt method: 
@@ -570,6 +585,12 @@ function _scheduled_η(η, gain_ratio, α; gain_low, gain_high, η_min, η_max, 
     end
     clamp(η, η_min, η_max)
 end
+
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
+# 3. The Newton step, shared by both solvers
+# Also the workspace of the `:normal` linear solver (`_NormalEquations`), which `ProjectedLM` builds once per
+# solve and reuses at every Newton step.
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 """
 The Newton step δz with J δz = −F, by `linear_solver`, for `PDIP` (Algorithm 5.1) and `ProjectedLM` (on
