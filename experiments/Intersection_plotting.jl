@@ -56,7 +56,7 @@ function intersection_report_figure(page)
         fontsize = 26, color = status == :solved ? :darkgreen : :firebrick)
     error_text = round(row["kkt_error_per_equation"]; sigdigits = 4)
     CairoMakie.Label(fig[2, 1:3],
-        "$(get(row, "stop_reason", string(status))) | KKT residual/√m=$(error_text) | iterations=$(row["total_iters"])";
+        "$(get(row, "stop_reason", string(status))) | KKT residual/√m=$(error_text) | Newton steps=$(row["newton_steps"])";
         fontsize = 18)
 
     top = CairoMakie.GridLayout(fig[3, 1:3])
@@ -1188,7 +1188,7 @@ end
 
 function plot_convergence_plot(;
     kkt_error_history,
-    total_iters = nothing,
+    newton_steps = nothing,
     show_ylabel = true,
 )
     axis_label_fontsize = 30
@@ -1206,9 +1206,9 @@ function plot_convergence_plot(;
     )
 
     iteration_axis = collect(1:length(kkt_error_history))
-    if !isnothing(total_iters) && total_iters > 0 && total_iters < length(iteration_axis)
-        iteration_axis = iteration_axis[1:total_iters]
-        kkt_error_history = kkt_error_history[1:total_iters]
+    if !isnothing(newton_steps) && newton_steps + 1 < length(iteration_axis)
+        iteration_axis = iteration_axis[1:(newton_steps + 1)]
+        kkt_error_history = kkt_error_history[1:(newton_steps + 1)]
     end
     CairoMakie.lines!(
         ax,
@@ -1223,7 +1223,7 @@ end
 
 function plot_condition_number_plot(;
     condition_number_history,
-    total_iters = nothing,
+    newton_steps = nothing,
     show_ylabel = true,
 )
     axis_label_fontsize = 30
@@ -1241,9 +1241,9 @@ function plot_condition_number_plot(;
     )
 
     iteration_axis = collect(1:length(condition_number_history))
-    if !isnothing(total_iters) && total_iters > 0 && total_iters < length(iteration_axis)
-        iteration_axis = iteration_axis[1:total_iters]
-        condition_number_history = condition_number_history[1:total_iters]
+    if !isnothing(newton_steps) && newton_steps + 1 < length(iteration_axis)
+        iteration_axis = iteration_axis[1:(newton_steps + 1)]
+        condition_number_history = condition_number_history[1:(newton_steps + 1)]
     end
     CairoMakie.lines!(
         ax,
@@ -1256,7 +1256,7 @@ function plot_condition_number_plot(;
     return figure, ax
 end
 
-function plot_eta_plot(; eta_history, total_iters = nothing, show_ylabel = true)
+function plot_eta_plot(; eta_history, newton_steps = nothing, show_ylabel = true)
     axis_label_fontsize = 30
     tick_label_fontsize = 22
     ylabel_text = show_ylabel ? L"$\log(\eta)$" : ""
@@ -1272,9 +1272,9 @@ function plot_eta_plot(; eta_history, total_iters = nothing, show_ylabel = true)
     )
 
     iteration_axis = collect(1:length(eta_history))
-    if !isnothing(total_iters) && total_iters > 0 && total_iters < length(iteration_axis)
-        iteration_axis = iteration_axis[1:total_iters]
-        eta_history = eta_history[1:total_iters]
+    if !isnothing(newton_steps) && newton_steps + 1 < length(iteration_axis)
+        iteration_axis = iteration_axis[1:(newton_steps + 1)]
+        eta_history = eta_history[1:(newton_steps + 1)]
     end
     CairoMakie.lines!(ax, iteration_axis, eta_history, color = :seagreen, linewidth = 4)
 

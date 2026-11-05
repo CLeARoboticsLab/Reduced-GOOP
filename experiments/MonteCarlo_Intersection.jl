@@ -570,7 +570,7 @@ function check_complete_kkt(record, systems, formulation, mode, settings)
             status=:exception,
             reason=:exception,
             error=sprint(showerror, err, catch_backtrace()),
-            iterations=0,
+            newton_steps=0,
             seconds=0.0,
             compile_seconds=0.0,
         )
@@ -842,7 +842,7 @@ function print_kkt_header(label; io=stdout)
         "%-9s %-7s %6s %8s %12s %12s %10s %10s %8s %8s %8s  %s\n",
         "ρ",
         "status",
-        "iters",
+        "steps",
         "time_s",
         "‖R‖/√m",
         "‖K₀‖/√m",
@@ -859,7 +859,7 @@ end
 function print_kkt_stage(;
     ρ,
     status,
-    iterations,
+    newton_steps,
     seconds,
     relaxed_rms,
     unrelaxed_rms,
@@ -880,7 +880,7 @@ function print_kkt_stage(;
         "%-9.0e %-7s %6d %8.3f %12.2e %12.2e %10.2e %10.2e %8.3f %8.3f %8.3f  %s\n",
         ρ,
         string(status),
-        iterations,
+        newton_steps,
         seconds,
         relaxed_rms,
         unrelaxed_rms,
@@ -922,21 +922,21 @@ end
 
 """
 One ρ stage's solver trace, from ProjectedLM's histories: (; raw = ‖R‖, unrelaxed = ‖K₀‖, eta) for each
-iterate a Newton step was tried from (`eta`, that step's η), then the stage's final iterate (`eta`, the η
-a next step would start from).
+iterate a Newton step was taken from (`eta`, that step's η), then the stage's final iterate (`eta`, the η
+a next step would start from): `newton_steps` + 1 rows.
 """
 function solver_history(output)
     history = NamedTuple{(:raw, :unrelaxed, :eta),NTuple{3,Float64}}[
         (; raw=output.relaxed_residual_history[k], unrelaxed=output.residual_history[k], eta=output.η_history[k])
-        for k in eachindex(output.η_history)
+        for k in 1:output.newton_steps
     ]
     push!(history, (; raw=output.relaxed_residual, unrelaxed=output.residual, eta=output.η))
 end
 
 """
 A ProjectedLM output under the names the study's records, results.jls and the report use: `z` the
-trajectory, `w` the full iterate, `iters` the residual evaluations and `eta` the final η, with the
-preference slacks and the smallest sign-constrained coordinate of `kkt`, the system it solved.
+trajectory, `w` the full iterate and `eta` the final η, with `newton_steps`, the preference slacks and the
+smallest sign-constrained coordinate of `kkt`, the system it solved.
 """
 function study_output(output, kkt)
     (;
@@ -944,7 +944,7 @@ function study_output(output, kkt)
         output.termination_reason,
         z=output.x,
         w=output.z,
-        iters=output.residual_evaluations,
+        output.newton_steps,
         output.residual,
         output.relaxed_residual,
         eta=output.η,
@@ -964,7 +964,7 @@ function stage_record(; ρ, parameter, timed, history, initial, final)
         parameter,
         status=output.status,
         reason=output.termination_reason,
-        iterations=output.iters,
+        newton_steps=output.newton_steps,
         seconds=max(0.0, timed.time-timed.compile_time-timed.recompile_time),
         wall_seconds=timed.time,
         compile_seconds=timed.compile_time+timed.recompile_time,
@@ -1041,7 +1041,7 @@ function solve_reduced(reduced_kkt, problem, θ, initial_guess, settings; contex
         print_kkt_stage(;
             ρ,
             status=output.status,
-            iterations=output.iters,
+            newton_steps=output.newton_steps,
             seconds=last(stages).seconds,
             relaxed_rms=output.relaxed_residual/residual_scale,
             unrelaxed_rms=output.residual/residual_scale,
@@ -1083,7 +1083,7 @@ function solve_reduced(reduced_kkt, problem, θ, initial_guess, settings; contex
         validation,
         stages,
         best_stage=best.index,
-        iterations=sum(s.iterations for s in stages),
+        newton_steps=sum(s.newton_steps for s in stages),
         seconds=sum(s.seconds for s in stages),
         compile_seconds=sum(s.compile_seconds for s in stages),
     )
@@ -1287,7 +1287,7 @@ function solve_complete(
             print_kkt_stage(;
                 ρ,
                 status=output.status,
-                iterations=output.iters,
+                newton_steps=output.newton_steps,
                 seconds=last(stages).seconds,
                 relaxed_rms=norm(r)/residual_scale,
                 unrelaxed_rms=norm(r0)/residual_scale,
@@ -1351,7 +1351,7 @@ function solve_complete(
         solution=final.solution,
         status=final.stages[final.best_stage].status,
         reason=final.stages[final.best_stage].reason,
-        iterations=sum(s.iterations for a in attempts for s in a.stages),
+        newton_steps=sum(s.newton_steps for a in attempts for s in a.stages),
         seconds=sum(s.seconds for a in attempts for s in a.stages),
         compile_seconds=sum(s.compile_seconds for a in attempts for s in a.stages),
     )

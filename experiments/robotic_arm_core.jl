@@ -361,20 +361,20 @@ start_at(ctx::RoboticArmContext, θ, z, ρ; warm = false, eq_cols = Int[], eq = 
 
 """
 One ProjectedLM solve of the arm from the full start `z₀`, under the names the arm code and its
-figures read: `z` the plan, `w` the full iterate, `rho`, `iters` (residual evaluations), `eta` (the η
-a next solve would start from), `history` (‖R‖ at each residual evaluation) and `converged`, with
+figures read: `z` the plan, `w` the full iterate, `rho`, `newton_steps`, `eta` (the η
+a next solve would start from), `history` (‖R‖ at each stopping test) and `converged`, with
 `status`, `termination_reason`, `residual` (‖K₀‖) and `relaxed_residual`; `output` is ProjectedLM's own.
 """
 function solve_arm(ctx::RoboticArmContext, θ, z₀; options)
     output = ReducedGOOP.solve(ReducedGOOP.ProjectedLM(), ctx.kkt, θ; z₀, options)
     (; output.status, output.termination_reason, converged = output.status === :solved,
-       z = output.x, w = output.z, rho = output.ρ, iters = output.residual_evaluations,
+       z = output.x, w = output.z, rho = output.ρ, output.newton_steps,
        output.residual, output.relaxed_residual, eta = output.η,
        history = output.relaxed_residual_history, output)
 end
 
 # The per-iteration series the convergence panels draw beside the result's ‖R‖ `history`: ‖K₀‖ at
-# each residual evaluation, and for each Newton step its η and accepted step length α, a failed line
+# each stopping test, and for each Newton step its η and accepted step length α, a failed line
 # search drawn as α = 0. ProjectedLM records them (`record_convergence`).
 new_traces() = (k₀ = Float64[], eta = Float64[], alpha = Float64[])
 

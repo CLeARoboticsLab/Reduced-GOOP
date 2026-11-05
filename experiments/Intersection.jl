@@ -501,7 +501,7 @@ function demo(;
             "termination_reason" => output.termination_reason,
             "stop_reason" => stop_reason,
             "relaxed_residual" => output.relaxed_residual,
-            "total_iters" => output.residual_evaluations,
+            "newton_steps" => output.newton_steps,
             "kkt_error_history" => kkt_error_history,
             "residual_history" => output.relaxed_residual_history,
             "eta_history" => eta_history,
@@ -780,7 +780,7 @@ function print_intersection_results(rho_results; instance, attempt, residual_sca
     println(io, "\n[solver exit] instance $(instance), attempt $(attempt): warm rho chain")
     println(io, "Residuals /√m; goal errors and minimum separation in m.")
     @printf(io, "%-9s %-7s %6s %8s %12s %12s %8s %8s %8s  %s\n",
-        "rho", "status", "iters", "time_s", "‖R‖/√m", "‖K₀‖/√m",
+        "rho", "status", "steps", "time_s", "‖R‖/√m", "‖K₀‖/√m",
         "goal1", "goal2", "min_sep", "stop")
     for (ρ, result) in rho_results
         row = result.solution_dict
@@ -788,7 +788,7 @@ function print_intersection_results(rho_results; instance, attempt, residual_sca
             goal_position1, goal_position2,
         )
         @printf(io, "%-9.0e %-7s %6d %8.3f %12.2e %12.2e %8.3f %8.3f %8.3f  %s\n",
-            ρ, string(row["status"]), row["total_iters"], row["solve_time_sec"],
+            ρ, string(row["status"]), row["newton_steps"], row["solve_time_sec"],
             row["relaxed_residual"] / residual_scale, row["kkt_error"] / residual_scale,
             metrics.goal...,
             metrics.min_sep, row["stop_reason"])

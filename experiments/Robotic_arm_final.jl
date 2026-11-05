@@ -169,7 +169,7 @@ function demo(; receding_horizon::Integer = 1, plot_fig::Bool = true, output_dir
     end
     @printf("solver specialization compiled in %.1fs (once per session)\n\n", tj)
 
-    @printf("%-22s %-6s %-7s %-16s %-9s %-8s %-8s\n", "", "iters", "time_s", "‖K₀‖/√m",
+    @printf("%-22s %-6s %-7s %-16s %-9s %-8s %-8s\n", "", "steps", "time_s", "‖K₀‖/√m",
             "goal_err", "min_gap", "tilt")
     rows = Any[]
     cold_traces = Dict{Float64,NamedTuple}()
@@ -179,7 +179,7 @@ function demo(; receding_horizon::Integer = 1, plot_fig::Bool = true, output_dir
             tag == "cold" && tr !== nothing && (cold_traces[ρ] = tr)
             m = Core_.plan_metrics(sc, r.z, θ)
             @printf("%-22s %-6d %-7.2f %-16.3e %-9.4f %-8.3f %-8.3f\n", @sprintf("rho = %.0e, %s", ρ, tag),
-                    r.iters, t, k₀(r), m.goal_error, m.min_gap, m.max_tilt)
+                    r.newton_steps, t, k₀(r), m.goal_error, m.min_gap, m.max_tilt)
             push!(rows, (; tag, rho = ρ, result = r, metrics = m))
         end)
 
@@ -250,8 +250,8 @@ function demo(; receding_horizon::Integer = 1, plot_fig::Bool = true, output_dir
             end
             mk = Core_.plan_metrics(sc, result.z, θk)
             t = st.time
-            @printf("step %2d  %-22s rho %.0e  %4d iters  %.3f s (JIT %.3f, GC %.3f)  ‖K₀‖/√m %.2e  gap %.3f  goal %.4f\n",
-                    k, mode, result.rho, result.iters, t, st.compile_time, st.gctime, k₀(result),
+            @printf("step %2d  %-22s rho %.0e  %4d steps  %.3f s (JIT %.3f, GC %.3f)  ‖K₀‖/√m %.2e  gap %.3f  goal %.4f\n",
+                    k, mode, result.rho, result.newton_steps, t, st.compile_time, st.gctime, k₀(result),
                     mk.min_gap, mk.goal_error)
             push!(steps, (; k, mode, result, time = t))
             execute!(result.z)

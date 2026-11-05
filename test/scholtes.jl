@@ -435,7 +435,7 @@ end
         re = plm_solve(scholtes_kkt(prob; quasi = false), prob.z0)
         rq = plm_solve(scholtes_kkt(prob; quasi = true), prob.z0)
         @test rq.z == re.z
-        @test rq.residual_evaluations == re.residual_evaluations
+        @test rq.newton_steps == re.newton_steps
     end
 end
 
@@ -506,7 +506,7 @@ end
     r2 = RG.solve(RG.ProjectedLM(), k, θ0; z₀ = r1.z, options = RG.ProjectedLMOptions(; ρ_schedule = [r1.ρ], η = r1.η))
     @test r2.status === :solved
     @test r2.x ≈ r1.x atol = 1e-8
-    @test r2.residual_evaluations <= r1.residual_evaluations
+    @test r2.newton_steps <= r1.newton_steps
     @test_throws ArgumentError RG.solve(RG.ProjectedLM(), k, θ0; z₀ = zeros(3))
 end
 

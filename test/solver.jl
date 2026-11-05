@@ -146,12 +146,12 @@ end
                 @test norm(z[k.primal_dims] - COUPLED_EXPECTED) < 1e-8
                 @test minimum(z[k.nonnegative_dims]) > 0
             end
-            # The ‖K₀‖ < tol stop, checked before every Newton step: with tol far above ‖K₀‖, a solve stops at
-            # its first residual evaluation.
+            # The ‖K₀‖ < tol stop, checked before every Newton step: with tol far above ‖K₀‖, a solve stops
+            # before its first Newton step.
             for linear_solver in (:svd, :klu)
                 options = RG.PDIPOptions(; ρ_schedule = [1.0], tol = 1e10, linear_solver)
                 output = RG.solve(RG.PDIP(), k, θ; z₀ = zeros(4), options)
-                @test (output.residual_evaluations, output.newton_steps) == (1, 0)
+                @test output.newton_steps == 0
                 @test output.termination_reason === :tolerance_reached
             end
         end
@@ -239,11 +239,11 @@ end
         solve_from(k, z₀; kwargs...) =
             RG.solve(solver, k, Float64[]; z₀, options = Options(; ρ_schedule = [1e-3], kwargs...))
         r = solve_from(quadratic, [1.0]; tol = Inf)
-        @test (r.status, r.termination_reason, r.residual_evaluations) == (:solved, :tolerance_reached, 1)
+        @test (r.status, r.termination_reason, r.newton_steps) == (:solved, :tolerance_reached, 0)
         r = solve_from(quadratic, [1.0]; tol = 0.0, tol_inner = Inf)
-        @test (r.status, r.termination_reason, r.residual_evaluations) == (:failed, :inner_tolerance_reached, 1)
+        @test (r.status, r.termination_reason, r.newton_steps) == (:failed, :inner_tolerance_reached, 0)
         r = solve_from(quadratic, [1.0]; max_inner_iters = 0, tol = 0.0, record_convergence = true)
-        @test (r.termination_reason, r.residual_evaluations, r.newton_steps) == (:max_inner_iters, 0, 0)
+        @test (r.termination_reason, r.newton_steps) == (:max_inner_iters, 0)
         @test isempty(r.relaxed_residual_history)
         r = solve_from(quadratic, [1.0]; max_inner_iters = 1, tol = 0.0, tol_inner = 0.0, record_convergence = true)
         @test (r.termination_reason, r.newton_steps) == (:max_inner_iters, 1)

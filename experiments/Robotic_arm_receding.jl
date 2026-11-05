@@ -147,8 +147,8 @@ function create_planner_from_context(
             linear_solver = ctx.linear_solver, proj_eps = ctx.proj_eps,
             max_inner = ctx.max_inner, tol = ctx.tol, stop_at_tol, collect_traces = plotting,
             on_result = (tag, ρ, r, elapsed, tr) -> begin
-                @printf("[Robotic_arm_receding]   rho=%.0e %-10s ‖K₀‖/√m=%.3e %-10s goal_dist=%.5f  %4d iters %.2f s\n",
-                        ρ, tag, k₀(r), k₀(r) < ctx.tol ? "converged" : "", goal_dist(r.z), r.iters, elapsed)
+                @printf("[Robotic_arm_receding]   rho=%.0e %-10s ‖K₀‖/√m=%.3e %-10s goal_dist=%.5f  %4d steps %.2f s\n",
+                        ρ, tag, k₀(r), k₀(r) < ctx.tol ? "converged" : "", goal_dist(r.z), r.newton_steps, elapsed)
                 tag == "cold" && tr !== nothing && (cold_traces[ρ] = tr)
             end)
         cold, warm = st.value

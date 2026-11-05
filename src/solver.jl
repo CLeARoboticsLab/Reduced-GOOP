@@ -70,10 +70,12 @@ a primal one (length of `kkt.primal_dims`; then s, σ and γ start at 1 and ever
 `nothing` (the same start with x = 0).
 
 Returns `(; status, termination_reason, z, x, ρ, residual, relaxed_residual, newton_steps,
-residual_evaluations, svd_fallbacks)`, and with `record_convergence` also `ρ_history`,
-`relaxed_residual_history`, `residual_history` (one entry per residual evaluation) and
-`step_size_history` (one per Newton step). `residual` is ‖K₀‖ = ‖F(z; ρ = 0)‖ at the returned `z`,
-`status` is `:solved` iff it is below `tol`, and `relaxed_residual` is ‖F(z; ρ)‖ at the last level.
+svd_fallbacks)`, and with `record_convergence` also `ρ_history`, `relaxed_residual_history`,
+`residual_history` (one entry per stopping test: the iterate before each Newton step and, unless the
+level ended at `max_inner_iters`, the one it stopped at) and `step_size_history` (one per Newton step).
+`newton_steps` counts the Newton steps taken over every level; a step the line search rejects is not one.
+`residual` is ‖K₀‖ = ‖F(z; ρ = 0)‖ at the returned `z`, `status` is `:solved` iff it is below `tol`, and
+`relaxed_residual` is ‖F(z; ρ)‖ at the last level.
 """
 function solve(
     ::PDIP,
@@ -138,7 +140,7 @@ function solve(
 
     ρ_history, relaxed_residual_history, residual_history, step_size_history =
         Float64[], Float64[], Float64[], Float64[]
-    newton_steps, residual_evaluations, svd_fallbacks = 0, 0, 0
+    newton_steps, svd_fallbacks = 0, 0
     residual = Inf
     termination_reason = :max_inner_iters
     converged = false
@@ -151,7 +153,6 @@ function solve(
         termination_reason = :max_inner_iters
         for _ in 1:max_inner_iters
             # Stopping tests: ‖K₀‖ < tol ends the solve, ‖F(z; ρ)‖ < tol_inner ends this level.
-            residual_evaluations += 1
             kkt.K₀!(F₀, z; θ)
             residual = norm(F₀)
             if record_convergence
@@ -249,7 +250,6 @@ function solve(
         residual,
         relaxed_residual = norm(F),
         newton_steps,
-        residual_evaluations,
         svd_fallbacks,
     )
     record_convergence || return result
@@ -348,7 +348,8 @@ The projected Levenberg–Marquardt method: Newton's method on F(z; ρ) = 0 for 
   4. the η update from the gain ratio, after the line search.
 
 `z₀` and the outputs are as for `PDIP`; the outputs add `η`, the η after the last step (to continue a
-solve from), and with `record_convergence` `η_history` (the η of each Newton step).
+solve from), and with `record_convergence` `η_history` (the η of each Newton step, and of a last one
+the line search rejected).
 """
 function solve(
     ::ProjectedLM,
@@ -414,7 +415,7 @@ function solve(
     η = clamp(η, η_min, η_max)
     ρ_history, relaxed_residual_history, residual_history, step_size_history, η_history =
         Float64[], Float64[], Float64[], Float64[], Float64[]
-    newton_steps, residual_evaluations, svd_fallbacks = 0, 0, 0
+    newton_steps, svd_fallbacks = 0, 0
     residual = Inf
     termination_reason = :max_inner_iters
     converged = false
@@ -426,7 +427,6 @@ function solve(
         termination_reason = :max_inner_iters
         for _ in 1:max_inner_iters
             # Stopping tests: ‖K₀‖ < tol ends the solve, ‖F(z; ρ)‖ < tol_inner ends this level.
-            residual_evaluations += 1
             kkt.K₀!(F₀, z; θ)
             residual = norm(F₀)
             if record_convergence
@@ -555,7 +555,6 @@ function solve(
         residual,
         relaxed_residual = norm(F),
         newton_steps,
-        residual_evaluations,
         svd_fallbacks,
         η,
     )

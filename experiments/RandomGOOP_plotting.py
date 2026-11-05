@@ -487,7 +487,7 @@ def timing_rows(run):
                         "std": values.std() if len(values) else math.nan,
                         "median": float(np.median(accepted)) if accepted else math.nan,
                         # Runs before 2026-11-02 record only residual evaluations: Newton steps plus one per stage.
-                        "iterations": float(np.median([number(r.get("newton_steps", r["iterations"])) for r in solves if r["accepted"] == "true"]))
+                        "iterations": float(np.median([number(r["newton_steps"]) if "newton_steps" in r else number(r["iterations"]) - 1 for r in solves if r["accepted"] == "true"]))
                         if accepted
                         else math.nan,
                         "accepted": f"{len(accepted)}/{len(solves)}",

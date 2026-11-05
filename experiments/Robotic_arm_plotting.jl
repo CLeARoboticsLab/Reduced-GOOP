@@ -717,7 +717,7 @@ residual_panel(resid, tol_inner, stop; xmax = nothing, tol_scale = 1.0) =
                        mark = tol_inner === nothing ? nothing :
                               (tol_inner, L"\mathrm{tol}_{\mathrm{inner}} = \rho"))
 
-# (h) THE UNRELAXED RESIDUAL ‖K₀‖ = ‖F(z; ρ = 0)‖ at each residual evaluation, per equation as
+# (h) THE UNRELAXED RESIDUAL ‖K₀‖ = ‖F(z; ρ = 0)‖ at each stopping test, per equation as
 # (g), against the acceptance tolerance: the number a row is judged by. It sits above (g) by about ρ
 # per complementarity row once the relaxed residual is small, which is where ρ's bias shows.
 k₀_panel(k₀, tol; xmax = nothing, tol_scale = 1.0) =
@@ -1010,7 +1010,7 @@ function stop_reason(rr, tol_inner, max_inner, tol; scale = 1.0)
     isfinite(rr.history[end]) || return "non-finite residual"
     rr.history[end] < tol_inner &&
         return @sprintf("%s < %.0e", r_name, tol_inner / scale)
-    rr.iters >= max_inner && return @sprintf("max_inner = %d", max_inner)
+    rr.termination_reason === :max_inner_iters && return @sprintf("max_inner = %d", max_inner)
     return "line-search stall"
 end
 

@@ -392,8 +392,8 @@ end
 	# converge almost immediately.
 	warm = ReducedGOOP.solve(ReducedGOOP.PDIP(), kkt, θ; z₀ = cold.z, options)
 	@test warm.status === :solved
-	@test warm.residual_evaluations <= cold.residual_evaluations
-	@test warm.residual_evaluations <= 15
+	@test warm.newton_steps <= cold.newton_steps
+	@test warm.newton_steps <= 14
 	@test isapprox(warm.x, expected; atol = 1e-6)
 
 	# A z₀ of neither primal nor full length is rejected.

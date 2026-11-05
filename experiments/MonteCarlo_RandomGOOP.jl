@@ -443,7 +443,7 @@ function check_complete_kkt(record, systems, instance, settings)
             status=:exception,
             reason=:exception,
             error=sprint(showerror, err, catch_backtrace()),
-            iterations=0,
+            newton_steps=0,
             seconds=0.0,
             compile_seconds=0.0,
         )
@@ -704,7 +704,7 @@ function print_kkt_header(label; io=stdout)
         "%-9s %-7s %6s %8s %12s %12s %10s %10s %9s %10s  %s\n",
         "ρ",
         "status",
-        "iters",
+        "steps",
         "time_s",
         "‖R‖",
         "‖K₀‖",
@@ -720,7 +720,7 @@ end
 function print_kkt_stage(;
     ρ,
     status,
-    iterations,
+    newton_steps,
     seconds,
     relaxed,
     unrelaxed,
@@ -738,7 +738,7 @@ function print_kkt_stage(;
         "%-9.0e %-7s %6d %8.3f %12.2e %12.2e %10.2e %10.2e %9.3f %10.2e  %s\n",
         ρ,
         string(status),
-        iterations,
+        newton_steps,
         seconds,
         relaxed,
         unrelaxed,
@@ -769,35 +769,22 @@ function stage_options(settings, ρ)
 end
 
 """
-A stage's trace from PDIP's histories (one entry per residual evaluation): one row, ‖K_ρ‖₂ (`raw`) and ‖K₀‖₂
-(`unrelaxed`), per iterate a Newton step was tried from, then the stage's last iterate. A stage that ends by a
-stopping test tries no step from its last evaluation, which is its last iterate; one that ends by a line-search
-failure tried one, from the iterate it returns.
+A stage's trace from PDIP's histories (one entry per stopping test): one row, ‖K_ρ‖₂ (`raw`) and ‖K₀‖₂
+(`unrelaxed`), per iterate a Newton step was taken from, then the stage's last iterate: `newton_steps` + 1 rows.
 """
 function stage_history(output)
-    tried = output.newton_steps + (output.termination_reason === :line_search_failed)
     history = [
-        (; raw=output.relaxed_residual_history[k], unrelaxed=output.residual_history[k], eta=NaN) for k in 1:tried
+        (; raw=output.relaxed_residual_history[k], unrelaxed=output.residual_history[k], eta=NaN) for k in 1:output.newton_steps
     ]
     push!(history, (; raw=output.relaxed_residual, unrelaxed=output.residual, eta=NaN))
 end
-
-"MCI.stage_record of a PDIP stage, whose residual evaluations are the record's iterations."
-pdip_stage_record(; ρ, timed, history, initial, final) = MCI.stage_record(;
-    ρ,
-    parameter=:rho,
-    timed=merge(timed, (; value=(; timed.value..., iters=timed.value.residual_evaluations))),
-    history,
-    initial,
-    final,
-)
 
 """
 Algorithm 5.1 on one system, `formulation` (the reduced (5.2) or the complete :perturbed), from the cold
 start down `rho_schedule` (stage_options). Each stage starts at the previous one's last iterate. The solve
 is judged at its best stage, the one with the lowest ‖K₀‖₂: accepted iff ‖K₀‖₂ <= epsilon_0 there. After
-the solver's ‖K₀‖₂ < epsilon_0 stop, every later stage returns at its first residual evaluation, with no
-Newton step.
+the solver's ‖K₀‖₂ < epsilon_0 stop, every later stage returns at its first stopping test, with no Newton
+step.
 """
 function solve_algorithm51(formulation, problem, θ, initial_guess, settings; context, io=stdout)
     (; kkt) = formulation
@@ -814,13 +801,13 @@ function solve_algorithm51(formulation, problem, θ, initial_guess, settings; co
         timed = @timed ReducedGOOP.solve(ReducedGOOP.PDIP(), kkt, θ; z₀=y, options)
         output = timed.value
         y .= output.z
-        push!(stages, pdip_stage_record(; ρ, timed, history=stage_history(output), initial=stage_initial, final=copy(y)))
+        push!(stages, MCI.stage_record(; ρ, parameter=:rho, timed, history=stage_history(output), initial=stage_initial, final=copy(y)))
         kkt.F!(r, y; θ, ρ)
         kkt.K₀!(r0, y; θ)
         print_kkt_stage(;
             ρ,
             status=output.status,
-            iterations=output.residual_evaluations,
+            newton_steps=output.newton_steps,
             seconds=last(stages).seconds,
             relaxed=norm(r),
             unrelaxed=norm(r0),
@@ -863,7 +850,7 @@ function solve_algorithm51(formulation, problem, θ, initial_guess, settings; co
         best_stage=best.index,
         status=stages[best.index].status,
         reason=stages[best.index].reason,
-        iterations=sum(s.iterations for s in stages),
+        newton_steps=sum(s.newton_steps for s in stages),
         seconds=sum(s.seconds for s in stages),
         compile_seconds=sum(s.compile_seconds for s in stages),
     )
@@ -982,15 +969,15 @@ The run's CSV files, read by experiments/RandomGOOP_plotting.py:
   setup.csv     one row per (class, K, system): build time, and the warm-up's first-solve time and the
                 part of it spent compiling (jit_warmup)
   solves.csv    one row per solve (system reduced, formulation interior_point: the (5.2); complete,
-                perturbed): accepted, solve time (no compilation), residual evaluations and Newton steps,
+                perturbed): accepted, solve time (no compilation), Newton steps,
                 ‖K₀‖₂ of the judged iterate, the distance to the trial's reduced z, and Fig 4's distance
                 between the two iterates at the end of the stage ρ = fig3_rho (distance_fig3)
-  stages.csv    one row per ρ stage of every solve: residual evaluations and Newton steps, solve time (no
+  stages.csv    one row per ρ stage of every solve: Newton steps, solve time (no
                 compilation), compile time, status, and ‖R‖₂, ‖K₀‖₂ at the stage's last iterate
   traces.csv    one row per iterate of every ρ stage, from its start to its last iterate: ‖R‖₂, ‖K₀‖₂
   settings.csv  the scalar settings (dimensions for the size formulas, tolerances, coupling)
-`iterations` counts the solver's residual evaluations: a stage's Newton steps and the evaluation at which
-it stops. `newton_steps` counts the steps alone: a stage's trace rows but its last.
+`newton_steps` counts the Newton steps taken (a step the line search rejects is not one); a stage's trace has
+`newton_steps` + 1 rows.
 """
 function export_csv(directory)
     (; settings, metadata, results) = deserialize(joinpath(directory, "results.jls"))
@@ -1017,13 +1004,11 @@ function export_csv(directory)
         setup,
     )
     solves, stage_rows, traces = Any[], Any[], Any[]
-    newton_steps(stage) = length(stage.history) - 1
     function add_solve!(key, result; distance="", distance_fig3="")
-        steps = sum(newton_steps, result.stages; init=0)
-        push!(solves, (key..., result.accepted, result.seconds, result.iterations, steps, result.validation.unrelaxed_rms, distance, distance_fig3))
+        push!(solves, (key..., result.accepted, result.seconds, result.newton_steps, result.validation.unrelaxed_rms, distance, distance_fig3))
         for (stage, s) in enumerate(result.stages)
             last_raw, last_unrelaxed = isempty(s.history) ? (NaN, NaN) : (last(s.history).raw, last(s.history).unrelaxed)
-            push!(stage_rows, (key..., stage, s.ρ, s.iterations, newton_steps(s), s.seconds, s.compile_seconds, s.status, last_raw, last_unrelaxed))
+            push!(stage_rows, (key..., stage, s.ρ, s.newton_steps, s.seconds, s.compile_seconds, s.status, last_raw, last_unrelaxed))
             for (iteration, h) in enumerate(s.history)
                 push!(traces, (key..., stage, s.ρ, iteration, h.raw, h.unrelaxed))
             end
@@ -1038,12 +1023,12 @@ function export_csv(directory)
     end
     write_csv(
         joinpath(directory, "stages.csv"),
-        ("class", "K", "trial", "system", "formulation", "stage", "rho", "iterations", "newton_steps", "seconds", "compile_seconds", "status", "raw", "unrelaxed"),
+        ("class", "K", "trial", "system", "formulation", "stage", "rho", "newton_steps", "seconds", "compile_seconds", "status", "raw", "unrelaxed"),
         stage_rows,
     )
     write_csv(
         joinpath(directory, "solves.csv"),
-        ("class", "K", "trial", "system", "formulation", "accepted", "seconds", "iterations", "newton_steps", "unrelaxed", "distance", "distance_fig3"),
+        ("class", "K", "trial", "system", "formulation", "accepted", "seconds", "newton_steps", "unrelaxed", "distance", "distance_fig3"),
         solves,
     )
     write_csv(
