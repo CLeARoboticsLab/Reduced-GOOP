@@ -3,7 +3,7 @@ Monte Carlo check of whether reduced-GOOP solutions also solve the complete KKT 
 on the two-player intersection game from Intersection.jl.
 
 For every objective variant and every sampled initial state:
- 1. Solve the REDUCED KKT system with Scholtes down `rho_schedule`, starting from
+ 1. Solve the REDUCED KKT system (in Scholtes form) with ProjectedLM down `rho_schedule`, starting from
     Intersection's yielding initial guess (with :unicycle, the double integrator's solution of
     the same instance). Every solve, reduced or complete, is accepted iff
     its unrelaxed KKT residual ‖K₀‖/√m is at most `tol` (reduced) or `complete_tol`. A ρ chain
@@ -11,9 +11,9 @@ For every objective variant and every sampled initial state:
     check likewise keeps its best try.
  2. For an accepted reduced solution, test each COMPLETE formulation in each mode:
       :fixed_primal  keep the reduced trajectory fixed and solve only for the other complete
-                     variables (multipliers, slacks) with Scholtes, x entering as a parameter.
+                     variables (multipliers, slacks) with ProjectedLM, x entering as a parameter.
                      A pass means the complete system holds, to tolerance, with the reduced trajectory.
-      :warmstart     solve the whole complete system with Scholtes from the mapped reduced
+      :warmstart     solve the whole complete system with ProjectedLM from the mapped reduced
                      solution, and report how far the trajectory moves.
 
 Terms
@@ -226,7 +226,7 @@ function double_integrator_guess(double_integrator, instance, settings)
     # The sampled unicycle states [px, py, v, ψ] as double-integrator states [px, py, vx, vy].
     states = [[s[1], s[2], s[3] * cos(s[4]), s[3] * sin(s[4])] for s in instance.states]
     (; θ, initial_guess) = instance_inputs((; states), flatten_parameters, dynamics, settings)
-    reduced = solve_scholtes_reduced(
+    reduced = solve_reduced(
         reduced_kkt,
         problem,
         θ,
@@ -302,8 +302,8 @@ default_settings() = (;
     #! format: off
     rho_schedule          = [1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9], # reduced system
     #! format: on
-    max_inner_iters=1000,                        # Scholtes Newton steps per ρ stage
-    linear_solver=:normal,                       # ScholtesOptions.linear_solver
+    max_inner_iters=1000,                        # Newton steps per ρ stage
+    linear_solver=:normal,                       # ProjectedLMOptions.linear_solver
     eta_0=1e-2,                                  # initial regularization η: every ρ stage, and a complete solve's first try
     # One complete-solve retry per entry, with that η; all below eta_0, so no retry repeats the first try.
     retry_eta=[1e-3, 1e-4, 1e-5],
@@ -312,7 +312,7 @@ default_settings() = (;
     # at the best stage of its ρ chain (and, for a complete check, its best try).
     tol=2e-4,                                    # reduced system
     complete_tol=1e-3,                           # complete systems
-    inner_ρ_tol=1e-2,                            # Scholtes ρ stage's inner stop: ‖R‖/√m < min(ρ, inner_ρ_tol). 1.0 for old behavior
+    inner_ρ_tol=1e-2,                            # a ρ stage's inner stop: ‖R‖/√m < min(ρ, inner_ρ_tol). 1.0 for old behavior
     # Complete-system start (complete_initialization)
     positive_seed=1.0,                           # unmapped nonnegative variables
     positive_floor=1e-10,                        # floor for every nonnegative variable
@@ -394,11 +394,7 @@ function build_double_integrator(variant, settings)
     (; problem, flatten_parameters) = variant_problem(variant, dynamics, settings)
     println("Building the double integrator's reduced KKT system for $(variant.name), for the initial guesses...")
     flush(stdout)
-    reduced_kkt = ReducedGOOP.generate_slacked_reduced_kkt_system(
-        problem;
-        complementarity=:scholtes,
-        codegen=:fast_differentiation,
-    )
+    reduced_kkt = ReducedGOOP.generate_slacked_scholtes_reduced_kkt_system(problem; codegen=:fast_differentiation)
     (; dynamics, problem, flatten_parameters, reduced_kkt)
 end
 
@@ -412,9 +408,8 @@ function build_systems(variant, builders, dynamics, settings)
     (; problem, flatten_parameters) = variant_problem(variant, dynamics, settings)
     println("Building reduced KKT system for $(variant.name) variant...")
     flush(stdout)
-    reduced_construction = @timed ReducedGOOP.generate_slacked_reduced_kkt_system(
+    reduced_construction = @timed ReducedGOOP.generate_slacked_scholtes_reduced_kkt_system(
         problem;
-        complementarity=:scholtes,
         codegen=:fast_differentiation,
     )
     reduced_kkt = reduced_construction.value
@@ -428,8 +423,9 @@ function build_systems(variant, builders, dynamics, settings)
         mapping = variable_mapping(reduced_kkt, complete_kkt)
         # The exact system is square; the fixed-primal Jacobian keeps every row but drops the
         # physical columns.
-        builder.name === :exact && @assert complete_kkt.n == complete_kkt.n_nc
-        @assert size(fixed.system.Jnc_buf) == (complete_kkt.n_nc, complete_kkt.n-length(complete_kkt.primal_dims))
+        builder.name === :exact && @assert complete_kkt.variable_dimension == complete_kkt.kkt_dimension
+        @assert size(fixed.system.∇F_z!.result_buffer) ==
+                (complete_kkt.kkt_dimension, complete_kkt.variable_dimension-length(complete_kkt.primal_dims))
         (;
             builder.name,
             complete_kkt,
@@ -439,17 +435,20 @@ function build_systems(variant, builders, dynamics, settings)
             construction_seconds=complete_construction.time,
         )
     end
+    reduced_pairs = length(reduced_kkt.complementarity_pairs)
+    reduced_relaxations = count(pair -> pair.u_relaxation != 0, reduced_kkt.complementarity_pairs)
     metadata = (;
         variant=variant.name,
         objective=(; variant.control_scale, variant.goal_scale),
-        # Reduced KKT system: variables y, equations F_nc and complementarity pairs; then the
-        # Scholtes system the solver works on: rows of R(w; ρ), columns of w = [y; s; u].
+        # Reduced KKT system: its variables y (x, s, λ, γ, ψ, ϕ), its stationarity and equality rows and
+        # its complementarity pairs; then the whole Scholtes system the solver works on: the rows of F, and
+        # the columns of z (y with the slacks σ and σ̂ of the pairs and the relaxations u).
         reduced=(;
-            variables=reduced_kkt.n,
-            equations=reduced_kkt.n_nc,
-            complementarity=reduced_kkt.n_comp,
-            rows=reduced_kkt.n_nc+2reduced_kkt.n_comp,
-            columns=reduced_kkt.n+reduced_kkt.n_comp+ReducedGOOP._n_u(reduced_kkt),
+            variables=reduced_kkt.variable_dimension-reduced_pairs-reduced_relaxations,
+            equations=reduced_kkt.kkt_dimension-2reduced_pairs,
+            complementarity=reduced_pairs,
+            rows=reduced_kkt.kkt_dimension,
+            columns=reduced_kkt.variable_dimension,
             construction_seconds=reduced_construction.time,
         ),
         complete=[(; p.name, p.fixed.dimensions, p.mapping, p.construction_seconds) for p in formulations],
@@ -471,10 +470,10 @@ function jit_warmup(systems, modes, instance, dynamics, settings)
     flush(stdout)
     seconds = @elapsed begin
         context = "warm-up, $(variant.name)"
-        reduced = solve_scholtes_reduced(reduced_kkt, problem, θ, initial_guess, settings; context, io=devnull)
+        reduced = solve_reduced(reduced_kkt, problem, θ, initial_guess, settings; context, io=devnull)
         for formulation in formulations, mode in modes
             start = complete_initialization(formulation, reduced.output, θ, settings)
-            solve_scholtes_complete(
+            solve_complete(
                 formulation,
                 mode,
                 problem,
@@ -513,7 +512,7 @@ function solve_reduced_kkt(systems, trial, instance, dynamics, num_checks, setti
         k₀_range(double_integrator_solve.validation),
     )
     context = trial_context(trial, variant.name)
-    reduced = solve_scholtes_reduced(reduced_kkt, problem, θ, initial_guess, settings; context)
+    reduced = solve_reduced(reduced_kkt, problem, θ, initial_guess, settings; context)
     println(
         reduced_verdict(reduced, settings),
         reduced.accepted ? " Running its $num_checks complete checks." : " Skipping its $num_checks complete checks.",
@@ -547,7 +546,7 @@ function check_complete_kkt(record, systems, formulation, mode, settings)
     )
     start = complete_initialization(formulation, reduced.output, θ, settings)
     complete = try
-        solve_scholtes_complete(
+        solve_complete(
             formulation,
             mode,
             systems.problem,
@@ -621,9 +620,7 @@ function run(; overrides=(;))
     )
     variants = filter(v -> v.name in settings.objective_variants, objective_variants(settings))
     modes = filter(m -> m.name in settings.comparison_modes, [(; name=:fixed_primal), (; name=:warmstart)])
-    # The complete system in the container the Scholtes engine reads (ReducedGOOP's temporary
-    # _scholtes_engine_system), which every complete-system function below takes.
-    builders = [(; name=:exact, build=problem -> ReducedGOOP._scholtes_engine_system(ReducedGOOP.generate_slacked_complete_kkt_system(problem; complementarity=:exact)))]
+    builders = [(; name=:exact, build=problem -> ReducedGOOP.generate_slacked_complete_kkt_system(problem; complementarity=:exact))]
     builders = filter(b -> b.name in settings.complete_formulations, builders)
     num_checks = length(builders) * length(modes)
     total, done = length(variants) * length(instances) * num_checks, 0
@@ -897,42 +894,63 @@ function print_kkt_stage(;
 end
 
 """
-Scholtes options for one ρ stage of any solve, reduced or complete; only ρ, the acceptance
-tolerance `tol` (an RMS) and the initial η differ between solves. Same options as
-Intersection.demo: of the fixed constants, only proj_eps, eta_max and eta_schedule differ from the
-ScholtesOptions defaults; the rest come from settings.
+ProjectedLM options for one ρ stage of any solve, reduced or complete; only ρ, the acceptance
+tolerance `tol` (an RMS) and the initial η differ between solves. Of the fixed constants, only
+proj_eps and η_max differ from the ProjectedLMOptions defaults; the rest come from settings.
+`record_convergence` returns the histories the stage's trace is made of (solver_history).
 """
-function scholtes_options(settings; ρ, tol, eta, residual_scale)
-    ReducedGOOP.ScholtesOptions(;
-        rho_schedule=[Float64(ρ)],
-        max_inner=settings.max_inner_iters,
+function solver_options(settings; ρ, tol, eta, residual_scale)
+    ReducedGOOP.ProjectedLMOptions(;
+        ρ_schedule=[Float64(ρ)],
+        max_inner_iters=settings.max_inner_iters,
         tol=tol * residual_scale,
         # A stage's inner loop stops at ‖R‖/√m < min(ρ, inner_ρ_tol): coarse stages are solved
         # more tightly than their ρ.
         tol_inner=min(ρ, settings.inner_ρ_tol) * residual_scale,
-        projected_step=true,
         proj_eps=1e-8,
         linear_solver=settings.linear_solver,
-        eta_schedule=true,
-        eta_init=eta,
-        eta_min=1e-8,
-        eta_max=1e4,
+        η=eta,
+        η_min=1e-8,
+        η_max=1e4,
         gain_low=0.25,
         gain_high=0.75,
-        tightening_rate=1.2,
-        loosening_rate=3.0,
+        η_tightening_rate=1.2,
+        η_loosening_rate=3.0,
+        record_convergence=true,
     )
 end
 
 """
-Recorder for one ρ stage's solver trace: `trace` appends (; raw = ‖R‖, unrelaxed = ‖K₀‖, eta) for
-each iterate to `history`, and the caller appends the solver's final iterate the same way.
+One ρ stage's solver trace, from ProjectedLM's histories: (; raw = ‖R‖, unrelaxed = ‖K₀‖, eta) for each
+iterate a Newton step was tried from (`eta`, that step's η), then the stage's final iterate (`eta`, the η
+a next step would start from).
 """
-function history_recorder(residuals, ρ)
-    history = NamedTuple{(:raw, :unrelaxed, :eta),NTuple{3,Float64}}[]
-    trace =
-        nt -> push!(history, (; raw=norm(nt.r), unrelaxed=ReducedGOOP._norm_K₀(residuals, nt.r, nt.w, ρ), eta=nt.eta))
-    (; history, trace)
+function solver_history(output)
+    history = NamedTuple{(:raw, :unrelaxed, :eta),NTuple{3,Float64}}[
+        (; raw=output.relaxed_residual_history[k], unrelaxed=output.residual_history[k], eta=output.η_history[k])
+        for k in eachindex(output.η_history)
+    ]
+    push!(history, (; raw=output.relaxed_residual, unrelaxed=output.residual, eta=output.η))
+end
+
+"""
+A ProjectedLM output under the names the study's records, results.jls and the report use: `z` the
+trajectory, `w` the full iterate, `iters` the residual evaluations and `eta` the final η, with the
+preference slacks and the smallest sign-constrained coordinate of `kkt`, the system it solved.
+"""
+function study_output(output, kkt)
+    (;
+        output.status,
+        output.termination_reason,
+        z=output.x,
+        w=output.z,
+        iters=output.residual_evaluations,
+        output.residual,
+        output.relaxed_residual,
+        eta=output.η,
+        preference_slacks=output.z[kkt.preference_slack_dims],
+        sign_min=minimum(output.z[kkt.nonnegative_dims]; init=Inf),
+    )
 end
 
 """
@@ -978,21 +996,20 @@ function validate_solution(problem, θ, z; r, k₀, relaxed_rms, unrelaxed_rms, 
     )
 end
 
-function solve_scholtes_reduced(reduced_kkt, problem, θ, initial_guess, settings; context, io=stdout)
-    # R(w; ρ) = [F_nc(y); a(y) - s; s ⊙ b(y) + u - ρ] has m = n_nc + 2 n_comp rows
-    # (src/scholtes_residual.jl). Settings hold RMS tolerances, so they are scaled by √m.
-    m = reduced_kkt.n_nc + 2reduced_kkt.n_comp
+function solve_reduced(reduced_kkt, problem, θ, initial_guess, settings; context, io=stdout)
+    # F(z; ρ) has m rows: the stationarity and equality rows, then two per complementarity pair (its
+    # slack row and its product). Settings hold RMS tolerances, so they are scaled by √m.
+    m = reduced_kkt.kkt_dimension
     residual_scale = sqrt(m)
     # λ (λ_*) and ψ (ψ_*) are unsigned, so they carry over to the next ρ stage.
-    # scholtes_warm_start re-centres γ/φ, s and u for the new ρ, and each stage restarts η at
-    # eta_0: the same warm-ρ chain as Intersection.demo.
+    # initialize_scholtes! re-centres the slacks, γ/ϕ and u for the new ρ, and each stage restarts η
+    # at eta_0: the same warm-ρ chain as Intersection.demo.
     eq_cols = findall(
         v -> startswith(string(v), "λ_") || startswith(string(v), "ψ_"),
-        reduced_kkt.vars,
+        reduced_kkt.z_symbolic,
     )
-    residuals = ReducedGOOP.ScholtesResiduals(reduced_kkt)
-    # R(w; ρ), b(y) and K₀ at each stage's final iterate, for the table and the validation.
-    r, b, k₀_rows = zeros(m), zeros(reduced_kkt.n_comp), zeros(m)
+    # F(z; ρ) and K₀ at each stage's final iterate, for the table and the validation.
+    r, k₀_rows = zeros(m), zeros(m)
     stage_initial_guess = initial_guess
     previous_w = nothing
     stage_preference_slacks = nothing
@@ -1001,7 +1018,8 @@ function solve_scholtes_reduced(reduced_kkt, problem, θ, initial_guess, setting
     print_kkt_header("$context | reduced KKT | η₀ = $(compact(settings.eta_0))"; io)
     for ρ in settings.rho_schedule
         eq = isnothing(previous_w) ? zeros(length(eq_cols)) : previous_w[eq_cols]
-        w₀ = ReducedGOOP.scholtes_warm_start(
+        w₀ = ReducedGOOP.initialize_scholtes!(
+            zeros(reduced_kkt.variable_dimension),
             reduced_kkt,
             θ,
             stage_initial_guess,
@@ -1010,22 +1028,16 @@ function solve_scholtes_reduced(reduced_kkt, problem, θ, initial_guess, setting
             eq,
             preference_slacks=stage_preference_slacks,
         )
-        options = scholtes_options(settings; ρ, tol=settings.tol, eta=settings.eta_0, residual_scale)
-        (; history, trace) = history_recorder(residuals, ρ)
-        timed = @timed ReducedGOOP.solve(
-            ReducedGOOP.Scholtes(),
-            reduced_kkt,
-            θ;
-            z₀=stage_initial_guess,
-            w₀,
-            options,
-            trace,
+        options = solver_options(settings; ρ, tol=settings.tol, eta=settings.eta_0, residual_scale)
+        timed = @timed ReducedGOOP.solve(ReducedGOOP.ProjectedLM(), reduced_kkt, θ; z₀=w₀, options)
+        output = study_output(timed.value, reduced_kkt)
+        history = solver_history(timed.value)
+        push!(
+            stages,
+            stage_record(; ρ, parameter=:rho_reduced, timed=merge(timed, (; value=output)), history, initial=copy(w₀), final=copy(output.w)),
         )
-        output = timed.value
-        push!(history, (; raw=output.relaxed_residual, unrelaxed=output.residual, eta=output.eta))
-        push!(stages, stage_record(; ρ, parameter=:rho_reduced, timed, history, initial=copy(w₀), final=copy(output.w)))
-        ReducedGOOP._resid!(residuals, r, b, output.w, ρ)
-        ReducedGOOP._K₀!(k₀_rows, residuals, r, output.w, ρ)
+        reduced_kkt.F!(r, output.w; θ, ρ)
+        reduced_kkt.K₀!(k₀_rows, output.w; θ)
         print_kkt_stage(;
             ρ,
             status=output.status,
@@ -1052,8 +1064,8 @@ function solve_scholtes_reduced(reduced_kkt, problem, θ, initial_guess, setting
     # Judge and keep the best stage, not the last: each stage restarts γ/φ, s and u, so a later
     # stage can end worse than an earlier, converged one.
     (; output, ρ) = best
-    ReducedGOOP._resid!(residuals, r, b, output.w, ρ)
-    ReducedGOOP._K₀!(k₀_rows, residuals, r, output.w, ρ)
+    reduced_kkt.F!(r, output.w; θ, ρ)
+    reduced_kkt.K₀!(k₀_rows, output.w; θ)
     validation = validate_solution(
         problem,
         θ,
@@ -1061,7 +1073,7 @@ function solve_scholtes_reduced(reduced_kkt, problem, θ, initial_guess, setting
         r,
         k₀=k₀_rows,
         relaxed_rms=norm(r)/residual_scale,
-        unrelaxed_rms=ReducedGOOP._norm_K₀(residuals, r, output.w, ρ)/residual_scale,
+        unrelaxed_rms=norm(k₀_rows)/residual_scale,
         sign_violation=max(0.0, -output.sign_min),
         tol=settings.tol,
     )
@@ -1091,27 +1103,27 @@ function slack_target_values(kkt)
 end
 
 """
-Fixed-primal view of a complete KKT system, for `solve(Scholtes(), system, [θ; x]; w₀)`. Every
+Fixed-primal view of a complete KKT system, for `solve(ProjectedLM(), system, [θ; x]; z₀)`. Every
 complete equation is kept; the physical columns x become parameters and the other (free) columns
-are the unknowns, so the system is rectangular (n_nc rows, n minus the physical columns). Since x
-enters as a parameter, one compiled system serves every trial.
+are the unknowns, so the system is rectangular (every row, the columns but the physical ones).
+Since x enters as a parameter, one compiled system serves every trial.
 """
 function fixed_primal_formulation(kkt)
     physical = collect(kkt.primal_dims)
-    free = setdiff(collect(1:kkt.n), physical)
+    free = setdiff(collect(1:kkt.variable_dimension), physical)
     nθ, nx = kkt.parameter_dimension, length(physical)
     # y = [x; everything else], so the free columns are exactly nx+1:n and the complete system's
-    # sign-constrained coordinates shift down by nx.
-    free == collect((nx+1):kkt.n) || error("expected the physical columns to come first in y")
-    full = zeros(kkt.n)
-    full_J = copy(kkt.Jnc_buf)
+    # index sets shift down by nx.
+    free == collect((nx+1):kkt.variable_dimension) || error("expected the physical columns to come first in y")
+    full = zeros(kkt.variable_dimension)
+    full_J = copy(kkt.∇F_z!.result_buffer)
     # `slots` has full_J's sparsity pattern with values 1:nnz. Its free columns list, in CSC
     # order, which entries of nonzeros(full_J) form J = full_J[:, free], so J! can refresh J's
     # values in place without building a new sparse matrix.
     rows, cols, _ = findnz(full_J)
     slots = sparse(rows, cols, collect(1:nnz(full_J)), size(full_J)...)
     selected_slots = nonzeros(slots[:, free])
-    J = copy(full_J[:, free])
+    J = full_J[:, free]
     θ_buffer = zeros(nθ)
     function fill_full!(v, θx)
         full[physical] .= view(θx, (nθ+1):(nθ+nx))
@@ -1119,51 +1131,43 @@ function fixed_primal_formulation(kkt)
         θ_buffer .= view(θx, 1:nθ)
         full
     end
-    F! = (out, v, θx, ρ) -> kkt.F_nc!(out, fill_full!(v, θx), θ_buffer, ρ)
-    J! = function (J_out, v, θx, ρ)
-        kkt.J_nc!(full_J, fill_full!(v, θx), θ_buffer, ρ)
+    F! = (out, v; θ, ρ) -> kkt.F!(out, fill_full!(v, θ); θ=θ_buffer, ρ)
+    J! = function (J_out, v; θ, ρ)
+        kkt.∇F_z!(full_J, fill_full!(v, θ); θ=θ_buffer, ρ)
         nonzeros(J_out) .= view(nonzeros(full_J), selected_slots)
         J_out
     end
-    # The unrelaxed residual that CompleteKKTSystem carries; _norm_K₀ does not evaluate it for exact.
-    function complete_residual!(out, v, θx, ρ)
-        kkt.complete_residual!(out, fill_full!(v, θx), θ_buffer, ρ)
-    end
-    nonnegative_dims = kkt.nonnegative_dims .- nx
-    # ScholtesKKTSystem and CompleteKKTSystem are ReducedGOOP internals; this builds them the way
-    # _scholtes_engine_system does (src/scholtes_complete_kkt.jl), with no new codegen.
-    no_rows = spzeros(0, length(free))
-    inner = ReducedGOOP.ScholtesKKTSystem(
-        length(free),                     # n: unknowns are the free columns
-        kkt.n_nc,                         # every complete equation
-        0,                                # no complementarity block, as in the complete system
-        1:0,                              # no primal coordinates among the unknowns
-        kkt.preference_slack_dims .- nx,
-        Int[],
-        nθ + nx,                          # parameters [θ; x]
+    shift(dims) = dims .- nx
+    # GOOPKKTSystem's fields in order (a ReducedGOOP internal), with no new codegen: the free columns'
+    # F and ∇F, K₀ as F at ρ = 0, and the complete system's index sets shifted onto the free columns.
+    system = ReducedGOOP.GOOPKKTSystem(
         F!,
-        kkt.a!,
-        kkt.b!,
-        J!,
-        kkt.J_a!,
-        kkt.J_b!,
-        J,
-        no_rows,
-        copy(no_rows),
-        findnz(J)[1:2],
-        (Int[], Int[]),
-        (Int[], Int[]),
-        Int[],
-        0,
-        NamedTuple[],
-        kkt.vars[free],
-        zeros(nθ + nx),
-        Ref(0.0),
-        zeros(length(free)),
-        Ref(false),
+        ReducedGOOP.SymbolicTracingUtils.SparseFunction(J!, findnz(J)[1:2]..., size(J)),
+        (out, v; θ, ρ) -> out,               # slack targets: not used on this view
+        (out, v; θ) -> F!(out, v; θ, ρ=0.0), # K₀
+        kkt.kkt_dimension,                   # every complete equation
+        length(free),                        # unknowns: the free columns
+        nθ + nx,                             # parameters [θ; x]
+        kkt.primal_dims[1:0],                # no primal coordinates among the unknowns
+        shift(kkt.preference_slack_dims),
+        shift(kkt.interior_point_slack_dims),
+        shift(kkt.inequality_constraint_dual_dims),
+        shift(kkt.equality_constraint_dual_dims),
+        shift(kkt.stationarity_dual_dims),
+        shift(kkt.all_equality_stationarity_dual_dims),
+        shift(kkt.innermost_stationarity_dual_dims),
+        shift(kkt.nonnegative_dims),
+        kkt.F_symbolic,
+        kkt.z_symbolic[free],
+        kkt.slack_expressions,
+        kkt.G_symbolic,
+        kkt.levels,
+        kkt.kind,
+        kkt.complementarity,
+        kkt.complementarity_pairs,
+        kkt.preference_slack_rows,
     )
-    system = ReducedGOOP.CompleteKKTSystem(inner, (; kkt.formulation, complete_residual!, nonnegative_dims))
-    (; free, physical, system, dimensions=(; rows=kkt.n_nc, columns=length(free), full_columns=kkt.n))
+    (; free, physical, system, dimensions=(; rows=kkt.kkt_dimension, columns=length(free), full_columns=kkt.variable_dimension))
 end
 
 """
@@ -1176,8 +1180,8 @@ reduced, inherited lower-level KKT rows in complete), so they start at 0 or posi
 complete_initialization).
 """
 function variable_mapping(reduced, complete)
-    reduced_names = Dict(string(v) => j for (j, v) in enumerate(reduced.vars))
-    complete_names = Dict(string(v) => j for (j, v) in enumerate(complete.vars))
+    reduced_names = Dict(string(v) => j for (j, v) in enumerate(reduced.z_symbolic))
+    complete_names = Dict(string(v) => j for (j, v) in enumerate(complete.z_symbolic))
     source, destination, labels = Int[], Int[], String[]
     function add_pair!(reduced_name, complete_variable, label)
         push!(source, reduced_names[reduced_name])
@@ -1216,7 +1220,7 @@ Starting point for a complete solve from an accepted reduced solution. The order
 """
 function complete_initialization(formulation, output, θ, settings)
     (; complete_kkt) = formulation
-    y = zeros(complete_kkt.n)
+    y = zeros(complete_kkt.variable_dimension)
     y[complete_kkt.primal_dims] .= output.z
     y[complete_kkt.nonnegative_dims] .= settings.positive_seed
     y[formulation.mapping.destination] .= output.w[formulation.mapping.source]
@@ -1226,7 +1230,7 @@ function complete_initialization(formulation, output, θ, settings)
     y
 end
 
-function solve_scholtes_complete(
+function solve_complete(
     formulation,
     mode,
     problem,
@@ -1250,8 +1254,7 @@ function solve_scholtes_complete(
     system = fixed_mode ? formulation.fixed.system : complete_kkt
     parameters = fixed_mode ? [θ; physical] : θ
     unknowns = fixed_mode ? formulation.fixed.free : Colon()
-    residuals = ReducedGOOP.ScholtesResiduals(system)
-    residual_scale = sqrt(complete_kkt.n_nc)
+    residual_scale = sqrt(complete_kkt.kkt_dimension)
     attempts = Any[]
     for (attempt, eta) in enumerate([settings.eta_0; retry_values])
         y = copy(initial)
@@ -1268,24 +1271,19 @@ function solve_scholtes_complete(
             stage_initial = copy(y)
             # exact ignores ρ (its residual is evaluated at ρ = 0); the 1e-12 floor only keeps ρ and
             # tol_inner positive.
-            options = scholtes_options(settings; ρ=max(ρ, 1e-12), tol=settings.complete_tol, eta, residual_scale)
-            (; history, trace) = history_recorder(residuals, ρ)
-            timed = @timed ReducedGOOP.solve(
-                ReducedGOOP.Scholtes(),
-                system,
-                parameters;
-                w₀=y[unknowns],
-                options,
-                trace,
-            )
-            output = timed.value
+            options = solver_options(settings; ρ=max(ρ, 1e-12), tol=settings.complete_tol, eta, residual_scale)
+            timed = @timed ReducedGOOP.solve(ReducedGOOP.ProjectedLM(), system, parameters; z₀=y[unknowns], options)
+            output = study_output(timed.value, system)
+            history = solver_history(timed.value)
             y[unknowns] .= output.w
-            push!(history, (; raw=output.relaxed_residual, unrelaxed=output.residual, eta=output.eta))
-            push!(stages, stage_record(; ρ, parameter=:unrelaxed, timed, history, initial=stage_initial, final=copy(y)))
+            push!(
+                stages,
+                stage_record(; ρ, parameter=:unrelaxed, timed=merge(timed, (; value=output)), history, initial=stage_initial, final=copy(y)),
+            )
             # Residuals of the full complete iterate, for the table and the best-stage choice.
-            r, r0 = zeros(complete_kkt.n_nc), zeros(complete_kkt.n_nc)
-            complete_kkt.F_nc!(r, y, θ, ρ)
-            complete_kkt.F_nc!(r0, y, θ, 0.0)
+            r, r0 = zeros(complete_kkt.kkt_dimension), zeros(complete_kkt.kkt_dimension)
+            complete_kkt.F!(r, y; θ, ρ)
+            complete_kkt.F!(r0, y; θ, ρ=0.0)
             print_kkt_stage(;
                 ρ,
                 status=output.status,
@@ -1306,12 +1304,12 @@ function solve_scholtes_complete(
                 best = (; y=copy(y), ρ, k₀, index=length(stages))
             end
         end
-        # Judge and keep the best stage, not the last, as in solve_scholtes_reduced. The full residual
+        # Judge and keep the best stage, not the last, as in solve_reduced. The full residual
         # retains stationarity, equality, complementarity, and slack equations.
         y = best.y
-        r, r0 = zeros(complete_kkt.n_nc), zeros(complete_kkt.n_nc)
-        complete_kkt.F_nc!(r, y, θ, best.ρ)
-        complete_kkt.F_nc!(r0, y, θ, 0.0)
+        r, r0 = zeros(complete_kkt.kkt_dimension), zeros(complete_kkt.kkt_dimension)
+        complete_kkt.F!(r, y; θ, ρ=best.ρ)
+        complete_kkt.F!(r0, y; θ, ρ=0.0)
         validation = validate_solution(
             problem,
             θ,
@@ -1801,7 +1799,7 @@ function trial_page(data, row)
     end
     for (column, trajectory) in enumerate(trajectories)
         (; name, physical, status, k₀, linestyle) = trajectory
-        # Only the solver status: Scholtes reports :solved exactly when K₀ meets the tolerance that
+        # Only the solver status: ProjectedLM reports :solved exactly when K₀ meets the tolerance that
         # acceptance uses, so an accepted flag would repeat it (the verdict lines still state it).
         ax = CM.Axis(
             maps[1, column];
@@ -2012,10 +2010,10 @@ function summary_page(data, directory)
         "Both systems use identical physical ordering: player, time knot, $(is_unicycle(settings) ? "[px, py, v, ψ, a, ω]" : "[px, py, vx, vy, ax, ay]"). Preference slacks map by player/source preference/component, not flat index order. The innermost original equality and inequality multipliers also map by player and original row. All other equality/induced multipliers start at zero; remaining sign-constrained variables use positive_seed, followed by auxiliary-slack initialization from their defining expressions. Full source/destination index maps and labels are saved in results.jls.",
     )
     paragraph!(
-        "Every solve uses Scholtes; each ρ stage's inner loop stops once its scaled relaxed residual drops below min(ρ, $(settings.inner_ρ_tol)), at max_inner_iters, or on a line-search stall, unless the scaled residual reaches its tolerance first. :fixed_primal recovery solves the complete system with the physical trajectory as a parameter, so only the remaining columns move; nonnegative coordinates stay inside the sign box. Exact complete equations have no ε schedule. All complete rows remain after fixing physical columns.",
+        "Every solve uses ProjectedLM (the reduced system in Scholtes form); each ρ stage's inner loop stops once its scaled relaxed residual drops below min(ρ, $(settings.inner_ρ_tol)), at max_inner_iters, or on a line-search stall, unless the scaled residual reaches its tolerance first. :fixed_primal recovery solves the complete system with the physical trajectory as a parameter, so only the remaining columns move; nonnegative coordinates stay inside the sign box. Exact complete equations have no ε schedule. All complete rows remain after fixing physical columns.",
     )
     paragraph!(
-        "Residual curves show the scaled relaxed and unrelaxed residuals on logarithmic axes, concatenated across stages, against solver-trace samples (Scholtes iterates). Reduced curves include all sampled trials; complete curves include all attempted checks, using each check's kept (best) try. Histograms use accepted pairs only. Curves use available samples only: no padding after a run ends, and a gap where a sample is not finite. On the aggregate page, lines are geometric means and bands are mean +/- one sample standard deviation in log10 residual, drawn at indices with at least two contributors. Stage endpoints and raw histories are in results.jls. Each trial page shows that trial's own curves (the relaxed-residual plot marks where each reduced ρ stage starts), its reduced and :warmstart complete trajectories next to their vehicle separation, and their $(is_unicycle(settings) ? "speed, heading, acceleration and yaw-rate" : "velocity and acceleration") profiles overlaid (solid: reduced; dashed: complete), including failed returned iterates with explicit status labels.",
+        "Residual curves show the scaled relaxed and unrelaxed residuals on logarithmic axes, concatenated across stages, against solver-trace samples (solver iterates). Reduced curves include all sampled trials; complete curves include all attempted checks, using each check's kept (best) try. Histograms use accepted pairs only. Curves use available samples only: no padding after a run ends, and a gap where a sample is not finite. On the aggregate page, lines are geometric means and bands are mean +/- one sample standard deviation in log10 residual, drawn at indices with at least two contributors. Stage endpoints and raw histories are in results.jls. Each trial page shows that trial's own curves (the relaxed-residual plot marks where each reduced ρ stage starts), its reduced and :warmstart complete trajectories next to their vehicle separation, and their $(is_unicycle(settings) ? "speed, heading, acceleration and yaw-rate" : "velocity and acceleration") profiles overlaid (solid: reduced; dashed: complete), including failed returned iterates with explicit status labels.",
     )
     paragraph!(
         "A solve is accepted iff its scaled residual is at most $(settings.tol) (reduced) or $(settings.complete_tol) (complete); the solver's exit status is not required. A ρ chain runs all its stages and is judged at the stage with the lowest scaled residual, and a complete check keeps its best try (retries restart with the next η); that iterate is the one kept, compared and plotted. Fixed trajectories retain the reduced solution's finite physical residual; these rows are not removed. The full residual includes stationarity, equality, complementarity, and auxiliary-slack equations. The scaled relaxed residual, largest residual entry, multiplier signs and original physical feasibility are recorded as diagnostics only. Failures do not prove incompatibility.",
