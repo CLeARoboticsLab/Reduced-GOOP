@@ -362,7 +362,7 @@ start_at(ctx::RoboticArmContext, θ, z, ρ; warm = false, eq_cols = Int[], eq = 
 """
 One ProjectedLM solve of the arm from the full start `z₀`, under the names the arm code and its
 figures read: `z` the plan, `w` the full iterate, `rho`, `newton_steps`, `eta` (the η
-a next solve would start from), `history` (‖R‖ at each stopping test) and `converged`, with
+a next solve would start from), `history` (‖K_ρ‖ at each stopping test) and `converged`, with
 `status`, `termination_reason`, `norm_K₀` and `norm_K_ρ`; `output` is ProjectedLM's own.
 """
 function solve_arm(ctx::RoboticArmContext, θ, z₀; options)
@@ -373,7 +373,7 @@ function solve_arm(ctx::RoboticArmContext, θ, z₀; options)
        history = output.norm_K_ρ_history, output)
 end
 
-# The per-iteration series the convergence panels draw beside the result's ‖R‖ `history`: ‖K₀‖ at
+# The per-iteration series the convergence panels draw beside the result's ‖K_ρ‖ `history`: ‖K₀‖ at
 # each stopping test, and for each Newton step its η and accepted step length α, a failed line
 # search drawn as α = 0. ProjectedLM records them (`record_convergence`).
 new_traces() = (k₀ = Float64[], eta = Float64[], alpha = Float64[])

@@ -424,11 +424,11 @@ function check_complete_kkt(record, systems, instance, settings)
     catch err
         start = cold_initialization(systems.complete, initial_guess, θ, settings)
         validation = (;
-            relaxed_rms=NaN,
-            unrelaxed_rms=NaN,
-            unrelaxed_min=NaN,
-            unrelaxed_max=NaN,
-            max_abs_residual=NaN,
+            rms_K_ρ=NaN,
+            rms_K₀=NaN,
+            min_K₀=NaN,
+            max_K₀=NaN,
+            max_abs_K_ρ=NaN,
             sign_violation=NaN,
             primal=(; equality_max=NaN, inequality_violation=NaN),
             accepted=false,
@@ -706,7 +706,7 @@ function print_kkt_header(label; io=stdout)
         "status",
         "steps",
         "time_s",
-        "‖R‖",
+        "‖K_ρ‖",
         "‖K₀‖",
         "K₀ min",
         "K₀ max",
@@ -722,10 +722,10 @@ function print_kkt_stage(;
     status,
     newton_steps,
     seconds,
-    relaxed,
-    unrelaxed,
-    unrelaxed_min,
-    unrelaxed_max,
+    norm_K_ρ,
+    norm_K₀,
+    min_K₀,
+    max_K₀,
     physical,
     problem,
     θ,
@@ -740,10 +740,10 @@ function print_kkt_stage(;
         string(status),
         newton_steps,
         seconds,
-        relaxed,
-        unrelaxed,
-        unrelaxed_min,
-        unrelaxed_max,
+        norm_K_ρ,
+        norm_K₀,
+        min_K₀,
+        max_K₀,
         norm(physical),
         worst,
         stop
@@ -769,14 +769,14 @@ function stage_options(settings, ρ)
 end
 
 """
-A stage's trace from PDIP's histories (one entry per stopping test): one row, ‖K_ρ‖₂ (`raw`) and ‖K₀‖₂
-(`unrelaxed`), per iterate a Newton step was taken from, then the stage's last iterate: `newton_steps` + 1 rows.
+A stage's trace from PDIP's histories (one entry per stopping test): one row, ‖K_ρ‖₂ (`norm_K_ρ`) and ‖K₀‖₂
+(`norm_K₀`), per iterate a Newton step was taken from, then the stage's last iterate: `newton_steps` + 1 rows.
 """
 function stage_history(output)
     history = [
-        (; raw=output.norm_K_ρ_history[k], unrelaxed=output.norm_K₀_history[k], eta=NaN) for k in 1:output.newton_steps
+        (; norm_K_ρ=output.norm_K_ρ_history[k], norm_K₀=output.norm_K₀_history[k], eta=NaN) for k in 1:output.newton_steps
     ]
-    push!(history, (; raw=output.norm_K_ρ, unrelaxed=output.norm_K₀, eta=NaN))
+    push!(history, (; norm_K_ρ=output.norm_K_ρ, norm_K₀=output.norm_K₀, eta=NaN))
 end
 
 """
@@ -809,10 +809,10 @@ function solve_algorithm51(formulation, problem, θ, initial_guess, settings; co
             status=output.status,
             newton_steps=output.newton_steps,
             seconds=last(stages).seconds,
-            relaxed=norm(r),
-            unrelaxed=norm(r0),
-            unrelaxed_min=minimum(r0),
-            unrelaxed_max=maximum(r0),
+            norm_K_ρ=norm(r),
+            norm_K₀=norm(r0),
+            min_K₀=minimum(r0),
+            max_K₀=maximum(r0),
             physical=y[kkt.primal_dims],
             problem,
             θ,
@@ -836,8 +836,8 @@ function solve_algorithm51(formulation, problem, θ, initial_guess, settings; co
         y[kkt.primal_dims];
         r,
         k₀=r0,
-        relaxed_rms=norm(r),
-        unrelaxed_rms=norm(r0),
+        rms_K_ρ=norm(r),
+        rms_K₀=norm(r0),
         sign_violation=max(0.0, -minimum(y[kkt.nonnegative_dims]; init=Inf)),
         tol=settings.epsilon_0,
     )
@@ -871,7 +871,7 @@ stage.
 function solve_verdict(name, result, settings)
     haskey(result, :error) && return "→ $name FAILED with an exception: $(first(split(result.error, '\n')))"
     stage = "ρ = $(MCI.compact(result.stages[result.best_stage].ρ)), stage $(result.best_stage) of $(length(result.stages))"
-    k₀, ε₀ = MCI.compact(result.validation.unrelaxed_rms), MCI.compact(settings.epsilon_0)
+    k₀, ε₀ = MCI.compact(result.validation.rms_K₀), MCI.compact(settings.epsilon_0)
     range = MCI.k₀_range(result.validation)
     result.accepted ? "→ $name accepted at $stage: ‖K₀‖₂ = $k₀ ≤ ε₀ = $ε₀; $range." :
     "→ $name REJECTED: best ‖K₀‖₂ = $k₀ ($stage) > ε₀ = $ε₀; $range."
@@ -973,8 +973,8 @@ The run's CSV files, read by experiments/RandomGOOP_plotting.py:
                 ‖K₀‖₂ of the judged iterate, the distance to the trial's reduced z, and Fig 4's distance
                 between the two iterates at the end of the stage ρ = fig3_rho (distance_fig3)
   stages.csv    one row per ρ stage of every solve: Newton steps, solve time (no
-                compilation), compile time, status, and ‖R‖₂, ‖K₀‖₂ at the stage's last iterate
-  traces.csv    one row per iterate of every ρ stage, from its start to its last iterate: ‖R‖₂, ‖K₀‖₂
+                compilation), compile time, status, and ‖K_ρ‖₂, ‖K₀‖₂ at the stage's last iterate
+  traces.csv    one row per iterate of every ρ stage, from its start to its last iterate: ‖K_ρ‖₂, ‖K₀‖₂
   settings.csv  the scalar settings (dimensions for the size formulas, tolerances, coupling)
 `newton_steps` counts the Newton steps taken (a step the line search rejects is not one); a stage's trace has
 `newton_steps` + 1 rows.
@@ -1005,12 +1005,12 @@ function export_csv(directory)
     )
     solves, stage_rows, traces = Any[], Any[], Any[]
     function add_solve!(key, result; distance="", distance_fig3="")
-        push!(solves, (key..., result.accepted, result.seconds, result.newton_steps, result.validation.unrelaxed_rms, distance, distance_fig3))
+        push!(solves, (key..., result.accepted, result.seconds, result.newton_steps, result.validation.rms_K₀, distance, distance_fig3))
         for (stage, s) in enumerate(result.stages)
-            last_raw, last_unrelaxed = isempty(s.history) ? (NaN, NaN) : (last(s.history).raw, last(s.history).unrelaxed)
-            push!(stage_rows, (key..., stage, s.ρ, s.newton_steps, s.seconds, s.compile_seconds, s.status, last_raw, last_unrelaxed))
+            last_norm_K_ρ, last_norm_K₀ = isempty(s.history) ? (NaN, NaN) : (last(s.history).norm_K_ρ, last(s.history).norm_K₀)
+            push!(stage_rows, (key..., stage, s.ρ, s.newton_steps, s.seconds, s.compile_seconds, s.status, last_norm_K_ρ, last_norm_K₀))
             for (iteration, h) in enumerate(s.history)
-                push!(traces, (key..., stage, s.ρ, iteration, h.raw, h.unrelaxed))
+                push!(traces, (key..., stage, s.ρ, iteration, h.norm_K_ρ, h.norm_K₀))
             end
         end
     end
@@ -1023,17 +1023,17 @@ function export_csv(directory)
     end
     write_csv(
         joinpath(directory, "stages.csv"),
-        ("class", "K", "trial", "system", "formulation", "stage", "rho", "newton_steps", "seconds", "compile_seconds", "status", "raw", "unrelaxed"),
+        ("class", "K", "trial", "system", "formulation", "stage", "rho", "newton_steps", "seconds", "compile_seconds", "status", "norm_K_ρ", "norm_K₀"),
         stage_rows,
     )
     write_csv(
         joinpath(directory, "solves.csv"),
-        ("class", "K", "trial", "system", "formulation", "accepted", "seconds", "newton_steps", "unrelaxed", "distance", "distance_fig3"),
+        ("class", "K", "trial", "system", "formulation", "accepted", "seconds", "newton_steps", "norm_K₀", "distance", "distance_fig3"),
         solves,
     )
     write_csv(
         joinpath(directory, "traces.csv"),
-        ("class", "K", "trial", "system", "formulation", "stage", "rho", "iteration", "raw", "unrelaxed"),
+        ("class", "K", "trial", "system", "formulation", "stage", "rho", "iteration", "norm_K_ρ", "norm_K₀"),
         traces,
     )
     directory

@@ -474,7 +474,7 @@ function demo(;
         stop_reason = solver_stop_reason(output, options; scale = residual_scale)
         # ‖K₀‖ and η at each iterate a step was tried from, then at the returned one.
         tried = eachindex(output.η_history)
-        kkt_error_history = [output.norm_K₀_history[tried]; output.norm_K₀]
+        norm_K₀_history = [output.norm_K₀_history[tried]; output.norm_K₀]
         eta_history = [output.η_history; output.η]
 
         strategies = @timeit TO "solution postprocessing" extract_player_strategies(
@@ -494,16 +494,16 @@ function demo(;
             "preference_slacks" => output.z[GOOP_kkt_system.preference_slack_dims],
             "x" => output.x, # Primal compatibility for existing trajectory readers.
             "solve_time_sec" => elapsed_time,
-            "kkt_error" => output.norm_K₀,
-            "kkt_error_per_equation" => output.norm_K₀ / residual_scale,
+            "norm_K₀" => output.norm_K₀,
+            "rms_K₀" => output.norm_K₀ / residual_scale,
             "rho" => output.ρ,
             "status" => output.status,
             "termination_reason" => output.termination_reason,
             "stop_reason" => stop_reason,
-            "relaxed_residual" => output.norm_K_ρ,
+            "norm_K_ρ" => output.norm_K_ρ,
             "newton_steps" => output.newton_steps,
-            "kkt_error_history" => kkt_error_history,
-            "residual_history" => output.norm_K_ρ_history,
+            "norm_K₀_history" => norm_K₀_history,
+            "norm_K_ρ_history" => output.norm_K_ρ_history,
             "eta_history" => eta_history,
             "solver_options" => options,
             "speed_constraint" => :component,
@@ -780,7 +780,7 @@ function print_intersection_results(rho_results; instance, attempt, residual_sca
     println(io, "\n[solver exit] instance $(instance), attempt $(attempt): warm rho chain")
     println(io, "Residuals /√m; goal errors and minimum separation in m.")
     @printf(io, "%-9s %-7s %6s %8s %12s %12s %8s %8s %8s  %s\n",
-        "rho", "status", "steps", "time_s", "‖R‖/√m", "‖K₀‖/√m",
+        "rho", "status", "steps", "time_s", "‖K_ρ‖/√m", "‖K₀‖/√m",
         "goal1", "goal2", "min_sep", "stop")
     for (ρ, result) in rho_results
         row = result.solution_dict
@@ -789,7 +789,7 @@ function print_intersection_results(rho_results; instance, attempt, residual_sca
         )
         @printf(io, "%-9.0e %-7s %6d %8.3f %12.2e %12.2e %8.3f %8.3f %8.3f  %s\n",
             ρ, string(row["status"]), row["newton_steps"], row["solve_time_sec"],
-            row["relaxed_residual"] / residual_scale, row["kkt_error"] / residual_scale,
+            row["norm_K_ρ"] / residual_scale, row["norm_K₀"] / residual_scale,
             metrics.goal...,
             metrics.min_sep, row["stop_reason"])
     end
@@ -799,7 +799,7 @@ end
 
 function solver_stop_reason(output, options; scale = 1.0)
     k₀_name = scale == 1 ? "‖K₀‖" : "‖K₀‖/√m"
-    r_name = scale == 1 ? "‖R‖₂" : "‖R‖₂/√m"
+    r_name = scale == 1 ? "‖K_ρ‖₂" : "‖K_ρ‖₂/√m"
     reason = output.termination_reason
     reason == :tolerance_reached &&
         return "KKT tolerance reached ($(k₀_name) < $(round(options.tol / scale; sigdigits = 3)))"

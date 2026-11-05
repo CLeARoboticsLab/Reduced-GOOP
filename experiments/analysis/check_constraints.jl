@@ -33,7 +33,7 @@ println("run: $run_id")
 println(
     "limits: arm_speed=$(arm_speed_limit), child_speed=$(child_speed_limit), collision_avoidance=$(collision_avoidance), dₚ=$(d_p)",
 )
-println("status: ", sol["status"], "   kkt_error: ", sol["kkt_error"], "   ϵ: ", sol["ϵ"])
+println("status: ", sol["status"], "   kkt_error: ", get(sol, "norm_K₀", get(sol, "kkt_error", NaN)), "   ϵ: ", sol["ϵ"])
 haskey(sol, "preference_values") &&
     println("stored preference_values: ", sol["preference_values"])
 

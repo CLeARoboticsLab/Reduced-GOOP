@@ -11,7 +11,7 @@
 # (the adapter below binds a `ScenarioConfig` to the source's global names), `mkpath`
 # makes the file's own directory instead of the source's fixed `examples/figures/robot_arm`,
 # `new_traces` comes from the core, where the sweep collects the traces, and `stop_reason`
-# writes the residuals as ‖K₀‖ and ‖R‖₂ (scaled: /√m) where the source writes `||K_0||` and
+# writes the residuals as ‖K₀‖ and ‖K_ρ‖₂ (scaled: /√m) where the source writes `||K_0||` and
 # `||R||_2` (/sqrt(m)).
 #
 # Loaded by the robotic-arm scripts only when figures are drawn, after the solves.
@@ -975,7 +975,7 @@ const CONVERGENCE_PALETTE = ["#0072B2", "#E69F00", "#009E73", "#CC79A7", "#56B4E
 """
     plot_convergence_summary(rows; path, title = "residual per iteration") -> path
 
-`rows` is a list of `label => history` (`history` = the result's per-iteration ‖R‖).
+`rows` is a list of `label => history` (`history` = the result's per-iteration ‖K_ρ‖).
 """
 function plot_convergence_summary(rows; path = joinpath(OUT, "robotic_arm_convergence.pdf"),
                                   title = "residual per iteration")
@@ -1003,7 +1003,7 @@ end
 # Which break ended a single-level run, in the solver's own order of precedence.
 # `scale` affects only how the bar is PRINTED.
 function stop_reason(rr, tol_inner, max_inner, tol; scale = 1.0)
-    r_name  = scale == 1 ? "‖R‖₂" : "‖R‖₂/√m"
+    r_name  = scale == 1 ? "‖K_ρ‖₂" : "‖K_ρ‖₂/√m"
     k₀_name = scale == 1 ? "‖K₀‖" : "‖K₀‖/√m"
     rr.converged && return @sprintf("%s < %.0e", k₀_name, tol / scale)
     isempty(rr.history) && return "no iterations"
@@ -1021,7 +1021,7 @@ end
 The source's `write_robotic_arm_plots`: a PDF and an HTML for every initial guess in
 `guesses` (`name => z`), every cold row in `solutions` (`ρ => result`, traces in
 `cold_traces[ρ]`) and every warm row in `warm_solutions` (`(tag, ρ, result, trace)`).
-Also writes `robotic_arm_convergence.pdf`: every row's ‖R‖ history on one axis.
+Also writes `robotic_arm_convergence.pdf`: every row's ‖K_ρ‖ history on one axis.
 Returns the number of files written.
 """
 function write_robotic_arm_plots(sc, solutions, warm_solutions, cold_traces;

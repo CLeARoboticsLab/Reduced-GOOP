@@ -283,7 +283,7 @@ def trace_curves(run, class_name, K, system, rho, accepted_only):
             continue
         if accepted_only and int(r["trial"]) not in accepted:
             continue
-        by_trial[int(r["trial"])].append((int(r["iteration"]), number(r["raw"])))
+        by_trial[int(r["trial"])].append((int(r["iteration"]), number(r["norm_K_ρ"] if "norm_K_ρ" in r else r["raw"])))
     curves = [np.log10(np.maximum([v for _, v in sorted(points)], 1e-300)) for points in by_trial.values() if points]
     return curves or None
 

@@ -312,7 +312,7 @@ default_settings() = (;
     # at the best stage of its ρ chain (and, for a complete check, its best try).
     tol=2e-4,                                    # reduced system
     complete_tol=1e-3,                           # complete systems
-    inner_ρ_tol=1e-2,                            # a ρ stage's inner stop: ‖R‖/√m < min(ρ, inner_ρ_tol). 1.0 for old behavior
+    inner_ρ_tol=1e-2,                            # a ρ stage's inner stop: ‖K_ρ‖/√m < min(ρ, inner_ρ_tol). 1.0 for old behavior
     # Complete-system start (complete_initialization)
     positive_seed=1.0,                           # unmapped nonnegative variables
     positive_floor=1e-10,                        # floor for every nonnegative variable
@@ -506,7 +506,7 @@ function solve_reduced_kkt(systems, trial, instance, dynamics, num_checks, setti
         instance_inputs(instance, flatten_parameters, dynamics, settings; double_integrator)
     isnothing(double_integrator_solve) || println(
         "  Initial guess: the double integrator's solution of this instance, ‖K₀‖/√m = ",
-        compact(double_integrator_solve.validation.unrelaxed_rms),
+        compact(double_integrator_solve.validation.rms_K₀),
         double_integrator_solve.accepted ? " (accepted)" : " (rejected; its best stage)",
         "; ",
         k₀_range(double_integrator_solve.validation),
@@ -559,7 +559,7 @@ function check_complete_kkt(record, systems, formulation, mode, settings)
     catch err
         validation = merge(
             reduced.validation,
-            (; accepted=false, relaxed_rms=NaN, unrelaxed_rms=NaN, unrelaxed_min=NaN, unrelaxed_max=NaN, max_abs_residual=NaN),
+            (; accepted=false, rms_K_ρ=NaN, rms_K₀=NaN, min_K₀=NaN, max_K₀=NaN, max_abs_K_ρ=NaN),
         )
         (;
             accepted=false,
@@ -805,11 +805,11 @@ function print_progress(done, total; width=24)
 end
 
 "The smallest and largest unscaled K₀ rows of a validated iterate, for the verdicts."
-k₀_range(validation) = "K₀ rows from $(compact(validation.unrelaxed_min)) to $(compact(validation.unrelaxed_max))"
+k₀_range(validation) = "K₀ rows from $(compact(validation.min_K₀)) to $(compact(validation.max_K₀))"
 
 "One-line outcome of a reduced solve, printed under its stage table."
 function reduced_verdict(reduced, settings)
-    k₀, tol = compact(reduced.validation.unrelaxed_rms), compact(settings.tol)
+    k₀, tol = compact(reduced.validation.rms_K₀), compact(settings.tol)
     stage = "ρ = $(compact(reduced.stages[reduced.best_stage].ρ)), stage $(reduced.best_stage) of $(length(reduced.stages))"
     range = k₀_range(reduced.validation)
     reduced.accepted ? "→ reduced accepted at $stage: ‖K₀‖/√m = $k₀ ≤ $tol; $range." :
@@ -823,7 +823,7 @@ function complete_verdict(formulation, mode, result, metrics, category, settings
     final = result.attempts[result.best_attempt]
     tries = length(result.attempts) == 1 ? "1 try" : "$(length(result.attempts)) tries"
     stage = "ρ = $(compact(final.stages[final.best_stage].ρ))"
-    k₀, tol = compact(result.validation.unrelaxed_rms), compact(settings.complete_tol)
+    k₀, tol = compact(result.validation.rms_K₀), compact(settings.complete_tol)
     range = k₀_range(result.validation)
     result.accepted ||
         return "→ $name REJECTED after $tries: best ‖K₀‖/√m = $k₀ (try $(result.best_attempt), $stage) > $tol; $range"
@@ -844,7 +844,7 @@ function print_kkt_header(label; io=stdout)
         "status",
         "steps",
         "time_s",
-        "‖R‖/√m",
+        "‖K_ρ‖/√m",
         "‖K₀‖/√m",
         "K₀ min",
         "K₀ max",
@@ -861,10 +861,10 @@ function print_kkt_stage(;
     status,
     newton_steps,
     seconds,
-    relaxed_rms,
-    unrelaxed_rms,
-    unrelaxed_min,
-    unrelaxed_max,
+    rms_K_ρ,
+    rms_K₀,
+    min_K₀,
+    max_K₀,
     physical,
     settings,
     stop,
@@ -882,10 +882,10 @@ function print_kkt_stage(;
         string(status),
         newton_steps,
         seconds,
-        relaxed_rms,
-        unrelaxed_rms,
-        unrelaxed_min,
-        unrelaxed_max,
+        rms_K_ρ,
+        rms_K₀,
+        min_K₀,
+        max_K₀,
         metrics.goal...,
         metrics.min_sep,
         stop
@@ -904,7 +904,7 @@ function solver_options(settings; ρ, tol, eta, residual_scale)
         ρ_schedule=[Float64(ρ)],
         max_inner_iters=settings.max_inner_iters,
         tol=tol * residual_scale,
-        # A stage's inner loop stops at ‖R‖/√m < min(ρ, inner_ρ_tol): coarse stages are solved
+        # A stage's inner loop stops at ‖K_ρ‖/√m < min(ρ, inner_ρ_tol): coarse stages are solved
         # more tightly than their ρ.
         tol_inner=min(ρ, settings.inner_ρ_tol) * residual_scale,
         proj_eps=1e-8,
@@ -921,16 +921,16 @@ function solver_options(settings; ρ, tol, eta, residual_scale)
 end
 
 """
-One ρ stage's solver trace, from ProjectedLM's histories: (; raw = ‖R‖, unrelaxed = ‖K₀‖, eta) for each
+One ρ stage's solver trace, from ProjectedLM's histories: (; norm_K_ρ = ‖K_ρ‖, norm_K₀ = ‖K₀‖, eta) for each
 iterate a Newton step was taken from (`eta`, that step's η), then the stage's final iterate (`eta`, the η
 a next step would start from): `newton_steps` + 1 rows.
 """
 function solver_history(output)
-    history = NamedTuple{(:raw, :unrelaxed, :eta),NTuple{3,Float64}}[
-        (; raw=output.norm_K_ρ_history[k], unrelaxed=output.norm_K₀_history[k], eta=output.η_history[k])
+    history = NamedTuple{(:norm_K_ρ, :norm_K₀, :eta),NTuple{3,Float64}}[
+        (; norm_K_ρ=output.norm_K_ρ_history[k], norm_K₀=output.norm_K₀_history[k], eta=output.η_history[k])
         for k in 1:output.newton_steps
     ]
-    push!(history, (; raw=output.norm_K_ρ, unrelaxed=output.norm_K₀, eta=output.η))
+    push!(history, (; norm_K_ρ=output.norm_K_ρ, norm_K₀=output.norm_K₀, eta=output.η))
 end
 
 """
@@ -976,23 +976,23 @@ end
 
 """
 Acceptance and diagnostics of a kept iterate, whose trajectory is `z`. It is accepted iff its scaled
-residual `unrelaxed_rms` is at most `tol`; every other field is a saved diagnostic. `r` is the
+residual `rms_K₀` is at most `tol`; every other field is a saved diagnostic. `r` is the
 relaxed residual vector at the stage's ρ and `k₀` the unscaled unrelaxed one, K₀.
 """
-function validate_solution(problem, θ, z; r, k₀, relaxed_rms, unrelaxed_rms, sign_violation, tol)
+function validate_solution(problem, θ, z; r, k₀, rms_K_ρ, rms_K₀, sign_violation, tol)
     feasibility = ReducedGOOP.is_feasible(problem, z, θ) # only `worst` is used
     x = BlockArray(z, problem.primal_dims)
     θ_blocks = BlockArray(θ, problem.parameter_dims)
     equality_max = maximum(abs, reduce(vcat, (f(x, θ_blocks) for f in problem.equality_constraints)))
     (;
-        relaxed_rms,
-        unrelaxed_rms,
-        unrelaxed_min=minimum(k₀),
-        unrelaxed_max=maximum(k₀),
-        max_abs_residual=maximum(abs, r),
+        rms_K_ρ,
+        rms_K₀,
+        min_K₀=minimum(k₀),
+        max_K₀=maximum(k₀),
+        max_abs_K_ρ=maximum(abs, r),
         sign_violation,
         primal=(; equality_max, inequality_violation=max(0.0, -feasibility.worst)),
-        accepted=unrelaxed_rms <= tol,
+        accepted=rms_K₀ <= tol,
     )
 end
 
@@ -1043,10 +1043,10 @@ function solve_reduced(reduced_kkt, problem, θ, initial_guess, settings; contex
             status=output.status,
             newton_steps=output.newton_steps,
             seconds=last(stages).seconds,
-            relaxed_rms=output.norm_K_ρ/residual_scale,
-            unrelaxed_rms=output.norm_K₀/residual_scale,
-            unrelaxed_min=minimum(k₀_rows),
-            unrelaxed_max=maximum(k₀_rows),
+            rms_K_ρ=output.norm_K_ρ/residual_scale,
+            rms_K₀=output.norm_K₀/residual_scale,
+            min_K₀=minimum(k₀_rows),
+            max_K₀=maximum(k₀_rows),
             physical=output.z,
             settings,
             stop=Intersection.solver_stop_reason(output, options; scale=residual_scale),
@@ -1072,8 +1072,8 @@ function solve_reduced(reduced_kkt, problem, θ, initial_guess, settings; contex
         output.z;
         r,
         k₀=k₀_rows,
-        relaxed_rms=norm(r)/residual_scale,
-        unrelaxed_rms=norm(k₀_rows)/residual_scale,
+        rms_K_ρ=norm(r)/residual_scale,
+        rms_K₀=norm(k₀_rows)/residual_scale,
         sign_violation=max(0.0, -output.sign_min),
         tol=settings.tol,
     )
@@ -1289,10 +1289,10 @@ function solve_complete(
                 status=output.status,
                 newton_steps=output.newton_steps,
                 seconds=last(stages).seconds,
-                relaxed_rms=norm(r)/residual_scale,
-                unrelaxed_rms=norm(r0)/residual_scale,
-                unrelaxed_min=minimum(r0),
-                unrelaxed_max=maximum(r0),
+                rms_K_ρ=norm(r)/residual_scale,
+                rms_K₀=norm(r0)/residual_scale,
+                min_K₀=minimum(r0),
+                max_K₀=maximum(r0),
                 physical=y[complete_kkt.primal_dims],
                 settings,
                 stop=Intersection.solver_stop_reason(output, options; scale=residual_scale),
@@ -1316,8 +1316,8 @@ function solve_complete(
             y[complete_kkt.primal_dims];
             r,
             k₀=r0,
-            relaxed_rms=norm(r)/residual_scale,
-            unrelaxed_rms=norm(r0)/residual_scale,
+            rms_K_ρ=norm(r)/residual_scale,
+            rms_K₀=norm(r0)/residual_scale,
             sign_violation=max(0.0, -minimum(y[complete_kkt.nonnegative_dims]; init=Inf)),
             tol=settings.complete_tol,
         )
@@ -1339,7 +1339,7 @@ function solve_complete(
     end
     # Keep the best try, as a ρ chain keeps its best stage: a retry restarts from `initial` and can
     # end worse than an earlier try. An accepted try is the last and has the lowest ‖K₀‖.
-    best_attempt = argmin([isfinite(a.validation.unrelaxed_rms) ? a.validation.unrelaxed_rms : Inf for a in attempts])
+    best_attempt = argmin([isfinite(a.validation.rms_K₀) ? a.validation.rms_K₀ : Inf for a in attempts])
     final = attempts[best_attempt]
     mode.name === :fixed_primal && @assert final.solution[complete_kkt.primal_dims] == physical
     (;
@@ -1541,13 +1541,13 @@ const CHECK_COLORS = Dict(
     (:exact, :warmstart) => :seagreen,
 )
 
-"A solve's `field` trace (:unrelaxed for K₀, :raw for R) over all its stages, as RMS over `equations` rows."
+"A solve's `field` trace (:norm_K₀ for K₀, :norm_K_ρ for K_ρ) over all its stages, as RMS over `equations` rows."
 function stage_history(stages, field, equations)
     reduce(vcat, ([getproperty(h, field)/sqrt(equations) for h in s.history] for s in stages))
 end
 
 """
-Draw `field` (:unrelaxed for K₀, :raw for R) for the reduced solves of `rows` and for each complete
+Draw `field` (:norm_K₀ for K₀, :norm_K_ρ for K_ρ) for the reduced solves of `rows` and for each complete
 check's kept try, with both tolerances. One row gives that trial's own curves; several give their
 geometric mean ± band (plot_history!), and `counted` adds the number of curves to each label.
 """
@@ -1618,7 +1618,7 @@ function plot_acceptance_histogram!(position, legend_position, rows, settings, m
             c.formulation === formulation_name && c.mode === mode_name && haskey(c, :result) && c.result.accepted
         ]
         isempty(accepted) && continue
-        values = [fixed ? c.result.validation.unrelaxed_rms : c.metrics.rms for c in accepted]
+        values = [fixed ? c.result.validation.rms_K₀ : c.metrics.rms for c in accepted]
         CM.hist!(
             axis,
             values;
@@ -1667,8 +1667,8 @@ function trial_page(data, row)
 
     residuals = CM.GridLayout(figure[3, 1])
     for (column, field, title, ylabel) in (
-        (1, :unrelaxed, "True KKT residual", "‖K₀‖/√m"),
-        (2, :raw, "Relaxed residual", "‖R‖/√m"),
+        (1, :norm_K₀, "True KKT residual", "‖K₀‖/√m"),
+        (2, :norm_K_ρ, "Relaxed residual", "‖K_ρ‖/√m"),
     )
         axis = CM.Axis(
             residuals[1, column];
@@ -1680,7 +1680,7 @@ function trial_page(data, row)
         plot_residuals!(axis, [row], metadata, field, settings)
         # Both plots have the same entries, so one legend under the pair serves both.
         column == 1 && legend_under!(residuals[2, 1:2], axis)
-        field === :raw || continue
+        field === :norm_K_ρ || continue
         # Relaxed residual only: mark where each reduced ρ stage starts, and its ρ. R jumps up there
         # because each stage re-initializes γ/φ, s and u. The x limits are frozen so the labels can
         # sit at a fixed height, in relative coordinates, on the log-scaled y axis.
@@ -1713,12 +1713,12 @@ function trial_page(data, row)
         haskey(check, :result) || return ""
         isempty(check.result.attempts) && return "no residual: the complete solve threw an exception"
         final = check.result.attempts[check.result.best_attempt]
-        subtitle(final.validation.unrelaxed_rms, final.stages[final.best_stage].ρ)
+        subtitle(final.validation.rms_K₀, final.stages[final.best_stage].ρ)
     end
     # A :fixed_primal check keeps the reduced trajectory, so its name, status and residual go under
     # the reduced map.
     reduced_stage = row.reduced.stages[row.reduced.best_stage]
-    reduced_lines = [subtitle(row.reduced.validation.unrelaxed_rms, reduced_stage.ρ)]
+    reduced_lines = [subtitle(row.reduced.validation.rms_K₀, reduced_stage.ρ)]
     for check in filter(c -> c.mode === :fixed_primal, row.checks)
         push!(reduced_lines, "Complete :$(check.formulation), :fixed_primal | $(check_status(check))")
         isempty(check_subtitle(check)) || push!(reduced_lines, check_subtitle(check))
@@ -1970,7 +1970,7 @@ function summary_page(data, directory)
     label!("Run $(basename(directory)); Julia $(data.julia), $(data.blas_threads) BLAS threads.")
     monospace!(tolerance_line(settings))
     paragraph!(
-        "Scaled residual: ‖K₀‖/√m, the norm of the unrelaxed KKT residual (ρ = 0) divided by √m, m = number of equations. The scaled relaxed residual ‖R‖/√m is the same at the stage's ρ.",
+        "Scaled residual: ‖K₀‖/√m, the norm of the unrelaxed KKT residual (ρ = 0) divided by √m, m = number of equations. The scaled relaxed residual ‖K_ρ‖/√m is the same at the stage's ρ.",
     )
 
     heading!("Pass counts")
@@ -2041,7 +2041,7 @@ function summary_page(data, directory)
         )
         reduced.accepted || push!(
             failures,
-            "$(row.variant) trial $(row.trial): reduced rejected; status=$(reduced.output.status), reason=$(reduced.output.termination_reason), ‖R‖/√m=$(number(reduced.validation.relaxed_rms)), ‖K₀‖/√m=$(number(reduced.validation.unrelaxed_rms)), physical equality=$(number(reduced.validation.primal.equality_max)), inequality=$(number(reduced.validation.primal.inequality_violation))",
+            "$(row.variant) trial $(row.trial): reduced rejected; status=$(reduced.output.status), reason=$(reduced.output.termination_reason), ‖K_ρ‖/√m=$(number(reduced.validation.rms_K_ρ)), ‖K₀‖/√m=$(number(reduced.validation.rms_K₀)), physical equality=$(number(reduced.validation.primal.equality_max)), inequality=$(number(reduced.validation.primal.inequality_violation))",
         )
         for check in row.checks
             haskey(check, :result) || continue
@@ -2049,7 +2049,7 @@ function summary_page(data, directory)
             name = "$(row.variant) trial $(row.trial), :$(check.formulation), :$(check.mode) mode"
             complete.accepted || push!(
                 failures,
-                "$name: $(complete.status), $(complete.reason); ‖R‖/√m=$(number(complete.validation.relaxed_rms)), ‖K₀‖/√m=$(number(complete.validation.unrelaxed_rms)), physical equality=$(number(complete.validation.primal.equality_max)), inequality=$(number(complete.validation.primal.inequality_violation)), attempts=$(length(complete.attempts))",
+                "$name: $(complete.status), $(complete.reason); ‖K_ρ‖/√m=$(number(complete.validation.rms_K_ρ)), ‖K₀‖/√m=$(number(complete.validation.rms_K₀)), physical equality=$(number(complete.validation.primal.equality_max)), inequality=$(number(complete.validation.primal.inequality_violation)), attempts=$(length(complete.attempts))",
             )
             # The full backtrace stays in results.jls; the page shows its first lines.
             haskey(complete, :error) &&
@@ -2093,8 +2093,8 @@ function aggregate_page(data)
         metadata = only(filter(m -> m.variant === variant_name, data.metadata))
         layout = CM.GridLayout(figure[index+1, 1])
         for (column, field, title, ylabel) in (
-            (1, :unrelaxed, "True KKT residual", "‖K₀‖/√m"),
-            (2, :raw, "Relaxed residual", "‖R‖/√m"),
+            (1, :norm_K₀, "True KKT residual", "‖K₀‖/√m"),
+            (2, :norm_K_ρ, "Relaxed residual", "‖K_ρ‖/√m"),
         )
             axis = CM.Axis(
                 layout[1, column];

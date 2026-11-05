@@ -54,7 +54,7 @@ function intersection_report_figure(page)
     CairoMakie.Label(fig[1, 1:3],
         "Intersection | instance $(page.instance), attempt $(page.attempt) | rho=$(page.rho) | $(status)";
         fontsize = 26, color = status == :solved ? :darkgreen : :firebrick)
-    error_text = round(row["kkt_error_per_equation"]; sigdigits = 4)
+    error_text = round(row["rms_K₀"]; sigdigits = 4)
     CairoMakie.Label(fig[2, 1:3],
         "$(get(row, "stop_reason", string(status))) | KKT residual/√m=$(error_text) | Newton steps=$(row["newton_steps"])";
         fontsize = 18)
@@ -139,12 +139,12 @@ function intersection_report_figure(page)
     end
 
     scale = page.residual_scale
-    kkt_history = get(row, "kkt_error_history", Float64[]) ./ scale
-    relaxed_history = vcat(get(row, "residual_history", Float64[]), row["relaxed_residual"]) ./ scale
+    kkt_history = get(row, "norm_K₀_history", Float64[]) ./ scale
+    relaxed_history = vcat(get(row, "norm_K_ρ_history", Float64[]), row["norm_K_ρ"]) ./ scale
     eta_history = get(row, "eta_history", Float64[])
     for (column, title, ylabel, values, threshold) in (
         (1, "True KKT residual", "log10(‖K₀‖/√m)", kkt_history, page.tol),
-        (2, "Relaxed residual", "log10(‖R‖/√m)", relaxed_history, page.rho),
+        (2, "Relaxed residual", "log10(‖K_ρ‖/√m)", relaxed_history, page.rho),
         (3, "Regularization", "log10(eta)", eta_history, nothing),
     )
         ax = make_axis(7, column, title, ylabel; xlabel = "iteration snapshot")
@@ -1187,7 +1187,7 @@ function control_plot(; strategy, control_lb = nothing, control_ub = nothing)
 end
 
 function plot_convergence_plot(;
-    kkt_error_history,
+    norm_K₀_history,
     newton_steps = nothing,
     show_ylabel = true,
 )
@@ -1205,15 +1205,15 @@ function plot_convergence_plot(;
         yticklabelsize = tick_label_fontsize,
     )
 
-    iteration_axis = collect(1:length(kkt_error_history))
+    iteration_axis = collect(1:length(norm_K₀_history))
     if !isnothing(newton_steps) && newton_steps + 1 < length(iteration_axis)
         iteration_axis = iteration_axis[1:(newton_steps + 1)]
-        kkt_error_history = kkt_error_history[1:(newton_steps + 1)]
+        norm_K₀_history = norm_K₀_history[1:(newton_steps + 1)]
     end
     CairoMakie.lines!(
         ax,
         iteration_axis,
-        kkt_error_history,
+        norm_K₀_history,
         color = :dodgerblue,
         linewidth = 4,
     )

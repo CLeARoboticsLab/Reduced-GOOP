@@ -37,7 +37,7 @@ for run_id in run_ids
     pot(t) = 0.5 .* (arm.xs[t][1:3] .+ arm.xs[t][4:6])
 
     println("═══ $run_id ═══")
-    println("status: $(sol["status"])   kkt_error: $(fmt(sol["kkt_error"]))   T = $T")
+    println("status: $(sol["status"])   kkt_error: $(fmt(get(sol, "norm_K₀", get(sol, "kkt_error", NaN))))   T = $T")
 
     safety = [sum(abs2, pot(t) .- child.xs[t]) - collision_avoidance^2 for t in 1:T]
     speed1 = [arm_speed_limit^2 - sum(abs2, u[1:3]) for u in arm.us]
