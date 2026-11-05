@@ -1628,8 +1628,9 @@ function _newton_step!(δz, J, F, linear_solver, η)
         # :svd: the minimum-norm step −J⁺F by the dense pseudoinverse (Algorithm 5.1).
         δz .= pinv(Matrix(J)) * (-F)
     elseif linear_solver === :sparseQR_J
-        # :sparseQR_J: J \ (−F) by a sparse QR of J, a least-squares step, not the minimum-norm one.
-        δz .= J \ (-F)
+        # :sparseQR_J: a least-squares step by a sparse QR of J (SPQR), not the minimum-norm one. `qr(J)`, not
+        # `J \ (−F)`: for a square J, `\` takes an LU, which fails when J is singular.
+        δz .= qr(J) \ (-F)
     elseif linear_solver === :sparseQR_Jᵀ
         # :sparseQR_Jᵀ: −J⁺F by a sparse QR of Jᵀ, Jᵀ[prow, pcol] = QR, when J has full row rank.
         QR = qr(SparseArrays.sparse(J'))
