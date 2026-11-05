@@ -20,6 +20,241 @@
 #
 # A column mask `col_scale` pins the coordinates the projected bound rule holds.
 
+# ---------------------------------------------------------------------------
+# The augmented-system KLU step that `:klu_eta` and `:klu_sqrt_eta` take (`AugmentedKKTCache`,
+# `_klu_step_with_fallback!`), with its dense SVD fallback.
+# ---------------------------------------------------------------------------
+
+"""
+SVD with a driver fallback: the default divide-and-conquer LAPACK driver
+(`gesdd`) can throw `LAPACKException` on severely ill-conditioned matrices;
+retry with the slower but more robust QR-iteration driver (`gesvd`).
+"""
+function _robust_svd(A)
+    try
+        svd(A)
+    catch error
+        error isa LinearAlgebra.LAPACKException || rethrow()
+        svd(A; alg = LinearAlgebra.QRIteration())
+    end
+end
+
+"""
+Sparse augmented system for the Tikhonov-regularized least-squares Newton step.
+
+The KKT Jacobian `J` is rectangular (m×n), so the regularized step
+`δz = -(JᵀJ + ηI)⁻¹JᵀF` is obtained from the square quasi-definite system in
+its √η-balanced form (γ = √η, any diagonal pair with product η gives the same
+δz in exact arithmetic):
+
+    [ γI_m    J   ] [ w  ]   [ -F ]
+    [  Jᵀ   -γI_n ] [ δz ] = [  0 ]
+
+The balanced scaling keeps the matrix condition ~κ(J) even when the
+regularization escalates to large η; the naive `[I J; Jᵀ -ηI]` form loses
+relative accuracy in the (then ~1/η-sized) step through cancellation exactly
+in the hard, heavily regularized regime, producing noisier directions than
+the SVD filter there.
+
+The sparsity pattern is fixed across iterations and η updates, so KLU's
+symbolic analysis is computed once and only numeric refactorizations happen
+per iteration. `J_positions`/`Jt_positions` map `nonzeros(J)` (CSC order) into
+`nonzeros(K)` for the two off-diagonal blocks; `identity_positions` and
+`eta_positions` address the two η-dependent diagonal blocks.
+
+`sqrt_eta` selects what η means. `true` (`:klu`, `:klu_sqrt_eta`): the diagonals are
+`±√η`, so η is the Tikhonov shift, `δz = -(JᵀJ + ηI)⁻¹JᵀF`. `false` (`:klu_eta`):
+the diagonals are `±η`, so the shift is η², `δz = -(JᵀJ + η²I)⁻¹JᵀF`, the convention
+of the `:normal` Scholtes backend and of ScholtesReducedGOOP.jl's `:klu`.
+"""
+struct AugmentedKKTCache
+    K::SparseArrays.SparseMatrixCSC{Float64,Int}
+    klu_fact::Base.RefValue{Any}
+    J_positions::Vector{Int}
+    Jt_positions::Vector{Int}
+    identity_positions::Vector{Int}
+    eta_positions::Vector{Int}
+    rhs::Vector{Float64}
+    sol::Vector{Float64}
+    m::Int
+    n::Int
+    sqrt_eta::Bool
+end
+
+"Build the augmented-system cache once from the fixed sparsity pattern of `∇F`."
+function _build_augmented_kkt_cache(
+    ∇F::SparseArrays.SparseMatrixCSC,
+    m::Integer,
+    n::Integer;
+    sqrt_eta::Bool = true,
+)
+    rows, cols, _ = SparseArrays.findnz(∇F)
+    nnzJ = length(rows)
+    Is = Vector{Int}(undef, m + n + 2 * nnzJ)
+    Js = similar(Is)
+    k = 0
+    for i in 1:m # I_m block
+        k += 1
+        Is[k] = i
+        Js[k] = i
+    end
+    for t in 1:nnzJ # J block
+        k += 1
+        Is[k] = rows[t]
+        Js[k] = m + cols[t]
+    end
+    for t in 1:nnzJ # Jᵀ block
+        k += 1
+        Is[k] = m + cols[t]
+        Js[k] = rows[t]
+    end
+    for i in 1:n # -ηI_n block
+        k += 1
+        Is[k] = m + i
+        Js[k] = m + i
+    end
+    # The four blocks occupy disjoint (row, col) regions, so `sparse` never merges entries.
+    K = SparseArrays.sparse(Is, Js, ones(length(Is)), m + n, m + n)
+
+    # Locate each structural entry's nzval slot (CSC-aware: J and Jᵀ orderings differ).
+    K_rowvals = SparseArrays.rowvals(K)
+    locate = (i, j) -> begin
+        range = SparseArrays.nzrange(K, j)
+        range[searchsortedfirst(view(K_rowvals, range), i)]
+    end
+    J_positions = [locate(rows[t], m + cols[t]) for t in 1:nnzJ]
+    Jt_positions = [locate(m + cols[t], rows[t]) for t in 1:nnzJ]
+    identity_positions = [locate(i, i) for i in 1:m]
+    eta_positions = [locate(m + i, m + i) for i in 1:n]
+
+    AugmentedKKTCache(
+        K,
+        Ref{Any}(nothing),
+        J_positions,
+        Jt_positions,
+        identity_positions,
+        eta_positions,
+        zeros(m + n),
+        zeros(m + n),
+        m,
+        n,
+        sqrt_eta,
+    )
+end
+
+"Scatter the current Jacobian values and η into the augmented matrix, without allocating."
+function _update_augmented_kkt!(cache::AugmentedKKTCache, ∇F, η)
+    K_nonzeros = SparseArrays.nonzeros(cache.K)
+    J_nonzeros = SparseArrays.nonzeros(∇F)
+    @inbounds for k in eachindex(J_nonzeros)
+        K_nonzeros[cache.J_positions[k]] = J_nonzeros[k]
+        K_nonzeros[cache.Jt_positions[k]] = J_nonzeros[k]
+    end
+    _update_augmented_eta!(cache, η)
+    cache
+end
+
+"Rewrite only the η-dependent diagonals (used by the η-retry loop, where J is unchanged)."
+function _update_augmented_eta!(cache::AugmentedKKTCache, η)
+    K_nonzeros = SparseArrays.nonzeros(cache.K)
+    # Balanced scaling γ = √η (or γ = η, see `sqrt_eta`) with a floor keeping both
+    # diagonal blocks strictly definite even if η underflows to 0.
+    γ = cache.sqrt_eta ? sqrt(max(η, 1e-12)) : max(η, 1e-12)
+    @inbounds for position in cache.identity_positions
+        K_nonzeros[position] = γ
+    end
+    @inbounds for position in cache.eta_positions
+        K_nonzeros[position] = -γ
+    end
+    cache
+end
+
+"""
+Solve the augmented system for `δz` with rhs `[-F; 0]`. The first call performs
+KLU's symbolic analysis; later calls refactorize numerically in place (skipped
+entirely when `refactor = false`, i.e. modified-Newton reuse).
+"""
+function _solve_augmented!(δz, cache::AugmentedKKTCache, F; refactor = true)
+    @views cache.rhs[1:(cache.m)] .= .-F
+    fill!(view(cache.rhs, (cache.m + 1):(cache.m + cache.n)), 0.0)
+    if cache.klu_fact[] === nothing
+        cache.klu_fact[] = @timeit TO "KLU refactorization" KLU.klu(cache.K)
+    elseif refactor
+        @timeit TO "KLU refactorization" KLU.klu!(cache.klu_fact[], cache.K)
+    end
+    cache.sol .= cache.rhs
+    ldiv!(cache.klu_fact[], cache.sol)
+    δz .= view(cache.sol, (cache.m + 1):(cache.m + cache.n)) # copy last n elements
+    δz
+end
+
+"""
+KLU step with recovery and escalation: on a singular factorization, discard
+the failed numeric object, grow η, and rebuild so KLU can choose new numeric
+pivots. Falls back to a dense SVD only after trying the final escalated η.
+Returns the η actually used, so the caller can keep its regularization
+bookkeeping consistent.
+"""
+function _klu_step_with_fallback!(
+    δz,
+    cache::AugmentedKKTCache,
+    ∇F,
+    F,
+    η,
+    η_max,
+    verbose;
+    refactor = true,
+    eta_growth = 100.0,
+    max_retries = 3,
+    singular_retry_counter = nothing,
+    svd_fallback_counter = nothing,
+)
+    η_used = η
+    needs_refactor = refactor
+    # Attempts include the original η plus `max_retries` successively escalated
+    # values. The previous fixed loop escalated after its last failure but never
+    # actually tried the final η before invoking dense SVD.
+    for attempt in 0:max_retries
+        try
+            _solve_augmented!(δz, cache, F; refactor = needs_refactor)
+            return η_used
+        catch error
+            error isa LinearAlgebra.SingularException || rethrow()
+            !isnothing(singular_retry_counter) && (singular_retry_counter[] += 1)
+            # KLU's failed in-place numeric refactorization is not guaranteed to
+            # remain reusable. Force a fresh factorization on the next attempt.
+            cache.klu_fact[] = nothing
+            attempt == max_retries && break
+            η_used = min(max(η_used, 1e-8) * eta_growth, η_max)
+            verbose && printstyled(
+                "KLU factorization singular. Retrying with η = $η_used.\n";
+                color = :yellow,
+            )
+            _update_augmented_eta!(cache, η_used)
+            needs_refactor = true
+        end
+    end
+    verbose &&
+        @warn "KLU factorization singular after η escalation; falling back to a dense SVD step for this iteration."
+    !isnothing(svd_fallback_counter) && (svd_fallback_counter[] += 1)
+    # The dense step uses the same effective Tikhonov shift as the factorization it
+    # replaces: η for `sqrt_eta = true`, η² for `sqrt_eta = false`.
+    shift = cache.sqrt_eta ? max(η_used, 1e-12) : max(η_used, 1e-12)^2
+    _svd_fallback_step!(δz, ∇F, F, shift)
+    η_used
+end
+
+"Rare-path dense Tikhonov step used when KLU cannot factorize the augmented system."
+function _svd_fallback_step!(δz, ∇F, F, η)
+    Jsvd = _robust_svd(Matrix(∇F))
+    coefficients = Jsvd.U' * F
+    @. coefficients *= Jsvd.S / (Jsvd.S^2 + η)
+    mul!(δz, Jsvd.V, coefficients, -1.0, false)
+    δz
+end
+
+# ---------------------------------------------------------------------------
+
 """
 Every structural entry of the augmented Jacobian, flattened: `block` (1 = J_nc,
 2 = J_a, 3 = −I, 4 = s·J_b, 5 = diag(b), 6 = +I on u), its row within that block

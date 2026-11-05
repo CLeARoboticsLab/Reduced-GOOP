@@ -181,16 +181,6 @@ prob_single = sproblem(ni = [1, 1],
     @test sfeasible(prob_A, [-3.0]).worst ≈ -1.0
 end
 
-@testset "the merit options are gone" begin
-    base = (; tol = 1e-6, η₀ = 0.0, ϵ₀ = 1e-9, max_inner_iters = 10, max_outer_iters = 1,
-            tightening_rate = 2.0, loosening_rate = 0.5, min_stepsize = 1e-20, verbose = false)
-    @test RG.InteriorPointOptions(; base...) isa RG.InteriorPointOptions
-    for kw in ((; use_feasibility_merit = true), (; feasibility_tol = 1e-3), (; μ₀ = 1.0),
-               (; μ_max = 1e4), (; mu_growth = 10.0))
-        @test_throws MethodError RG.InteriorPointOptions(; base..., kw...)
-    end
-end
-
 @testset "unknowns and rows" begin
     k = scholtes_kkt(prob_C)
     # Per player: level 1 relaxes its g (σ, γ, u) and slacks level 2's product (σ̂, ϕ); level 2 relaxes its g.
@@ -472,6 +462,15 @@ end
     ke, kq = scholtes_kkt(prob_G; quasi = false), scholtes_kkt(prob_G; quasi = true, quasi_order = 10)
     z = randn(ke.variable_dimension)
     @test residual(kq, z, 0.3) == residual(ke, z, 0.3)
+end
+
+@testset "generate_slacked_scholtes_quasi_kkt_system is the quasi Scholtes system" begin
+    for quasi_order in (1, 2)
+        kq = RG.generate_slacked_scholtes_quasi_kkt_system(prob_G.goop; quasi_order)
+        ke = scholtes_kkt(prob_G; quasi = true, quasi_order)
+        @test string.(kq.z_symbolic) == string.(ke.z_symbolic)
+        @test isequal(kq.F_symbolic, ke.F_symbolic)
+    end
 end
 
 @testset "quasi composes with explicit Scholtes complementarity" begin
@@ -906,6 +905,77 @@ end
             @test Matrix(S) == Matrix(Symmetric(cache.J * transpose(cache.J)))
         end
     end
+end
+
+@testset "the augmented KLU step of :klu_eta and :klu_sqrt_eta" begin
+	problem = build_benchmark_problem(; num_players = 3, levels = 2, kind = :quadratic)
+	kkt = RG.generate_slacked_reduced_kkt_system(problem.problem)
+	θ = zeros(sum(problem.problem.parameter_dims))
+
+	@testset "Direction equivalence with the SVD Tikhonov step" begin
+		# The augmented quasi-definite system [[I J]; [Jᵀ -ηI]] must reproduce the
+		# dense-SVD step δz = -V diag(S/(S²+η)) Uᵀ F exactly (tsvd_threshold = 0,
+		# no Marquardt scaling).
+		n = kkt.variable_dimension
+		m = kkt.kkt_dimension
+		z = 0.3 .* sin.(1:n)
+		ρ = 0.1
+
+		F = zeros(m)
+		kkt.F!(F, z; θ, ρ)
+		J = kkt.∇F_z!.result_buffer
+		kkt.∇F_z!(J, z; θ, ρ)
+
+		# High-η cases lock in the √η-balanced augmented scaling: the naive
+		# [I J; Jᵀ -ηI] form loses the tiny ~1/η step to cancellation there.
+		for η in (1e-6, 1e-2, 1e2, 1e6)
+			cache = RG._build_augmented_kkt_cache(J, m, n)
+			RG._update_augmented_kkt!(cache, J, η)
+			δz_klu = zeros(n)
+			RG._solve_augmented!(δz_klu, cache, F)
+
+			Jsvd = RG.LinearAlgebra.svd(Matrix(J))
+			δz_svd = -Jsvd.V * ((Jsvd.S ./ (Jsvd.S .^ 2 .+ η)) .* (Jsvd.U' * F))
+
+			@test isapprox(δz_klu, δz_svd; rtol = 1e-8)
+		end
+	end
+
+	@testset "Singular numeric refactorization rebuilds its cache" begin
+		# Reproduce the cache state that matters here: a successful numeric
+		# factorization followed by a singular in-place `klu!` update. The
+		# retry must discard that failed numeric object, rebuild at escalated η,
+		# and avoid the dense-SVD fallback.
+		J = RG.SparseArrays.sparse([1], [1], [1.0], 1, 1)
+		cache = RG._build_augmented_kkt_cache(J, 1, 1)
+		RG._update_augmented_kkt!(cache, J, 1e-6)
+		δz = zeros(1)
+		F = ones(1)
+		RG._solve_augmented!(δz, cache, F)
+
+		# Make the next numeric update singular while retaining the same sparse
+		# pattern. The retry's η update restores a nonsingular diagonal system.
+		RG.SparseArrays.nonzeros(J) .= 0.0
+		RG.SparseArrays.nonzeros(cache.K) .= 0.0
+		singular_retries = Ref(0)
+		svd_fallbacks = Ref(0)
+		η_used = RG._klu_step_with_fallback!(
+			δz,
+			cache,
+			J,
+			F,
+			1e-6,
+			1e2,
+			false;
+			singular_retry_counter = singular_retries,
+			svd_fallback_counter = svd_fallbacks,
+		)
+
+		@test singular_retries[] == 1
+		@test svd_fallbacks[] == 0
+		@test η_used ≈ 1e-4
+		@test all(isfinite, δz)
+	end
 end
 
 @testset "the new knobs validate their arguments" begin

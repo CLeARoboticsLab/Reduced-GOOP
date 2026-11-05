@@ -1,9 +1,9 @@
 include(joinpath(@__DIR__, "benchmark_problems.jl"))
 
 # `atol` is the primal accuracy demanded of the recovered solution. It is a
-# keyword because that accuracy tracks ϵ₀ linearly — the interior-point iterates
-# stop on the ϵ-relaxed complementarity `σ .* γ = ϵ`, so the active constraints
-# are only satisfied to O(ϵ) and `x` is displaced correspondingly. Deeper
+# keyword because that accuracy tracks the relaxation ρ linearly — the interior-point
+# iterates stop on the relaxed complementarity `σ .* γ = ρ`, so the active constraints
+# are only satisfied to O(ρ) and `x` is displaced correspondingly. Deeper
 # hierarchies inherit a larger constant, so they are given a looser `atol`
 # rather than being excluded from the known-solution assertions.
 function test_known_solution_case(;
@@ -14,11 +14,11 @@ function test_known_solution_case(;
     kkt_system = reduced_kkt_system,
 )
 	case = build_benchmark_problem(; num_players, levels, kind)
-	(; output, primals) = solve_with_interior_point(case.problem, case.expected; kkt_system)
+	(; output, primals) = solve_with_pdip(case.problem, case.expected; kkt_system)
 
 	@test output.status === :solved
 	@test isapprox(primals, case.expected; atol, rtol = 0.0)
-	@test output.kkt_error <= 1e-7
+	@test output.residual <= 1e-7
 	assert_active_set(
 		case.problem,
 		primals,
@@ -378,191 +378,27 @@ end
 	end
 end
 
-function klu_test_options(;
-	linesearch = :fraction_to_boundary,
-	linear_solver = :svd,
-	reuse_factorization_iters = 0,
-	use_marquardt_scaling = false,
-	η₀ = 0.0,
-)
-	return ReducedGOOP.InteriorPointOptions(;
-		# The residual of the ϵ-relaxed system floors at ≈ 1.22·ϵ on this
-		# benchmark, and the backtracking mode never shrinks ϵ across outer
-		# iterations, so ϵ must sit strictly below tol for `kkt_error ≤ tol`
-		# to be attainable (ϵ₀ = :auto would set ϵ = tol on a warmstart).
-		tol = 1e-7,
-		η₀,
-		ϵ₀ = 1e-8,
-		max_inner_iters = 5000,
-		max_outer_iters = 20,
-		tightening_rate = 2.0,
-		loosening_rate = 0.5,
-		min_stepsize = 1e-20,
-		linesearch,
-		record_convergence = false,
-		record_condition_number = false,
-		eta_retry_growth = 0.3,
-		tsvd_threshold = 0.0,
-		use_marquardt_scaling,
-		linear_solver,
-		reuse_factorization_iters,
-		verbose = false,
-	)
-end
-
-@testset "KLU Augmented Linear Solver" begin
-	problem = build_benchmark_problem(; num_players = 3, levels = 2, kind = :quadratic)
-	kkt = reduced_kkt_system(problem.problem)
-	θ = zeros(sum(problem.problem.parameter_dims))
-
-	@testset "Direction equivalence with the SVD Tikhonov step" begin
-		# The augmented quasi-definite system [[I J]; [Jᵀ -ηI]] must reproduce the
-		# dense-SVD step δz = -V diag(S/(S²+η)) Uᵀ F exactly (tsvd_threshold = 0,
-		# no Marquardt scaling).
-		n = kkt.variable_dimension
-		m = kkt.kkt_dimension
-		z = 0.3 .* sin.(1:n)
-		ρ = 0.1
-
-		F = zeros(m)
-		kkt.F!(F, z; θ, ρ)
-		J = kkt.∇F_z!.result_buffer
-		kkt.∇F_z!(J, z; θ, ρ)
-
-		# High-η cases lock in the √η-balanced augmented scaling: the naive
-		# [I J; Jᵀ -ηI] form loses the tiny ~1/η step to cancellation there.
-		for η in (1e-6, 1e-2, 1e2, 1e6)
-			cache = ReducedGOOP._build_augmented_kkt_cache(J, m, n)
-			ReducedGOOP._update_augmented_kkt!(cache, J, η)
-			δz_klu = zeros(n)
-			ReducedGOOP._solve_augmented!(δz_klu, cache, F)
-
-			Jsvd = ReducedGOOP.LinearAlgebra.svd(Matrix(J))
-			δz_svd = -Jsvd.V * ((Jsvd.S ./ (Jsvd.S .^ 2 .+ η)) .* (Jsvd.U' * F))
-
-			@test isapprox(δz_klu, δz_svd; rtol = 1e-8)
-		end
-	end
-
-	@testset "Solve-level agreement between :svd and :klu" begin
-		# Backtracking is the MPC configuration; without Marquardt scaling the
-		# fraction-to-boundary :svd baseline is not a meaningful reference.
-		expected = reduce(vcat, [multiplayer_expected_block(player) for player in 1:3])
-		outputs = map((:svd, :klu)) do linear_solver
-			ReducedGOOP.solve(
-				ReducedGOOP.InteriorPoint(),
-				kkt,
-				θ;
-				z₀ = expected,
-				options = klu_test_options(;
-					linesearch = :backtracking,
-					linear_solver,
-					η₀ = 1e-6,
-				),
-			)
-		end
-		svd_output, klu_output = outputs
-		@test svd_output.status === :solved
-		@test klu_output.status === :solved
-		@test isapprox(
-			klu_output.z[kkt.primal_dims],
-			svd_output.z[kkt.primal_dims];
-			atol = 1e-6,
-		)
-		@test isapprox(klu_output.z[kkt.primal_dims], expected; atol = 1e-6)
-	end
-
-	@testset "Backtracking :klu with factorization reuse" begin
-		expected = reduce(vcat, [multiplayer_expected_block(player) for player in 1:3])
-		for reuse_factorization_iters in (0, 2)
-			output = ReducedGOOP.solve(
-				ReducedGOOP.InteriorPoint(),
-				kkt,
-				θ;
-				z₀ = expected,
-				options = klu_test_options(;
-					linesearch = :backtracking,
-					linear_solver = :klu,
-					reuse_factorization_iters,
-					η₀ = 1e-6,
-				),
-			)
-			@test output.status === :solved
-			@test isapprox(output.z[kkt.primal_dims], expected; atol = 1e-6)
-		end
-	end
-
-	@testset "Singular numeric refactorization rebuilds its cache" begin
-		# Reproduce the cache state that matters here: a successful numeric
-		# factorization followed by a singular in-place `klu!` update. The
-		# retry must discard that failed numeric object, rebuild at escalated η,
-		# and avoid the dense-SVD fallback.
-		J = ReducedGOOP.SparseArrays.sparse([1], [1], [1.0], 1, 1)
-		cache = ReducedGOOP._build_augmented_kkt_cache(J, 1, 1)
-		ReducedGOOP._update_augmented_kkt!(cache, J, 1e-6)
-		δz = zeros(1)
-		F = ones(1)
-		ReducedGOOP._solve_augmented!(δz, cache, F)
-
-		# Make the next numeric update singular while retaining the same sparse
-		# pattern. The retry's η update restores a nonsingular diagonal system.
-		ReducedGOOP.SparseArrays.nonzeros(J) .= 0.0
-		ReducedGOOP.SparseArrays.nonzeros(cache.K) .= 0.0
-		singular_retries = Ref(0)
-		svd_fallbacks = Ref(0)
-		η_used = ReducedGOOP._klu_step_with_fallback!(
-			δz,
-			cache,
-			J,
-			F,
-			1e-6,
-			1e2,
-			false;
-			singular_retry_counter = singular_retries,
-			svd_fallback_counter = svd_fallbacks,
-		)
-
-		@test singular_retries[] == 1
-		@test svd_fallbacks[] == 0
-		@test η_used ≈ 1e-4
-		@test all(isfinite, δz)
-	end
-
-	@testset "SVD-only features rejected on :klu" begin
-		@test_throws ArgumentError ReducedGOOP.solve(
-			ReducedGOOP.InteriorPoint(),
-			kkt,
-			θ;
-			options = klu_test_options(;
-				linear_solver = :klu,
-				use_marquardt_scaling = true,
-			),
-		)
-	end
-end
-
 @testset "Full Warmstart" begin
 	problem = build_benchmark_problem(; num_players = 3, levels = 2, kind = :quadratic)
 	kkt = reduced_kkt_system(problem.problem)
 	θ = zeros(sum(problem.problem.parameter_dims))
 	expected = reduce(vcat, [multiplayer_expected_block(player) for player in 1:3])
-	options =
-		klu_test_options(; linesearch = :backtracking, linear_solver = :klu, η₀ = 1e-6)
+	options = default_pdip_options()
 
-	cold = ReducedGOOP.solve(ReducedGOOP.InteriorPoint(), kkt, θ; z₀ = expected, options)
+	cold = ReducedGOOP.solve(ReducedGOOP.PDIP(), kkt, θ; z₀ = expected, options)
 	@test cold.status === :solved
 
 	# Resolving from the previous full solution (primals + duals + slacks) must
 	# converge almost immediately.
-	warm = ReducedGOOP.solve(ReducedGOOP.InteriorPoint(), kkt, θ; z₀ = cold.z, options)
+	warm = ReducedGOOP.solve(ReducedGOOP.PDIP(), kkt, θ; z₀ = cold.z, options)
 	@test warm.status === :solved
-	@test warm.total_iters <= cold.total_iters
-	@test warm.total_iters <= 15
-	@test isapprox(warm.z[kkt.primal_dims], expected; atol = 1e-6)
+	@test warm.residual_evaluations <= cold.residual_evaluations
+	@test warm.residual_evaluations <= 15
+	@test isapprox(warm.x, expected; atol = 1e-6)
 
 	# A z₀ of neither primal nor full length is rejected.
 	@test_throws ArgumentError ReducedGOOP.solve(
-		ReducedGOOP.InteriorPoint(),
+		ReducedGOOP.PDIP(),
 		kkt,
 		θ;
 		z₀ = zeros(kkt.variable_dimension + 1),

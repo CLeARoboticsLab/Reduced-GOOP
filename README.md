@@ -148,7 +148,6 @@ with respect to the full decision vector.
 | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `PDIP`          | Algorithm 5.1: Newton's method on F(z; ρ) = 0 for each relaxation ρ, with the minimum-norm step −J⁺F (`:svd`, the default) or a sparse QR, KLU or LDLᵀ step, and a backtracking (or fraction-to-boundary) line search that keeps the sign box positive. Options: `PDIPOptions`. For the perturbed reduced (5.2) and complete (6.1) systems. |
 | `ProjectedLM`   | The projected Levenberg–Marquardt method: the Levenberg–Marquardt step on the coordinates that are free, a scaled gradient step on those held at their floor (a two-metric projection), an Armijo line search along the projected arc, and an η schedule from the gain ratio. Options: `ProjectedLMOptions`; linear solvers `:normal` (default), `:klu`, `:ldl`. For the Scholtes system and the complete systems. |
-| `InteriorPoint` | The earlier interior-point solver, kept for comparison: Newton steps on the relaxed primal-dual residual with backtracking and fraction-to-boundary line search. Options: `InteriorPointOptions`. |
 
 With `record_convergence = true`, `PDIP` and `ProjectedLM` also return per-iteration
 histories (‖F(z; ρ)‖, ‖K₀‖, step sizes, and for `ProjectedLM` η).
@@ -207,8 +206,8 @@ uses `ProjectedLM` on `generate_slacked_scholtes_reduced_kkt_system`.
 
 ## Tests
 
-`test/runtests.jl` exercises the reduced and quasi KKT formulations with the
-interior-point solver, and includes `test/solver.jl` (the two solvers, `PDIP` and
+`test/runtests.jl` exercises the reduced and quasi KKT formulations with `PDIP`
+(Algorithm 5.1, the regularized `:klu` step), and includes `test/solver.jl` (the two solvers, `PDIP` and
 `ProjectedLM`), `test/complete_kkt.jl` (the complete systems) and
 `test/scholtes.jl` (the Scholtes system, from ScholtesReducedGOOP.jl's tests, and
 the Scholtes engine's own tests).
@@ -218,8 +217,7 @@ the Scholtes engine's own tests).
 | Known-solution benchmarks     | Single-player and coupled three-player cases with quadratic/linear and nonlinear/nonlinear variants.                                                                                 |
 | Complete KKT smoke test       | Agreement between complete and reduced formulations on an unconstrained quadratic problem.                                                                                           |
 | Code-generation parity        | Agreement between Symbolics and FastDifferentiation residual/Jacobian evaluators.                                                                                                    |
-| KLU solver tests              | Augmented-system direction accuracy, factorization reuse, singular-retry behavior, and agreement with dense SVD.                                                                     |
-| Warm-start tests              | Full-vector solver warm starts.                                                                                                                                                      |
+| Warm-start tests              | Full-vector `PDIP` warm starts.                                                                                                                                                            |
 | Solvers (`test/solver.jl`)    | The Newton step of every linear solver, the η schedule, Algorithm 5.1 on the perturbed reduced and complete systems, termination reasons, option checks.                         |
 | Scholtes (`test/scholtes.jl`) | The Scholtes system's rows, prioritized preference slacks, the quasi system, starts, solves with every linear solver, and exact inequalities at the solution; the engine's certificate and multistart. |
 

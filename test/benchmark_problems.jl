@@ -45,32 +45,20 @@ The nonlinear constraint transform preserves the same feasible set and active
 set as g(x) >= 0 because exp(r) - 1 = 0 iff r = 0, and exp(r) - 1 > 0 iff r > 0.
 =#
 
-function default_interior_point_options(;
-    verbose = false,
-    η₀ = 0.0,
-    record_convergence = false,
-)
-    return ReducedGOOP.InteriorPointOptions(;
-        tol = 1e-6,
-        η₀,
-        ϵ₀ = 1e-9,
-        max_inner_iters = 5000,
-        max_outer_iters = 2,
-        tightening_rate = 2.0,
-        loosening_rate = 0.5,
-        min_stepsize = 1e-20,
-        linesearch = :backtracking,
-        linear_solver = :klu,
-        record_convergence,
-        verbose,
-    )
-end
+"""
+PDIP options of the known-solution tests: the regularized `:klu` step (Levenberg–Marquardt with the
+default η = 1e-6) at a single relaxation ρ = 1e-9, from the known primals. On the multi-level benchmarks J is
+rank-deficient near the solution, where the exact step −J⁺F (`:svd`) stalls, and a ladder from ρ = 1 ends
+farther from x*.
+"""
+default_pdip_options(; record_convergence = false) =
+    ReducedGOOP.PDIPOptions(; ρ_schedule = [1e-9], linear_solver = :klu, record_convergence)
 
 # Generate KKT systems 
 reduced_kkt_system(problem) = ReducedGOOP.generate_slacked_reduced_kkt_system(problem)
 quasi_kkt_system(problem) = ReducedGOOP.generate_slacked_quasi_kkt_system(problem)
 
-function solve_with_interior_point(
+function solve_with_pdip(
     problem,
     expected_primals;
     z₀ = nothing,
@@ -80,14 +68,14 @@ function solve_with_interior_point(
     initial_guess = isnothing(z₀) ? expected_primals : z₀
 
     output = ReducedGOOP.solve(
-        ReducedGOOP.InteriorPoint(),
+        ReducedGOOP.PDIP(),
         kkt,
         zeros(sum(problem.parameter_dims));
         z₀ = initial_guess,
-        options = default_interior_point_options(),
+        options = default_pdip_options(),
     )
 
-    return (; output, primals = output.z[kkt.primal_dims], kkt)
+    return (; output, primals = output.x, kkt)
 end
 
 function preference_coordinate_groups(levels::Int)

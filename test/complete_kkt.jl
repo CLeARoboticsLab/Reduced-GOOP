@@ -255,7 +255,7 @@ end
 		z₀ = case.z₀,
 		options = RG.ProjectedLMOptions(; ρ_schedule = [1e-9], tol = 1e-9,
 			tol_inner = 1e-11, max_inner_iters = 500, η = 1e-6))
-	reduced = solve_with_interior_point(
+	reduced = solve_with_pdip(
 		case.problem,
 		case.expected;
 		z₀ = case.z₀,
@@ -265,7 +265,7 @@ end
 	@test complete.status === :solved
 	@test reduced.output.status === :solved
 	@test complete.residual <= 1e-8
-	@test reduced.output.kkt_error <= 1e-8
+	@test reduced.output.residual <= 1e-8
 	@test isapprox(complete.x, case.expected; atol = IP_ATOL, rtol = 0.0)
 	@test isapprox(reduced.primals, case.expected; atol = IP_ATOL, rtol = 0.0)
 	@test isapprox(reduced.primals, complete.x; atol = IP_ATOL, rtol = 0.0)

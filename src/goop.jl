@@ -121,8 +121,8 @@ end
 
 """
 Construct the Reduced KKT system corresponding to a ParametricGOOP: the interior-point system
-(5.2), with the relaxed complementarity `σ ∘ γ = ρ`, as a `GOOPKKTSystem` for `PDIP` (or
-`InteriorPoint`). Its Scholtes form is `generate_slacked_scholtes_reduced_kkt_system`. Code is
+(5.2), with the relaxed complementarity `σ ∘ γ = ρ`, as a `GOOPKKTSystem` for `PDIP`. Its Scholtes
+form is `generate_slacked_scholtes_reduced_kkt_system`. Code is
 generated with FastDifferentiation unless `codegen` says otherwise, split into functions of
 `fd_codegen_chunk_size` expressions (default `FD_CODEGEN_CHUNK_SIZE`; pass `typemax(Int)` for one
 function per block). A prioritized constraint h ≥ 0 at level k introduces explicit preference
@@ -955,6 +955,24 @@ function generate_slacked_scholtes_reduced_kkt_system(
         backend_options,
         codegen,
         fd_codegen_chunk_size,
+    )
+end
+
+"Construct the Reduced Quasi-KKT system corresponding to a ParametricGOOP in Scholtes form, truncated after `quasi_order` derivatives."
+function generate_slacked_scholtes_quasi_kkt_system(
+    goop::ParametricGOOP;
+    backend_options = (;),
+    codegen = :fast_differentiation,
+    fd_codegen_chunk_size = FD_CODEGEN_CHUNK_SIZE,
+    quasi_order::Int = 2,
+)
+    generate_slacked_scholtes_reduced_kkt_system(
+        goop;
+        drop_higher_order_terms = true,
+        backend_options,
+        codegen,
+        fd_codegen_chunk_size,
+        quasi_order,
     )
 end
 
