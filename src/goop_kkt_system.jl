@@ -19,7 +19,9 @@ The fields, by group:
     positive: σ and γ. The preference slacks s are not among them: s ≥ 0 is a row of F,
     s − σ = 0, like every other inequality;
   - symbolic: `F_symbolic`, `z_symbolic`, for complete systems also `slack_expressions`,
-    `G_symbolic` and `levels`, and `complementarity`, which names the system.
+    `G_symbolic` and `levels`;
+  - the tags: `kind`, the system (`:reduced` or `:complete`; `:scholtes` from step 2.5), and
+    `complementarity`, its complementarity rows (`:interior_point`, `:exact` or `:perturbed`).
 The evaluation state (θ, ρ, a Jacobian memo) belongs to the solver, not to the container.
 
 # The reduced system (`generate_slacked_reduced_kkt_system`)
@@ -93,7 +95,9 @@ struct GOOPKKTSystem{T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13}
     G_symbolic::T12
     "Per player and level, the symbolic data of the complete construction (complete systems; empty otherwise)"
     levels::T13
-    "The system: :interior_point (reduced), :exact or :perturbed (complete)"
+    "The system: :reduced or :complete (:scholtes from step 2.5)"
+    kind::Symbol
+    "Its complementarity rows: :interior_point (reduced), :exact or :perturbed (complete)"
     complementarity::Symbol
 end
 
@@ -329,13 +333,16 @@ function BuildGOOPKKTSystem(
     slack_expressions = T[],
     G_symbolic = T[],
     levels = Any[],
-    complementarity = :interior_point,
+    kind,
+    complementarity,
     backend_options = (;),
     codegen = :fast_differentiation,
     fd_codegen_chunk_size = FD_CODEGEN_CHUNK_SIZE,
 ) where {T<:SymbolicTracingUtils.Symbolics.Num}
     codegen in (:native, :fast_differentiation) ||
         error("Unknown codegen option: $(codegen). Use :native or :fast_differentiation.")
+    (kind, complementarity) in ((:reduced, :interior_point), (:complete, :exact), (:complete, :perturbed)) ||
+        error("Unknown system: kind = $kind, complementarity = $complementarity.")
     isempty(slack_expressions) || length(slack_expressions) == length(interior_point_slack_dims) ||
         error("one slack expression per interior point slack is expected")
     exact = complementarity === :exact
@@ -389,6 +396,7 @@ function BuildGOOPKKTSystem(
             slack_expressions,
             G_symbolic,
             levels,
+            kind,
             complementarity,
         )
     end

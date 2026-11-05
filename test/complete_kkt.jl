@@ -202,6 +202,8 @@ end
         @test all(v -> any(w -> any(isequal(v - w), k.F_symbolic), σ), s)
     end
     @test isempty(reduced.slack_expressions)
+    @test (reduced.kind, reduced.complementarity) == (:reduced, :interior_point)
+    @test [(k.kind, k.complementarity) for k in complete_systems] == [(:complete, :exact), (:complete, :perturbed)]
     for k in complete_systems
         σ = k.z_symbolic[k.interior_point_slack_dims]
         @test length(k.slack_expressions) == length(σ)
