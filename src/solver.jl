@@ -1092,7 +1092,9 @@ Options for `solve(PDIP(), …)`.
     solver's τ-rule: γ moves by α_γ, every other variable by α_σ, with no decrease test).
   - `linear_solver`: `:svd` (default), `:sparseQR_J`, `:sparseQR_Jᵀ`, `:klu` or `:ldl`; see
     `_newton_step!`.
-  - `η > 0`: the shift of `:klu` and `:ldl`, whose step is −Jᵀ(JJᵀ + ηI)⁻¹F (→ −J⁺F as η → 0).
+  - `η > 0`: the Levenberg–Marquardt parameter of `:klu` and `:ldl`, whose step is
+    −Jᵀ(JJᵀ + η²I)⁻¹F (→ −J⁺F as η → 0); the default 1e-6 regularizes JJᵀ by 1e-12 I. `:svd` and
+    the sparse QR steps do not use it.
   - `record_convergence`: also return the per-iteration histories.
 """
 Base.@kwdef struct PDIPOptions
@@ -1103,7 +1105,7 @@ Base.@kwdef struct PDIPOptions
     tol_inner::Float64 = 1e-11
     linesearch::Symbol = :backtracking
     linear_solver::Symbol = :svd
-    η::Float64 = 1e-12
+    η::Float64 = 1e-6
     β::Float64 = 0.5
     min_step::Float64 = 1e-14
     τ::Float64 = 0.995
@@ -1488,7 +1490,7 @@ function solve(
             end
 
             # Newton step on the free coordinates: J_F δz = −F, regularized by η² (Levenberg–Marquardt).
-            step = _newton_step!(δz, J_F, F, linear_solver, η; shift = abs2)
+            step = _newton_step!(δz, J_F, F, linear_solver, η)
             svd_fallbacks += step.fallback
             # A held coordinate's own step: −g_k / ‖J e_k‖², stopped at its floor.
             for (k, i) in enumerate(kkt.nonnegative_dims)
@@ -1613,14 +1615,14 @@ end
 
 """
 The Newton step δz with J δz = −F, by `linear_solver`, for `PDIP` (Algorithm 5.1) and `ProjectedLM` (on
-the masked Jacobian J_F). The regularized solvers shift JJᵀ by s = `shift(η)`, δz = −Jᵀ(JJᵀ + sI)⁻¹F:
-PDIP by η (`shift = identity`), ProjectedLM by η² (`shift = abs2`, Levenberg–Marquardt). `:klu` and `:ldl`
-solve the balanced augmented system [√sI J; Jᵀ −√sI] [w; δz] = [−F; 0]; `:normal` factorizes JJᵀ + sI
+the masked Jacobian J_F). The regularized solvers take the Levenberg–Marquardt step with parameter η,
+δz = −Jᵀ(JJᵀ + η²I)⁻¹F, the minimizer of ½‖F + J δz‖² + ½η²‖δz‖² (→ −J⁺F as η → 0): `:klu` and `:ldl`
+solve the balanced augmented system [ηI J; Jᵀ −ηI] [w; δz] = [−F; 0]; `:normal` factorizes JJᵀ + η²I
 itself. Returns `(; fallback, η)`: `fallback` is 1 when the step fell back to the `:svd` step
 (`:sparseQR_Jᵀ` with J without full row rank, or a singular or failed factorization), else 0; `η` is the
 η the step used (`:normal` raises it when its factorization fails).
 """
-function _newton_step!(δz, J, F, linear_solver, η; shift = identity)
+function _newton_step!(δz, J, F, linear_solver, η)
     m, n = size(J)
     if linear_solver === :svd
         # :svd: the minimum-norm step −J⁺F by the dense pseudoinverse (Algorithm 5.1).
@@ -1638,9 +1640,8 @@ function _newton_step!(δz, J, F, linear_solver, η; shift = identity)
         c = -(UpperTriangular(QR.R)' \ F[QR.pcol]) # R₁ᵀ c = −Pcᵀ F
         δz[QR.prow] .= QR.Q * [c; zeros(n - m)] # δz = Prᵀ Q [c; 0]
     elseif linear_solver === :klu
-        # :klu: −Jᵀ(JJᵀ + sI)⁻¹F by a sparse LU (KLU) of the augmented matrix [√sI J; Jᵀ −√sI].
-        s = shift(η)
-        K = [√s*SparseArrays.sparse(1.0I, m, m) J; J' -√s*SparseArrays.sparse(1.0I, n, n)]
+        # :klu: −Jᵀ(JJᵀ + η²I)⁻¹F by a sparse LU (KLU) of the augmented matrix [ηI J; Jᵀ −ηI].
+        K = [η*SparseArrays.sparse(1.0I, m, m) J; J' -η*SparseArrays.sparse(1.0I, n, n)]
         solution = try
             KLU.klu(K) \ [-F; zeros(n)]
         catch err
@@ -1650,9 +1651,8 @@ function _newton_step!(δz, J, F, linear_solver, η; shift = identity)
         end
         δz .= view(solution, (m + 1):(m + n))
     elseif linear_solver === :ldl
-        # :ldl: −Jᵀ(JJᵀ + sI)⁻¹F by a sparse LDLᵀ (CHOLMOD) of the augmented matrix [√sI J; Jᵀ −√sI].
-        s = shift(η)
-        K = [√s*SparseArrays.sparse(1.0I, m, m) J; J' -√s*SparseArrays.sparse(1.0I, n, n)]
+        # :ldl: −Jᵀ(JJᵀ + η²I)⁻¹F by a sparse LDLᵀ (CHOLMOD) of the augmented matrix [ηI J; Jᵀ −ηI].
+        K = [η*SparseArrays.sparse(1.0I, m, m) J; J' -η*SparseArrays.sparse(1.0I, n, n)]
         factor = ldlt(Symmetric(K, :L); check = false) # one triangle: J may store zeros
         if !issuccess(factor)
             δz .= pinv(Matrix(J)) * (-F) # a failed factorization: the :svd step
@@ -1660,13 +1660,13 @@ function _newton_step!(δz, J, F, linear_solver, η; shift = identity)
         end
         δz .= view(factor \ [-F; zeros(n)], (m + 1):(m + n))
     elseif linear_solver === :normal
-        # :normal: −Jᵀ(JJᵀ + sI)⁻¹F by a sparse Cholesky (CHOLMOD) of JJᵀ + sI. A failed factorization
-        # (s below the round-off of JJᵀ when J is rank-deficient) retries with 100 η, up to 5 times, and
+        # :normal: −Jᵀ(JJᵀ + η²I)⁻¹F by a sparse Cholesky (CHOLMOD) of JJᵀ + η²I. A failed factorization
+        # (η² below the round-off of JJᵀ when J is rank-deficient) retries with 100 η, up to 5 times, and
         # then takes the :svd step, as the Scholtes engine does.
         JJᵀ = Symmetric(J * J', :U)
         η₀ = η
         for _ in 0:5
-            factor = cholesky(JJᵀ; shift = shift(η), check = false)
+            factor = cholesky(JJᵀ; shift = η^2, check = false) # CHOLMOD factorizes JJᵀ + η²I
             if issuccess(factor)
                 mul!(δz, transpose(J), factor \ (-F))
                 all(isfinite, δz) && return (; fallback = 0, η)
