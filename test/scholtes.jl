@@ -4,8 +4,7 @@
 #
 # Part 1, "The Scholtes system": the system of `generate_slacked_scholtes_reduced_kkt_system`,
 # started by `initialize_scholtes!` and solved by `solve(ProjectedLM(), …)`. These are the
-# source's tests of the system and of its solves, moved off the Scholtes engine in step 2.6b
-# (output/refactor/plan.md); the solvers' own tests are in test/solver.jl.
+# source's tests of the system and of its solves; the solvers' own tests are in test/solver.jl.
 # Part 2, "The Scholtes engine": the source's tests of the engine's own features (its
 # Jacobian memo, certificate, multistart, non-monotone line search, refinement, in-place
 # Gram refresh and option checks), as ported; they go with the engine (src/scholtes_*.jl).
@@ -915,8 +914,7 @@ end
 
 end
 
-# The adapter's row-for-row check, while the adapter lives (the intersection study's complete checks use it
-# until step 2.6c; it goes in 2.6e).
+# The adapter's row-for-row check, while the adapter lives (the intersection study's complete checks use it).
 @testset "the perturbed reduced system (5.2), handed to Scholtes" begin
     # _scholtes_engine_system hands the :interior_point system to Scholtes(): the same residual and
     # Jacobian at the same ρ, with the slacks σ and duals γ (nonnegative_dims) nonnegative.

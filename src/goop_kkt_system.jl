@@ -7,8 +7,7 @@ as the generators return it: the reduced interior-point system (5.2)
 (`generate_slacked_complete_kkt_system`) and the reduced system in Scholtes form
 (`generate_slacked_scholtes_reduced_kkt_system`). θ are the parameters and ρ ≥ 0 relaxes the
 complementarity rows. (`generate_slacked_reduced_kkt_system(…; complementarity = :scholtes)` still
-returns the old `ScholtesKKTSystem` of src/scholtes_kkt.jl until the callers move,
-output/refactor/plan.md, step 2.6.)
+returns the old `ScholtesKKTSystem` of src/scholtes_kkt.jl.)
 
 The fields, by group:
   - compiled: the residual `F!(out, z; θ, ρ)`, its sparse Jacobian `∇F_z!(J, z; θ, ρ)`, for
@@ -135,9 +134,9 @@ function _symbolics_to_fd(x, varmap, memo)
         # `sorted_arguments`, not `arguments`: for a sum or product, `arguments` follows the
         # iteration order of SymbolicUtils' internal Dict, which can differ between Julia
         # processes. FD then adds the same terms in a different order, the last bits of a few
-        # generated rows change, and Scholtes solves took different paths in about 1 process
-        # in 8 (2026-10-24). The canonical order, also used by SymbolicUtils' own code
-        # generator, makes the generated code identical in every process (checked in 48).
+        # generated rows change, and solves can take different paths. The canonical order, also
+        # used by SymbolicUtils' own code generator, makes the generated code identical in every
+        # process.
         args = map(
             arg -> _symbolics_to_fd(arg, varmap, memo),
             Symbolics.SymbolicUtils.sorted_arguments(x),
@@ -433,8 +432,8 @@ end
 Compile a Scholtes reduced KKT system (`generate_slacked_reduced_kkt_system(goop; complementarity
 = :scholtes)`) and pack it into the container the Scholtes engine reads: a `ScholtesKKTSystem`
 with the rows F and the complementarity blocks a and b, whose first `original_nc` pairs are
-relaxed by the solver and the rest (the φ pairs) exact. Until the Scholtes system is rebuilt as a
-`GOOPKKTSystem`, without a and b (output/refactor/plan.md, step 2.5).
+relaxed by the solver and the rest (the φ pairs) exact. `generate_slacked_scholtes_reduced_kkt_system`
+builds the same system as a `GOOPKKTSystem`, without a and b.
 """
 function BuildScholtesKKTSystem(
     F_symbolic::Vector{T},

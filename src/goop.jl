@@ -1688,8 +1688,7 @@ end
 # Helper functions
 # Note: the reduced and complete generators differentiate with `_fast_gradient`, not with
 # `SymbolicTracingUtils.gradient`, because it is faster on large systems: both give the same
-# expressions (checked string for string, and the compiled residuals and Jacobians bitwise), and
-# the intersection game's exact complete system builds in 2.8 s with it against 7.2 s (2026-11-02).
+# expressions (checked string for string, and the compiled residuals and Jacobians bitwise).
 
 """
 `Symbolics.gradient(O, x)`, expression for expression, without walking all of `O` once per

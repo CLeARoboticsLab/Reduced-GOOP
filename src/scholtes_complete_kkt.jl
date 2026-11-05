@@ -86,8 +86,8 @@ The `CompleteKKTSystem` that the Scholtes engine reads (src/scholtes_solver.jl a
 for a `GOOPKKTSystem`: its compiled residual and Jacobian as the engine's positional `F_nc!(out, y,
 θ, ρ)` and `J_nc!`, no complementarity blocks (n_comp = 0), `nonnegative_dims` as the engine's
 direct sign bounds, K₀ as F at ρ = 0, and a fresh evaluation state (θ, ρ, Jacobian memo). It
-replaces the (5.2) wrapper and `BuildCompleteKKTSystem`, and goes when solver (2) reads
-`GOOPKKTSystem` itself (output/refactor/plan.md, steps 2.3 and 2.4). A caller that also evaluates
+replaces the (5.2) wrapper and `BuildCompleteKKTSystem`, and goes once nothing solves with the
+engine. A caller that also evaluates
 the engine's residual objects (`ScholtesResiduals`, `_norm_K₀`) on a system builds this once and
 passes it to both, so that they share its evaluation state.
 """
