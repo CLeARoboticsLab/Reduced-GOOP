@@ -518,6 +518,537 @@ function generate_slacked_quasi_kkt_system(
 end
 
 """
+Construct the Reduced KKT system corresponding to a ParametricGOOP in Scholtes form, built as
+`generate_slacked_reduced_kkt_system` builds (5.2): the same recursion, Lagrangians, names and
+order, with the Scholtes relaxation in place of the interior-point one. Level k's rows are
+
+    ∇Lₖ = 0                             stationarity
+    f = 0                               innermost level only
+    Gₖ − σₖ = 0                         slack
+    σₖ ⊙ γₖ + uₖ − ρ𝟙 = 0               relaxed complementarity, σₖ ⊙ γₖ ≤ ρ𝟙
+    ρ𝟙 − [Gₘ ⊙ γₘ]ₘ − σ̂ₖ = 0            the lower levels' relaxed complementarity, slacked
+    σ̂ₖ ⊙ ϕₖ = 0                         its exact complementarity
+
+over z = [x; s; σ; λ; γ; ψ; ϕ; σ̂; u], where Lₖ = cₖ − ψₖᵀπₖ₊₁ − λₖᵀf − γₖᵀGₖ − ϕₖᵀ(ρ𝟙 − [Gₘ ⊙ γₘ]ₘ) is
+the interior-point system's Lagrangian but for its last term, whose multipliers ϕ ≥ 0 here. The
+sign box (`nonnegative_dims`) is σ, γ, ϕ, σ̂ and u; K₀ is F at ρ = 0 and u = 0. Start it from
+`initialize_scholtes!`, which reads `slack_expressions` (G for σ, ρ𝟙 − Gₘ ⊙ γₘ for σ̂),
+`complementarity_pairs` and `preference_slack_rows`. With `drop_higher_order_terms = true`
+(quasi), every term of ∇Lₖ that would be differentiated more than `quasi_order` times is set to
+zero.
+"""
+function generate_slacked_scholtes_reduced_kkt_system(
+    goop::ParametricGOOP;
+    drop_higher_order_terms = false,
+    backend_options = (;),
+    codegen = :fast_differentiation,
+    fd_codegen_chunk_size = FD_CODEGEN_CHUNK_SIZE,
+    quasi_order::Int = 2,
+)
+    quasi_order >= 1 || throw(ArgumentError("quasi_order must be >= 1, got $quasi_order"))
+    # Symbolic variables for all primals and parameters.
+    backend = SymbolicTracingUtils.SymbolicsBackend()
+    @timeit TO "symbolic variable construction" begin
+        x =
+            SymbolicTracingUtils.make_variables(backend, :x, sum(goop.primal_dims)) |>
+            to_blockvector(goop.primal_dims)
+        θ =
+            SymbolicTracingUtils.make_variables(backend, :θ, sum(goop.parameter_dims)) |>
+            to_blockvector(goop.parameter_dims)
+        ρ = only(SymbolicTracingUtils.make_variables(backend, :ρ, 1))
+
+        symbolic_type = eltype(x)
+    end
+
+    # The number of rows of each prioritized constraint h ≥ 0, per player and level (0 for a cost).
+    preference_dims = [
+        [
+            prioritized ? length(preference(x, θ)) : 0 for (preference, prioritized) in
+            zip(goop.preferences[player], goop.is_prioritized_constraint[player])
+        ] for player in 1:(goop.num_players)
+    ]
+
+    # Keep track of all the preference (s) and interior point (σ) slacks we create, and of the
+    # expressions the slacks σ stand for (each level's G, in the order of σ).
+    s = symbolic_type[]
+    Σ = symbolic_type[]
+    slack_expressions = symbolic_type[]
+
+    # Keep track of all equality constraint duals (λ) and of the duals (ϕ) of the lower levels'
+    # complementarity products that we create.
+    Λ = symbolic_type[]
+    Φ = symbolic_type[]
+
+    # Keep track of all inequality constraint duals (γ) that we create, and of a label (kind, player,
+    # level, lower level, inequality) for each.
+    Γ = symbolic_type[]
+    labels = NamedTuple[]
+
+    # Keep track of all lower level policy constraint duals (ψ) that we create.
+    Ψ = symbolic_type[]
+
+    # Scholtes: the relaxations (u) of the products σ ⊙ γ, one per σ, and the slacks (σ̂) of the lower
+    # levels' complementarity ρ𝟙 − Gₘ ⊙ γₘ, with the expressions they stand for and a label for each.
+    U = symbolic_type[]
+    Σ̂ = symbolic_type[]
+    lower_slack_expressions = symbolic_type[]
+    lower_labels = NamedTuple[]
+
+    # Recursive function to construct a player's KKT conditions.
+    function construct_player_kkt_conditions(
+        preferences,
+        is_prioritized_constraint;
+        player,
+    )
+        num_levels = length(goop.preferences[player]) # Kⁱ
+        @assert length(preferences) == length(is_prioritized_constraint)
+        level = 1 + num_levels - length(preferences)
+
+        f =
+            isnothing(goop.equality_constraints[player]) ? nothing :
+            goop.equality_constraints[player](x, θ)
+        g =
+            isnothing(goop.inequality_constraints[player]) ? nothing :
+            goop.inequality_constraints[player](x, θ)
+
+        λ = SymbolicTracingUtils.make_variables(
+            backend,
+            Symbol("λ_$(player)_$(level)"),
+            goop.equality_dims[player],
+        )
+        push!(Λ, λ...)
+
+        # This level's inequalities G are g and, for every prioritized level from this one
+        # inward, h + s ≥ 0 and s ≥ 0; γ, σ and u have one entry per row of G (built below), and γ
+        # a label alike.
+        num_inequalities =
+            goop.inequality_dims[player] + 2 * sum(preference_dims[player][level:end])
+        γ = SymbolicTracingUtils.make_variables(
+            backend,
+            Symbol("γ_$(player)_$(level)"),
+            num_inequalities,
+        )
+        push!(Γ, γ...)
+        append!(
+            labels,
+            (
+                (; kind = :gamma, player, level, lower_level = 0, inequality = j) for
+                j in 1:goop.inequality_dims[player]
+            ),
+        )
+        for m in level:num_levels
+            append!(
+                labels,
+                (
+                    (; kind = :preference, player, level, lower_level = m, inequality = j) for
+                    j in 1:preference_dims[player][m]
+                ),
+            )
+            append!(
+                labels,
+                (
+                    (; kind = :preference_slack, player, level, lower_level = m, inequality = j)
+                    for j in 1:preference_dims[player][m]
+                ),
+            )
+        end
+
+        σ = SymbolicTracingUtils.make_variables(
+            backend,
+            Symbol("σ_$(player)_$(level)"),
+            num_inequalities,
+        )
+        # G is known only once the levels below are built, so its slots are reserved now.
+        σ_offset = length(Σ)
+        push!(Σ, σ...)
+        push!(slack_expressions, σ...)
+
+        u = SymbolicTracingUtils.make_variables(
+            backend,
+            Symbol("u_$(player)_$(level)"),
+            num_inequalities,
+        )
+        push!(U, u...)
+
+        # A prioritized constraint at this level has its own preference slacks.
+        preference_slack = SymbolicTracingUtils.make_variables(
+            backend,
+            Symbol("s_$(player)_$(level)"),
+            preference_dims[player][level],
+        )
+        push!(s, preference_slack...)
+
+        # Base case is the inner-most layer.
+        if length(preferences) == 1
+            h = only(preferences)(x, θ)
+
+            if only(is_prioritized_constraint)
+                # Highest priority is a constraint h ≥ 0: minimize sum(preference_slack)
+                # subject to h + preference_slack ≥ 0 and preference_slack ≥ 0.
+                preference_inequalities = [h .+ preference_slack; preference_slack]
+                G = [isnothing(g) ? symbolic_type[] : g; preference_inequalities]
+                @assert length(G) == num_inequalities
+                slack_expressions[σ_offset .+ eachindex(G)] .= G
+                L = sum(preference_slack) - (isnothing(f) ? 0 : λ' * f) - γ' * G
+                vars = [x[Block(player)]; preference_slack]
+
+                ∇L, π_terms = if drop_higher_order_terms
+                    lagrangian_terms = QuasiLagrangianTerm[]
+                    _push_quasi_lagrangian_term!(lagrangian_terms, sum(preference_slack))
+                    _push_quasi_lagrangian_term!(lagrangian_terms, f, λ)
+                    _push_quasi_lagrangian_term!(lagrangian_terms, G, γ)
+                    _quasi_gradient_from_terms(lagrangian_terms, vars; truncation_order = quasi_order)
+                else
+                    (@timeit TO "symbolic gradient construction" _fast_gradient(L, vars)),
+                    QuasiLagrangianTerm[]
+                end
+                F = Vector{symbolic_type}(
+                    filter!(
+                        !isnothing,
+                        [
+                            ∇L
+                            f
+                            G .- σ
+                            σ .* γ .+ u .- ρ
+                        ],
+                    ),
+                )
+
+                return (;
+                    F,
+                    π = ∇L,
+                    π_term_groups = [π_terms],
+                    preference_inequalities,
+                    complementary_slackness = G .* γ,
+                )
+            else
+                @assert length(h) == 1 "Expected a single preference function at the base level, but got $(length(h))"
+                # Highest priority is a cost.
+                isnothing(g) || (slack_expressions[σ_offset .+ eachindex(g)] .= g)
+
+                L = h - (isnothing(f) ? 0 : λ' * f) - (isnothing(g) ? 0 : γ' * g)
+                ∇L, π_terms = if drop_higher_order_terms
+                    lagrangian_terms = QuasiLagrangianTerm[]
+                    _push_quasi_lagrangian_term!(lagrangian_terms, h)
+                    _push_quasi_lagrangian_term!(lagrangian_terms, f, λ)
+                    _push_quasi_lagrangian_term!(lagrangian_terms, g, γ)
+                    _quasi_gradient_from_terms(
+                        lagrangian_terms,
+                        x[Block(player)];
+                        truncation_order = quasi_order,
+                    )
+                else
+                    (@timeit TO "symbolic gradient construction" _fast_gradient(L, x[Block(player)])),
+                    QuasiLagrangianTerm[]
+                end
+                F = Vector{symbolic_type}(
+                    filter!(
+                        !isnothing,
+                        [
+                            ∇L
+                            f
+                            (isnothing(g) ? nothing : g .- σ)
+                            (isnothing(g) ? nothing : σ .* γ .+ u .- ρ)
+                        ],
+                    ),
+                )
+
+                return (;
+                    F,
+                    π = ∇L,
+                    π_term_groups = [π_terms],
+                    preference_inequalities = symbolic_type[],
+                    complementary_slackness = isnothing(g) ? symbolic_type[] : g .* γ,
+                )
+            end
+        end
+
+        # Handle higher levels via tail recursion.
+        (; F, π, π_term_groups, preference_inequalities, complementary_slackness) =
+            construct_player_kkt_conditions(
+                preferences[2:end],
+                is_prioritized_constraint[2:end];
+                player,
+            )
+        h = first(preferences)(x, θ)
+
+        ψ = SymbolicTracingUtils.make_variables(
+            backend,
+            Symbol("ψ_$(player)_$(level)"),
+            length(π),
+        )
+        push!(Ψ, ψ...)
+
+        # Duals (ϕ ≥ 0) of the lower levels' relaxed complementarity ρ𝟙 − Gₘ ⊙ γₘ ≥ 0, m > level, and
+        # its slacks (σ̂), labelled by lower level and row.
+        ϕ = SymbolicTracingUtils.make_variables(
+            backend,
+            Symbol("ϕ_$(player)_$(level)"),
+            length(complementary_slackness),
+        )
+        push!(Φ, ϕ...)
+        σ̂ = SymbolicTracingUtils.make_variables(
+            backend,
+            Symbol("σ̂_$(player)_$(level)"),
+            length(complementary_slackness),
+        )
+        push!(Σ̂, σ̂...)
+        relaxed_lower_complementarity = ρ .- complementary_slackness # ρ𝟙 − [Gₘ ⊙ γₘ]ₘ
+        push!(lower_slack_expressions, relaxed_lower_complementarity...)
+        append!(
+            lower_labels,
+            (
+                (; kind = :phi_upper, player, level, lower_level = m, inequality = i) for
+                m in (level + 1):num_levels for
+                i in 1:(goop.inequality_dims[player] + 2 * sum(preference_dims[player][m:end]))
+            ),
+        )
+        @assert length(lower_labels) == length(Φ)
+
+        if first(is_prioritized_constraint)
+            # Current priority is a constraint h ≥ 0: minimize sum(preference_slack) subject to
+            # h + preference_slack ≥ 0 and preference_slack ≥ 0.
+            preference_inequalities =
+                [h .+ preference_slack; preference_slack; preference_inequalities]
+            G = [isnothing(g) ? symbolic_type[] : g; preference_inequalities]
+            @assert length(G) == num_inequalities
+            L =
+                sum(preference_slack) - ψ' * π - (isnothing(f) ? 0 : λ' * f) - γ' * G -
+                (isempty(complementary_slackness) ? 0 : ϕ' * relaxed_lower_complementarity)
+            vars = [x[Block(player)]; preference_slack]
+
+            ∇L, π_terms = if drop_higher_order_terms
+                lagrangian_terms = QuasiLagrangianTerm[]
+                _push_quasi_lagrangian_term!(lagrangian_terms, sum(preference_slack))
+                _append_quasi_policy_terms!(lagrangian_terms, π_term_groups, ψ)
+                _push_quasi_lagrangian_term!(lagrangian_terms, f, λ)
+                _push_quasi_lagrangian_term!(lagrangian_terms, G, γ)
+                _push_quasi_lagrangian_term!(
+                    lagrangian_terms,
+                    isempty(complementary_slackness) ? nothing : relaxed_lower_complementarity,
+                    ϕ,
+                )
+                _quasi_gradient_from_terms(lagrangian_terms, vars; truncation_order = quasi_order)
+            else
+                (@timeit TO "symbolic gradient construction" _fast_gradient(L, vars)),
+                QuasiLagrangianTerm[]
+            end
+        else
+            @assert length(h) == 1 "Expected a single preference function at the level $(level), but got $(length(h))"
+            # Current priority is a cost.
+            G = [isnothing(g) ? symbolic_type[] : g; preference_inequalities]
+            @assert length(G) == num_inequalities
+            L =
+                h - ψ' * π - (isnothing(f) ? 0 : λ' * f) - (isempty(G) ? 0 : γ' * G) -
+                (isempty(complementary_slackness) ? 0 : ϕ' * relaxed_lower_complementarity)
+            vars = x[Block(player)]
+
+            ∇L, π_terms = if drop_higher_order_terms
+                lagrangian_terms = QuasiLagrangianTerm[]
+                _push_quasi_lagrangian_term!(lagrangian_terms, h)
+                _append_quasi_policy_terms!(lagrangian_terms, π_term_groups, ψ)
+                _push_quasi_lagrangian_term!(lagrangian_terms, f, λ)
+                _push_quasi_lagrangian_term!(lagrangian_terms, isempty(G) ? nothing : G, γ)
+                _push_quasi_lagrangian_term!(
+                    lagrangian_terms,
+                    isempty(complementary_slackness) ? nothing : relaxed_lower_complementarity,
+                    ϕ,
+                )
+                _quasi_gradient_from_terms(lagrangian_terms, vars; truncation_order = quasi_order)
+            else
+                (@timeit TO "symbolic gradient construction" _fast_gradient(L, vars)),
+                QuasiLagrangianTerm[]
+            end
+        end
+        slack_expressions[σ_offset .+ eachindex(G)] .= G
+
+        F̃ = Vector{symbolic_type}(
+            filter!(
+                !isnothing,
+                [
+                    ∇L
+                    G .- σ
+                    σ .* γ .+ u .- ρ
+                    relaxed_lower_complementarity .- σ̂
+                    σ̂ .* ϕ
+                    F
+                ],
+            ),
+        )
+
+        return (;
+            F = F̃,
+            π = vcat(∇L, π),
+            π_term_groups = vcat([π_terms], π_term_groups),
+            preference_inequalities,
+            complementary_slackness = [G .* γ; complementary_slackness],
+        )
+    end
+
+    # Recursively generate the rest of the KKT conditions for each player.
+    F_π_pair = @timeit TO "symbolic expression construction" [
+        construct_player_kkt_conditions(
+            goop.preferences[player],
+            goop.is_prioritized_constraint[player];
+            player,
+        ) for player in 1:(goop.num_players)
+    ]
+
+    # Flatten the F and π vectors for all players.
+    @timeit TO "symbolic KKT vector assembly" begin
+        flattened_F = reduce(vcat, (pair.F for pair in F_π_pair))
+
+        # Filter out zeros.
+        F = Vector{symbolic_type}(
+            filter!(
+                !isnothing,
+                vcat(drop_higher_order_terms ? filter!(!iszero, flattened_F) : flattened_F),
+            ),
+        )
+
+        # Pack all variables together: the reduced system's, then the Scholtes slacks σ̂ and
+        # relaxations u.
+        z = Vector{symbolic_type}(vcat(x, s, Σ, Λ, Γ, Ψ, Φ, Σ̂, U))
+        θ = Vector{symbolic_type}(θ)
+
+        idx = blockedrange(length.([x, s, Σ, Λ, Γ, Ψ, Φ, Σ̂, U]))
+        primal_dims = idx[Block(1)] # x
+        preference_slack_dims = idx[Block(2)] # s
+        interior_point_slack_dims = [idx[Block(3)]; idx[Block(8)]] # Σ, Σ̂
+        inequality_constraint_dual_dims = vcat(idx[Block(5)]) # Γ
+        equality_constraint_dual_dims = idx[Block(4)] # Λ
+        stationarity_dual_dims = idx[Block(6)] # Ψ
+        all_equality_stationarity_dual_dims =
+            vcat(equality_constraint_dual_dims, stationarity_dual_dims)
+        # The sign box: σ, γ, ϕ, σ̂ and u. s ≥ 0 is a row of G (s − σ = 0), not a bound.
+        nonnegative_dims = [idx[Block(3)]; idx[Block(5)]; idx[Block(7)]; idx[Block(8)]; idx[Block(9)]]
+        # Scholtes system has two kinds of complementarity rows: 
+        # (1) relaxed: σ ⊙ γ + u - ρ = 0 
+        # (2) exact  : σ̂ ⊙ ϕ = 0.
+        complementarity_pairs = NamedTuple[
+            [
+                (;
+                    slack = idx[Block(3)][j],
+                    multiplier = idx[Block(5)][j],
+                    u_relaxation = idx[Block(9)][j],
+                    label = labels[j],
+                ) for j in eachindex(Γ)
+            ]
+            [
+                (;
+                    slack = idx[Block(8)][j],
+                    multiplier = idx[Block(7)][j],
+                    u_relaxation = 0,
+                    label = lower_labels[j],
+                ) for j in eachindex(Φ)
+            ]
+        ]
+        # The source level's h + s ≥ 0 row of each preference slack, in coordinate order.
+        preference_slack_rows =
+            findall(l -> l.kind === :preference && l.level == l.lower_level, labels)
+        @assert !any(isequal.(slack_expressions, Σ)) "a slack expression was not filled in"
+    end
+
+    @timeit TO "Jacobian / KKT construction" BuildGOOPKKTSystem(
+        F,
+        z,
+        θ,
+        ρ,
+        primal_dims,
+        preference_slack_dims,
+        interior_point_slack_dims,
+        inequality_constraint_dual_dims;
+        equality_constraint_dual_dims,
+        stationarity_dual_dims,
+        all_equality_stationarity_dual_dims,
+        nonnegative_dims,
+        slack_expressions = [slack_expressions; lower_slack_expressions],
+        kind = :scholtes,
+        complementarity = :scholtes,
+        complementarity_pairs,
+        preference_slack_rows,
+        backend_options,
+        codegen,
+        fd_codegen_chunk_size,
+    )
+end
+
+"""
+    initialize_scholtes!(z, kkt, θ, x, ρ; eq_cols = Int[], eq = Float64[], s_floor = 1e-8,
+                         preference_slacks = nothing, warm = true) -> z
+
+A start for the Scholtes system (`generate_slacked_scholtes_reduced_kkt_system`) at the primal `x`
+and the level ρ, written into `z`: the Scholtes engine's starts, value for value. With `warm` (its
+`scholtes_warm_start`, a continuation start):
+
+    s     the preference slacks: max(seed, margin, margin − h), margin = max(s_floor, 0.1ρ);
+    λ, ψ  `eq` at `eq_cols` (the multipliers kept from the previous stage), the others 0;
+    σ = max(G, s_floor),                          γ = 0.1ρ / max(σ, ρ);
+    σ̂ = max(ρ𝟙 − Gₘ ⊙ γₘ, min(s_floor, 0.1ρ)),     ϕ = 0.1ρ / max(σ̂, ρ);
+    u = max(ρ − σ ⊙ γ, 1e-6ρ).
+
+Without `warm` (its cold start): margin 1 and no seed, G > 0 strictly, σ = G, γ = 0.1ρ / σ,
+σ̂ = ρ𝟙 − Gₘ ⊙ γₘ, ϕ = 0.1ρ / σ̂ (> 0), and u as above. G, ρ𝟙 − Gₘ ⊙ γₘ and h are the system's
+`slack_targets!`.
+"""
+function initialize_scholtes!(
+    z,
+    kkt::GOOPKKTSystem,
+    θ,
+    x,
+    ρ;
+    eq_cols = Int[],
+    eq = Float64[],
+    s_floor = 1e-8,
+    preference_slacks = nothing,
+    warm = true,
+)
+    kkt.kind === :scholtes ||
+        throw(ArgumentError("initialize_scholtes! needs the Scholtes system, got kind = $(kkt.kind)"))
+    targets = zeros(length(kkt.slack_expressions))
+    relaxed = filter(p -> p.u_relaxation != 0, kkt.complementarity_pairs)
+    exact = filter(p -> p.u_relaxation == 0, kkt.complementarity_pairs)
+
+    # The primal start, and the preference slacks: s ≥ 0 and h + s ≥ 0 with a margin (h at s = 0).
+    fill!(z, 0.0)
+    z[kkt.primal_dims] .= x
+    margin = warm ? max(s_floor, 0.1ρ) : 1.0
+    kkt.slack_targets!(targets, z; θ, ρ)
+    for (j, (col, row)) in enumerate(zip(kkt.preference_slack_dims, kkt.preference_slack_rows))
+        seed = isnothing(preference_slacks) ? 0.0 : preference_slacks[j]
+        z[col] = max(seed, margin, margin - targets[row])
+    end
+    z[eq_cols] .= eq
+
+    # The relaxed products: σ on G, and γ.
+    kkt.slack_targets!(targets, z; θ, ρ)
+    for (j, p) in enumerate(relaxed)
+        warm || targets[j] > 0 || throw(
+            ArgumentError(
+                "every g^i(z0) must be > 0 STRICTLY; worst = $(minimum(targets[1:length(relaxed)])). Move z0 into the interior, or relax the constraint.",
+            ),
+        )
+        z[p.slack] = warm ? max(targets[j], s_floor) : targets[j]
+        z[p.multiplier] = warm ? 0.1ρ / max(z[p.slack], ρ) : 0.1 * ρ / z[p.slack]
+    end
+    # The exact products: σ̂ on ρ𝟙 − Gₘ ⊙ γₘ, with γ now set, and ϕ.
+    kkt.slack_targets!(targets, z; θ, ρ)
+    for (j, p) in enumerate(exact)
+        σ̂ = targets[length(relaxed) + j]
+        z[p.slack] = warm ? max(σ̂, min(s_floor, 0.1ρ)) : σ̂
+        z[p.multiplier] = warm ? 0.1ρ / max(z[p.slack], ρ) : 0.1 * ρ / z[p.slack]
+    end
+    warm || all(p -> z[p.multiplier] > 0, kkt.complementarity_pairs) || throw(
+        ArgumentError("initial multipliers must be > 0; worst = $(minimum(p -> z[p.multiplier], kkt.complementarity_pairs))."),
+    )
+    # The relaxations: σ ⊙ γ + u = ρ, u at least 1e-6ρ.
+    for p in relaxed
+        z[p.u_relaxation] = max(ρ - z[p.slack] * z[p.multiplier], 1e-6ρ)
+    end
+    z
+end
+
+"""
 Construct the Reduced KKT system of a ParametricGOOP in Scholtes form (`complementarity =
 :scholtes` of `generate_slacked_reduced_kkt_system`), with the variables, names and order of the
 interior-point system less its slacks σ. The Lagrangians are those of the interior-point system,

@@ -1153,6 +1153,7 @@ function solve(
     )
     η > 0 || throw(ArgumentError("η must be positive, got $η"))
     isempty(ρ_schedule) && throw(ArgumentError("ρ_schedule is empty"))
+    kkt.kind === :scholtes && throw(ArgumentError("PDIP cannot solve the Scholtes system: its exact products σ̂ ⊙ ϕ = 0 have no interior. Use ProjectedLM."))
     0 < β < 1 && 0 < min_step < 1 ||
         throw(ArgumentError("β and min_step must lie in (0, 1), got $β and $min_step"))
 
@@ -1183,7 +1184,7 @@ function solve(
     J = kkt.∇F_z!.result_buffer
     F = zeros(kkt.kkt_dimension) # F(z; ρ)
     F_trial = zeros(kkt.kkt_dimension) # F(z + α δz; ρ)
-    F₀ = zeros(kkt.kkt_dimension) # F(z; 0), for ‖K₀‖
+    F₀ = zeros(kkt.kkt_dimension) # K₀(z): F(z; 0) (for the Scholtes system with u = 0), for ‖K₀‖
     δz = zeros(kkt.variable_dimension)
     z_trial = similar(z)
     nonnegative_trial = @view z_trial[kkt.nonnegative_dims] # @view to avoid copy of selected entries
@@ -1207,7 +1208,7 @@ function solve(
         for _ in 1:max_inner_iters
             # Stopping tests: ‖K₀‖ < tol ends the solve, ‖F(z; ρ)‖ < tol_inner ends this level.
             residual_evaluations += 1
-            kkt.F!(F₀, z; θ, ρ = 0.0)
+            kkt.K₀!(F₀, z; θ)
             residual = norm(F₀)
             if record_convergence
                 push!(ρ_history, ρ)
@@ -1291,7 +1292,7 @@ function solve(
     end
 
     # Evaluate the stopping criterion at the returned iterate.
-    kkt.F!(F₀, z; θ, ρ = 0.0)
+    kkt.K₀!(F₀, z; θ)
     residual = norm(F₀)
     converged = residual < tol
     converged && (termination_reason = :tolerance_reached)
@@ -1425,7 +1426,7 @@ function solve(
     J_F = copy(J) # J with the held columns zeroed
     F = zeros(kkt.kkt_dimension) # F(z; ρ)
     F_trial = zeros(kkt.kkt_dimension) # F(z_trial; ρ)
-    F₀ = zeros(kkt.kkt_dimension) # F(z; 0), for ‖K₀‖
+    F₀ = zeros(kkt.kkt_dimension) # K₀(z): F(z; 0) (for the Scholtes system with u = 0), for ‖K₀‖
     δz = zeros(kkt.variable_dimension)
     z_trial = similar(z)
     nonnegative_trial = @view z_trial[kkt.nonnegative_dims] # @view to avoid copy of selected entries
@@ -1451,7 +1452,7 @@ function solve(
         for _ in 1:max_inner_iters
             # Stopping tests: ‖K₀‖ < tol ends the solve, ‖F(z; ρ)‖ < tol_inner ends this level.
             residual_evaluations += 1
-            kkt.F!(F₀, z; θ, ρ = 0.0)
+            kkt.K₀!(F₀, z; θ)
             residual = norm(F₀)
             if record_convergence
                 push!(ρ_history, ρ)
@@ -1566,7 +1567,7 @@ function solve(
     end
 
     # Evaluate the stopping criterion at the returned iterate.
-    kkt.F!(F₀, z; θ, ρ = 0.0)
+    kkt.K₀!(F₀, z; θ)
     residual = norm(F₀)
     converged = residual < tol
     converged && (termination_reason = :tolerance_reached)
