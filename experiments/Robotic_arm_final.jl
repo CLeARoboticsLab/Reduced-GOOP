@@ -67,10 +67,8 @@ function warm_step(ctx, θ, z0, previous, coarser_rhos; eq_cols, linear_solver,
     shifted_z = shift_plan(ctx.scenario, previous.z)
     attempts = Any[]
     for ρ in unique((previous.rho, coarser_rhos...))
-        w₀ = ReducedGOOP.scholtes_warm_start(ctx.kkt, θ, shifted_z, ρ;
-                                              eq_cols, eq = previous.w[eq_cols])
-        r = ReducedGOOP.solve(ReducedGOOP.Scholtes(), ctx.kkt, θ; z₀ = z0, w₀,
-            options = Core_.solver_options(ctx, ρ; linear_solver, max_inner))
+        w₀ = Core_.start_at(ctx, θ, shifted_z, ρ; warm = true, eq_cols, eq = previous.w[eq_cols])
+        r = Core_.solve_arm(ctx, θ, w₀; options = Core_.solver_options(ctx, ρ; linear_solver, max_inner))
         push!(attempts, r)
         r.residual / sqrt(ctx.m) < Core_.TOL &&
             return (; label = @sprintf("warm (rho %.0e)", ρ), result = r, attempts, shifted_z)
@@ -154,8 +152,9 @@ function demo(; receding_horizon::Integer = 1, plot_fig::Bool = true, output_dir
     ctx = Core_.build_context(sc)
     scale = sqrt(ctx.m)
     k₀(r) = r.residual / scale
-    @printf("\n%d primal variables, residual rows m = %d (n_nc = %d, n_c = %d), √m = %.3f\n",
-            length(ctx.kkt.primal_dims), ctx.m, ctx.kkt.n_nc, ctx.kkt.n_comp, scale)
+    pairs = length(ctx.kkt.complementarity_pairs)
+    @printf("\n%d primal variables, residual rows m = %d (stationarity and equality %d, complementarity pairs %d), √m = %.3f\n",
+            length(ctx.kkt.primal_dims), ctx.m, ctx.m - 2pairs, pairs, scale)
     @printf("KKT build + codegen %.1f s; linear_solver = %s, projected step\n\n",
             ctx.build_time, linear_solver)
     @info "Starting demo with initial (T = 1) scenario parameters"
@@ -163,7 +162,7 @@ function demo(; receding_horizon::Integer = 1, plot_fig::Bool = true, output_dir
     # sweep only runs a warm start when its best cold row is not the finest ρ, so otherwise
     # the first closed-loop step would pay its compilation (~0.2 s against ~0.03 s solves).
     tj = @elapsed let z = Core_.zero_control_guess(sc, sc.x_init)
-        r = ReducedGOOP.solve(ReducedGOOP.Scholtes(), ctx.kkt, θ; z₀ = z,
+        r = Core_.solve_arm(ctx, θ, Core_.start_at(ctx, θ, z, Core_.RHO_SWEEP[1]);
             options = Core_.solver_options(ctx, Core_.RHO_SWEEP[1]; linear_solver, max_inner = 2))
         warm_step(ctx, θ, z, r, coarser_rhos; eq_cols = Core_.eq_columns(ctx.kkt), linear_solver,
                   max_inner = 2)

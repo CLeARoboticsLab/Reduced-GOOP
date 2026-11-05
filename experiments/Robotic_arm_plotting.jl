@@ -717,82 +717,22 @@ residual_panel(resid, tol_inner, stop; xmax = nothing, tol_scale = 1.0) =
                        mark = tol_inner === nothing ? nothing :
                               (tol_inner, L"\mathrm{tol}_{\mathrm{inner}} = \rho"))
 
-# THE INFINITY NORM -- the largest single coordinate move, not a sum over the
-# whole vector. A 2-norm over primals, duals, slacks and `u` together makes the
-# same per-coordinate step read bigger on a bigger problem; the max coordinate
-# needs no normalisation, which is why (g) divides by `sqrt(m)` and this does
-# not. `trajectory_game.jl` reports it the same way, and `solve_rho_sweep`'s
-# trace is what takes the norm -- change it there, not here.
-#
-# One point SHORTER than (g) whenever the level exits on a tolerance: the test
-# comes before the step (src/solve.jl), so at the iterate that ENDED the run no
-# direction was ever computed. There is no honest value to draw there and none
-# is invented; instead the panel shares (g)'s iteration axis and says so in its
-# title, which turns the gap from a discrepancy into the thing it means -- the
-# solver stopped instead of stepping.
-step_panel(dwn; xmax = nothing) =
-    _convergence_panel(dwn, "i",
-                       xmax !== nothing && length(dwn) == xmax - 1 ?
-                           "Newton direction size  [no step at k = $xmax]" :
-                           "Newton direction size",
-                       L"||\delta w||_\infty", GRIP[1]; xmax)
+# (h) THE UNRELAXED RESIDUAL ‖K₀‖ = ‖F(z; ρ = 0)‖ at each residual evaluation, per equation as
+# (g), against the acceptance tolerance: the number a row is judged by. It sits above (g) by about ρ
+# per complementarity row once the relaxed residual is small, which is where ρ's bias shows.
+k₀_panel(k₀, tol; xmax = nothing, tol_scale = 1.0) =
+    _convergence_panel(k₀ ./ tol_scale, "h", "unrelaxed residual",
+                       tol_scale == 1 ? L"||K_0(z)||_2" : L"||K_0(z)||_2/\sqrt{m}", COMP_C; xmax,
+                       mark = tol === nothing ? nothing : (tol, L"\mathrm{tol}"))
 
-# (e) THE ONE PART OF `R` THAT DOES NOT CONVERGE TO ZERO: the relaxation pins it
-# at rho, so this is where the accuracy `rho` bought is visible as a number.
-# Plotted RAW, in the product's own units -- it is not a residual row and there
-# is no `sqrt(m)` to divide out.
-#
-# `s (x) Gam + u` over the RELAXED rows only; `convergence_trace` does the
-# filtering. UPPERCASE Gam because this file builds `phi = false`, where the
-# inner multipliers are eliminated into the effective multiplier (src/kkt.jl:
-# `gam_name = phi ? "gam" : "Gam"`) -- `trajectory_game.jl` runs `phi = true`
-# and writes the same panel with a lowercase gamma.
-#
-# No rho reference line: at a fixed rho this curve SITS at rho, so a bar drawn
-# there runs through the data instead of bounding it. `rho` stays in the
-# signature so restoring one is a one-line change.
-comp_panel(comp, rho; xmax = nothing) =
-    _convergence_panel(comp, "h", "complementarity slackness",
-                       L"||s \odot \Gamma + u||_\infty", COMP_C; xmax)
-
-# (j) The effective Tikhonov parameter for the direction just taken, AFTER any
-# retry escalation. Flat at the floor unless `eta_schedule` is on -- which is a
+# (i) The Levenberg–Marquardt parameter of the direction just taken, AFTER any
+# retry escalation. Flat when η_min = η_max (GOOP_ETA_SCHEDULE=false) -- which is a
 # fact about the solve, not a broken panel, and worth seeing either way.
 eta_panel(eta; xmax = nothing) =
-    _convergence_panel(eta, "j", "Tikhonov regularization",
+    _convergence_panel(eta, "i", "Levenberg–Marquardt parameter",
                        L"\eta_k", ETA_C; xmax, preserve_gaps = true)
 
-# (k) The smallest entry of each sign-constrained block, pre-step. These are the
-# coordinates the fraction-to-boundary rule is holding off zero, so a run that
-# stalls against the boundary shows it here first -- one of them diving while
-# the residual flattens is the signature.
-#
-# Its own axis: `log10` of the value rather than a log scale, because the
-# reference these are read against (analysis/boundary_stall.jl) plots them that
-# way, and because a zero has to land somewhere rather than vanish -- the
-# subnormal floor below is what puts it at about -324 instead of -Inf.
-function positive_coordinates_panel(history; xmax = nothing)
-    x = [sample.iter for sample in history]
-    k = max(something(xmax, 0), isempty(x) ? 0 : maximum(x))
-    p = plot(; BASE..., title = "(k)  smallest positive coordinates",
-               xlabel = L"k\;(\mathrm{Newton\ iteration})",
-               ylabel = L"\log_{10}(\mathrm{value})",
-               legend = :bottomleft, legend_columns = 3,
-               xlims = k <= 1 ? :auto : (1 - 0.03k, k + 0.03k))
-    isempty(history) && return p
-    for (key, label, colour) in ((:s, L"s", GRIP[1]),
-                                 (:gamma, L"\Gamma", CRITICAL),
-                                 (:u, L"u", CHILD))
-        values = [sample[key] for sample in history]
-        y = [isfinite(v) ? log10(max(v, nextfloat(0.0))) : NaN for v in values]
-        plot!(p, x, y; label, color = colour, linewidth = 2.0,
-              marker = length(x) <= 60 ? :circle : :none,
-              markersize = 3.0, markerstrokewidth = 0)
-    end
-    return p
-end
-
-# (i) A LOG axis, because alpha runs from 1 down past 1e-12 under heavy
+# (j) A LOG axis, because alpha runs from 1 down past 1e-12 under heavy
 # backtracking and a linear one collapses all of that onto the floor.
 #
 # What a log axis cannot draw is alpha = 0 exactly -- what `solve_goop` reports
@@ -802,7 +742,7 @@ end
 function alpha_panel(alpha; xmax = nothing)
     fails = findall(iszero, alpha)
     nf    = length(fails)
-    p = _convergence_panel(alpha, "l",
+    p = _convergence_panel(alpha, "j",
                            nf == 0 ? "Newton step size" :
                            "Newton step size  [" * string(nf) *
                            (nf == 1 ? " line-search stall]" : " line-search stalls]"),
@@ -829,10 +769,10 @@ end
     plot_robotic_arm(z; rho, path, resid, dwn, stop, tol_scale) -> path
 
 The publication figure for one solved primal `z`, written as a vector PDF:
-three panels for the scene, plus two more for the solve itself when `resid`
-and `dwn` are supplied. `resid` is `GOOPResult.history`, drawn per equation as
-`||R||_2/sqrt(m)`; `dwn` comes through `solve_goop`'s `trace` and is an
-INFINITY norm, so the two panels need no common scaling. `stop` is a short
+the scene's panels, plus four more for the solve itself when `resid` or `tr`
+is supplied. `resid` is the result's `history`, drawn per equation as
+`||R||_2/sqrt(m)`; `tr` holds the per-iteration series of
+`convergence_traces` (‖K₀‖, η and α). `stop` is a short
 phrase naming the break that ended the run, drawn in panel (d)'s title beside
 the `tol_inner` line it was tested against; pass `nothing` to leave the panel
 unannotated. `tol_scale` is `sqrt(m)` -- pass the same one `solve_rho_sweep`
@@ -849,22 +789,19 @@ great circle. Axes lie on the floor of the frame; the child holds a constant
 height above it. (b) Robot-child separation against d_safe. (c) Realized gripper
 and child speeds (solid) against their limits (dashed). (d) Gripper and child
 distances from their nominal reach centers against their workspace bounds.
-Circles mark initial positions, stars mark goals. SIX CONVERGENCE PANELS show
+Circles mark initial positions, stars mark goals. FOUR CONVERGENCE PANELS show
 what the solver did to arrive at (a), all on log axes and all dimension-agnostic,
 so figures at different horizons compare: (g) the homotopy residual per
 equation, whose dashed line is the inner tolerance rho and whose bracketed
-phrase names the stopping rule that fired; (h) the complementarity slackness the
-relaxation pins at rho, the one part of R that does not go to zero; (i) the
-Newton direction size as an infinity norm, the largest single coordinate move;
-(j) the effective Tikhonov parameter; (k) log10 of the smallest slack, multiplier
-and relaxation variable, the coordinates the fraction-to-boundary rule holds off
-zero; and (l) the accepted step length, where a failed line search reports alpha
-= 0, breaks the line and is marked on the axis floor with the count in the title.
-(g) carries one more sample than the other five on a run that exits on a
-tolerance: history is pushed at the top of the loop, before the stopping tests,
-while both traces fire only once a direction has been computed. The panels share
-an iteration axis rather than being zipped, so that gap reads as "the solver
-stopped instead of stepping".
+phrase names the stopping rule that fired; (h) the unrelaxed residual K₀ per
+equation, against the acceptance tolerance; (i) the Levenberg–Marquardt
+parameter η; and (j) the accepted step length, where a failed line search
+reports alpha = 0, breaks the line and is marked on the axis floor with the
+count in the title. (g) and (h) carry one more sample than (i) and (j) on a run
+that exits on a tolerance: the residuals are recorded at every evaluation,
+before the stopping tests, while η and α exist only once a step was tried. The
+panels share an iteration axis rather than being zipped, so that gap reads as
+"the solver stopped instead of stepping".
 """
 function plot_robotic_arm(z; rho, path = joinpath(OUT, "robotic_arm_$(rho_tag(rho)).pdf"),
                           resid = nothing, tr = nothing, stop = nothing,
@@ -885,22 +822,18 @@ function plot_robotic_arm(z; rho, path = joinpath(OUT, "robotic_arm_$(rho_tag(rh
     else
         t  = something(tr, Core_.new_traces())
         rv = something(resid, Float64[])
-        kmax = max(length(rv), length(t.dwn), length(t.eta), length(t.comp),
-                   length(t.alpha),
-                   isempty(t.positive) ? 0 : maximum(s.iter for s in t.positive))
+        kmax = max(length(rv), length(t.k₀), length(t.eta), length(t.alpha))
         plot(scene...,
              residual_panel(rv, rho, stop; xmax = kmax, tol_scale),
-             comp_panel(t.comp, rho; xmax = kmax),
-             step_panel(t.dwn; xmax = kmax),
+             k₀_panel(t.k₀, Core_.TOL; xmax = kmax, tol_scale),
              eta_panel(t.eta; xmax = kmax),
-             positive_coordinates_panel(t.positive; xmax = kmax),
              alpha_panel(t.alpha; xmax = kmax);
              # The workspace is full width at the top; every other panel is
-             # below it in a two-column row. The tall canvas keeps the six
+             # below it in a two-column row. The tall canvas keeps the four
              # convergence panels readable in the PDF rather than compressing
              # them into the workspace row.
-             layout = @layout([a; b c; d e; f g; h i; j k; l]),
-             size = (1080, 2400), common...)
+             layout = @layout([a; b c; d e; f g; h i; j]),
+             size = (1080, 2000), common...)
     end
     mkpath(dirname(path))
     savefig(fig, path)          # vector PDF, the deliverable
@@ -1040,12 +973,12 @@ const CONVERGENCE_PALETTE = ["#0072B2", "#E69F00", "#009E73", "#CC79A7", "#56B4E
                              "#D55E00", "#F0E442"]
 
 """
-    plot_convergence_summary(rows; path, title = "Scholtes residual per iteration") -> path
+    plot_convergence_summary(rows; path, title = "residual per iteration") -> path
 
 `rows` is a list of `label => history` (`history` = the result's per-iteration ‖R‖).
 """
 function plot_convergence_summary(rows; path = joinpath(OUT, "robotic_arm_convergence.pdf"),
-                                  title = "Scholtes residual per iteration")
+                                  title = "residual per iteration")
     gr()
     fig = plot(; size = (800, 450), title, titlefontsize = 11, xlabel = "iteration",
                  ylabel = "log₁₀ ‖R(w; ρ)‖", legend = :topright, legendfontsize = 7,

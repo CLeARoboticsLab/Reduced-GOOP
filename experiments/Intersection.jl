@@ -1,4 +1,4 @@
-# Intersection.jl -- two crossing vehicles, solved with reduced Scholtes GOOP.
+# Intersection.jl -- two crossing vehicles: the reduced GOOP in Scholtes form, solved with ProjectedLM.
 # Run from the repository root (including the file alone does not solve):
 #
 #  julia --project=experiments -e 'include("experiments/Intersection.jl"); Intersection.demo()'
@@ -372,7 +372,7 @@ function demo(;
     # ── Settings ───────────────────────────────────────────────────────────────
     dynamics_model = Intersection.PlanarDoubleIntegrator()
     goop_version = :reduced
-    solver = ReducedGOOP.Scholtes()
+    solver = ReducedGOOP.ProjectedLM()
     compute_warmstart = true # Whether to compute a warmstart trajectory via rollout (true) or load from file (false)
 
     # ── Problem parameters ─────────────────────────────────────────────────────
@@ -426,21 +426,16 @@ function demo(;
     end
     @info "Building KKT system for $(goop_version) GOOP formulation and $(solver) solver..."
     GOOP_kkt_system = @timeit TO "KKT construction" begin
-        ReducedGOOP.generate_slacked_reduced_kkt_system(
-            problem; complementarity = :scholtes, codegen = :fast_differentiation,
-        )
+        ReducedGOOP.generate_slacked_scholtes_reduced_kkt_system(problem; codegen = :fast_differentiation)
     end
-    m = GOOP_kkt_system.n_nc + 2GOOP_kkt_system.n_comp
+    m = GOOP_kkt_system.kkt_dimension
     residual_scale = sqrt(m)
     eq_cols = findall(
         v -> startswith(string(v), "λ_") || startswith(string(v), "ψ_"),
-        GOOP_kkt_system.vars,
+        GOOP_kkt_system.z_symbolic,
     )
-    residuals = ReducedGOOP.ScholtesResiduals(GOOP_kkt_system)
     println("[Primal-Dual] KKT Dimension: ", m)
-    println("[Primal-Dual] variable Dimension: ",
-        GOOP_kkt_system.n + GOOP_kkt_system.n_comp +
-        count(!iszero, GOOP_kkt_system.u_index))
+    println("[Primal-Dual] variable Dimension: ", GOOP_kkt_system.variable_dimension)
 
     dynamics_dimension = dynamics.state_dimension + dynamics.control_dimension
     primal_dimension = dynamics_dimension * planning_horizon
@@ -448,49 +443,42 @@ function demo(;
     # ── Per-instance solver ────────────────────────────────────────────────────
     function solve_game_instance(θ; z₀, w₀, ρ)
         options =
-            @timeit TO "solver options construction" ReducedGOOP.ScholtesOptions(;
-                rho_schedule = [Float64(ρ)],
-                max_inner = max_inner_iters,
+            @timeit TO "solver options construction" ReducedGOOP.ProjectedLMOptions(;
+                ρ_schedule = [Float64(ρ)],
+                max_inner_iters,
                 tol = tol * residual_scale,
                 tol_inner = ρ * residual_scale,
-                projected_step = true,
                 proj_eps = 1e-8,
                 linear_solver,
-                eta_schedule = true,
-                eta_init = eta_0,
-                eta_min = 1e-8,
-                eta_max = 1e4,
+                η = eta_0,
+                η_min = 1e-8,
+                η_max = 1e4,
                 gain_low = 0.25,
                 gain_high = 0.75,
-                tightening_rate = 1.2,
-                loosening_rate = 3.0,
+                η_tightening_rate = 1.2,
+                η_loosening_rate = 3.0,
+                record_convergence = true,
                 verbose,
             )
 
         @info "Solving game instance with $(solver)..."
-        kkt_error_history = Float64[]
-        eta_history = Float64[]
-        trace = nt -> begin
-            push!(kkt_error_history, ReducedGOOP._norm_K₀(residuals, nt.r, nt.w, nt.rho))
-            push!(eta_history, nt.eta)
-        end
         elapsed_time = @elapsed begin
             output = @timeit TO "solver invocation" ReducedGOOP.solve(
                 solver,
                 GOOP_kkt_system,
                 θ;
-                z₀,
-                w₀,
+                z₀ = w₀,
                 options,
-                trace,
             )
         end
         stop_reason = solver_stop_reason(output, options; scale = residual_scale)
-        push!(kkt_error_history, output.residual)
-        push!(eta_history, output.eta)
+        # ‖K₀‖ and η at each iterate a step was tried from, then at the returned one.
+        tried = eachindex(output.η_history)
+        kkt_error_history = [output.residual_history[tried]; output.residual]
+        eta_history = [output.η_history; output.η]
 
         strategies = @timeit TO "solution postprocessing" extract_player_strategies(
-            output.z,
+            output.x,
             num_players,
             primal_dimension,
             dynamics,
@@ -501,21 +489,21 @@ function demo(;
             "warmstart_strategies" => extract_player_strategies(
                 z₀, num_players, primal_dimension, dynamics,
             ),
-            "z" => output.z,
-            "w" => output.w,
-            "preference_slacks" => output.preference_slacks,
-            "x" => output.z, # Primal compatibility for existing trajectory readers.
+            "z" => output.x,
+            "w" => output.z,
+            "preference_slacks" => output.z[GOOP_kkt_system.preference_slack_dims],
+            "x" => output.x, # Primal compatibility for existing trajectory readers.
             "solve_time_sec" => elapsed_time,
             "kkt_error" => output.residual,
             "kkt_error_per_equation" => output.residual / residual_scale,
-            "rho" => output.rho,
+            "rho" => output.ρ,
             "status" => output.status,
             "termination_reason" => output.termination_reason,
             "stop_reason" => stop_reason,
             "relaxed_residual" => output.relaxed_residual,
-            "total_iters" => output.iters,
+            "total_iters" => output.residual_evaluations,
             "kkt_error_history" => kkt_error_history,
-            "residual_history" => output.history,
+            "residual_history" => output.relaxed_residual_history,
             "eta_history" => eta_history,
             "solver_options" => options,
             "speed_constraint" => :component,
@@ -606,8 +594,8 @@ function demo(;
             # solver slacks even then, and retain λ/ψ for subsequent ρ stages,
             # as in the robotic-arm example's warm-z+eq continuation.
             eq = isnothing(previous_w) ? zeros(length(eq_cols)) : previous_w[eq_cols]
-            w₀ = ReducedGOOP.scholtes_warm_start(
-                GOOP_kkt_system, θ, stage_warmstart, ρ; eq_cols, eq,
+            w₀ = ReducedGOOP.initialize_scholtes!(
+                zeros(GOOP_kkt_system.variable_dimension), GOOP_kkt_system, θ, stage_warmstart, ρ; eq_cols, eq,
                 preference_slacks = stage_preference_slacks,
             )
             result = solve_game_instance(θ; z₀ = stage_warmstart, w₀, ρ)
@@ -728,7 +716,7 @@ function demo(;
                 "use_scalarized_baseline" => use_scalarized_baseline,
                 "use_social_equilibrium_baseline" => use_social_equilibrium_baseline,
                 "show_interactive_trajectory" => show_interactive_trajectory,
-                "solver" => "Scholtes",
+                "solver" => "ProjectedLM",
                 "complementarity" => "scholtes",
                 "rho_schedule" => rho_schedule,
                 "max_inner_iters" => max_inner_iters,

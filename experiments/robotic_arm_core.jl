@@ -13,8 +13,8 @@ module RoboticArmCore
 #
 #   - x₀ is the PARAMETER θ = [x₀¹; x₀²] rather than a constant baked into the dynamics,
 #     so one compiled system serves every initial state (receding horizon, MPC).
-#   - the problem is a `ParametricGOOP`; its KKT system is built with
-#     `complementarity = :scholtes` and solved with `ReducedGOOP.Scholtes()`.
+#   - the problem is a `ParametricGOOP`; its KKT system is built in Scholtes form by
+#     `generate_slacked_scholtes_reduced_kkt_system` and solved with `ReducedGOOP.ProjectedLM()`.
 #
 # Layout (as in the source): z^i = [x_1; …; x_T; u_1; …; u_T], x¹ = [p₁; p₂] ∈ R⁶,
 # u¹ ∈ R⁶, x² = p₃ ∈ R³, u² ∈ R³.
@@ -29,7 +29,8 @@ export ScenarioConfig, default_scenario_config, RoboticArmContext, build_context
        solver_options, plan_metrics, trajectories, state, control, gripper, pot_centre,
        child, pot_tilt, safety, arm_speed, arm_reach, child_speed, child_reach,
        handle_grasp, dynamics_residual, load_balance, pot_goal, chase,
-       effort, eq_columns, RHO_SWEEP, LINEAR_SOLVER, MAX_INNER, TOL, PROJ_EPS,
+       effort, eq_columns, start_at, solve_arm, convergence_traces, RHO_SWEEP, LINEAR_SOLVER,
+       MAX_INNER, TOL, PROJ_EPS,
        ETA_OPTIONS, CONTINUE_ETA, RHO_REF, NX, NU, TO
 
 const TO = ReducedGOOP.TO
@@ -298,7 +299,7 @@ end
 # ── 7. The compiled context and the ρ sweep ───────────────────────────────────────
 # Solver settings, as the source sets them (examples/robotic_arm.jl L202-245).
 const RHO_SWEEP = [1e-5, 1e-6, 1e-7, 1e-8, 1e-9, 1e-10]
-const LINEAR_SOLVER = :normal # :normal, :klu
+const LINEAR_SOLVER = :normal # :normal, :klu, :ldl
 const RHO_REF = 1e-4
 const MAX_INNER = 500
 const TOL = 1e-5
@@ -328,61 +329,61 @@ function build_context(sc::ScenarioConfig = ScenarioConfig(); codegen = :fast_di
     @info "build_context: building the ParametricGOOP problem (horizon = $(sc.horizon))"
     problem = build_problem(sc)
     @info "build_context: generating and compiling the KKT system"
-    t = @elapsed kkt = ReducedGOOP.generate_slacked_reduced_kkt_system(
-        problem;
-        complementarity = :scholtes,
-        codegen,
-    )
-    RoboticArmContext(sc, problem, kkt, kkt.n_nc + 2kkt.n_comp, t)
+    t = @elapsed kkt = ReducedGOOP.generate_slacked_scholtes_reduced_kkt_system(problem; codegen)
+    RoboticArmContext(sc, problem, kkt, kkt.kkt_dimension, t)
 end
 
-"Scholtes options for one ρ row, with every bar scaled by √m (per-equation tolerances)."
-solver_options(ctx::RoboticArmContext, ρ; linear_solver = LINEAR_SOLVER, proj_eps = PROJ_EPS,
-               max_inner = MAX_INNER, tol = TOL, eta_init = ETA_OPTIONS.eta_init) =
-    ReducedGOOP.ScholtesOptions(; ETA_OPTIONS..., eta_init, linear_solver, proj_eps,
-        rho_schedule = [ρ], max_inner, tol = tol * sqrt(ctx.m), tol_inner = ρ * sqrt(ctx.m))
+"""
+ProjectedLM options for one ρ row, with every bar scaled by √m (per-equation tolerances). With
+`ETA_OPTIONS.eta_schedule = false` (GOOP_ETA_SCHEDULE=false) η stays at `eta_init`: η_min = η_max = η.
+"""
+function solver_options(ctx::RoboticArmContext, ρ; linear_solver = LINEAR_SOLVER, proj_eps = PROJ_EPS,
+                        max_inner = MAX_INNER, tol = TOL, eta_init = ETA_OPTIONS.eta_init)
+    (; eta_schedule, eta_min, eta_max, gain_low, gain_high, tightening_rate, loosening_rate) = ETA_OPTIONS
+    ReducedGOOP.ProjectedLMOptions(; ρ_schedule = [ρ], max_inner_iters = max_inner,
+        tol = tol * sqrt(ctx.m), tol_inner = ρ * sqrt(ctx.m), linear_solver, proj_eps, η = eta_init,
+        η_min = eta_schedule ? eta_min : eta_init, η_max = eta_schedule ? eta_max : eta_init,
+        gain_low, gain_high, η_tightening_rate = tightening_rate, η_loosening_rate = loosening_rate,
+        record_convergence = true)
+end
 
-"Columns of y holding equality-like duals (λ, ψ): copied between solves by warm-z+eq."
+"Columns of z holding equality-like duals (λ, ψ): copied between solves by warm-z+eq."
 eq_columns(kkt) =
-    findall(v -> startswith(string(v), "λ_") || startswith(string(v), "ψ_"), kkt.vars)
+    findall(v -> startswith(string(v), "λ_") || startswith(string(v), "ψ_"), kkt.z_symbolic)
 
-# The per-iteration series the convergence panels draw (the source's section 6.6): the
-# direction size ‖δw‖∞, η, the complementarity slackness ‖s ⊙ γ + u‖∞ over the relaxed
-# rows, the smallest s / γ / u before each step, and the accepted step length α. The
-# solver's trace fields are live buffers, so each is reduced to a scalar on the spot.
-new_traces() = (dwn = Float64[], eta = Float64[], comp = Float64[],
-                positive = NamedTuple[], alpha = Float64[])
+"""
+The arm's Scholtes system started at the plan `z` and the level ρ (`initialize_scholtes!`): the cold
+start, which needs g(z) > 0 strictly, or with `warm` the warm-z+eq start (`eq` at `eq_cols`).
+"""
+start_at(ctx::RoboticArmContext, θ, z, ρ; warm = false, eq_cols = Int[], eq = Float64[]) =
+    ReducedGOOP.initialize_scholtes!(zeros(ctx.kkt.variable_dimension), ctx.kkt, θ, z, ρ;
+        warm, eq_cols, eq)
 
-function convergence_trace(kkt, tr)
-    tr === nothing && return nothing
-    n, nc = kkt.n, kkt.n_comp
-    uidx = kkt.u_index
-    # over the RELAXED rows only: an exact φ pair (u_index = 0) has no u and aims at 0
-    comp_peak(nt) = begin
-        peak = 0.0
-        @inbounds for j in 1:nc
-            uj = uidx[j]
-            uj == 0 && continue
-            v = abs(nt.w[n + j] * nt.b[j] + nt.w[n + nc + uj])
-            v > peak && (peak = v)
-        end
-        peak
-    end
-    return function (nt)
-        push!(tr.dwn, norm(nt.dw, Inf))
-        push!(tr.eta, nt.eta)
-        push!(tr.comp, comp_peak(nt))
-        push!(tr.positive, (iter = nt.iter,
-                            s = minimum(view(nt.w, (n + 1):(n + nc))),
-                            gamma = minimum(nt.b),
-                            u = minimum(view(nt.w, (n + nc + 1):length(nt.w)))))
-        return nothing
-    end
+"""
+One ProjectedLM solve of the arm from the full start `z₀`, under the names the arm code and its
+figures read: `z` the plan, `w` the full iterate, `rho`, `iters` (residual evaluations), `eta` (the η
+a next solve would start from), `history` (‖R‖ at each residual evaluation) and `converged`, with
+`status`, `termination_reason`, `residual` (‖K₀‖) and `relaxed_residual`; `output` is ProjectedLM's own.
+"""
+function solve_arm(ctx::RoboticArmContext, θ, z₀; options)
+    output = ReducedGOOP.solve(ReducedGOOP.ProjectedLM(), ctx.kkt, θ; z₀, options)
+    (; output.status, output.termination_reason, converged = output.status === :solved,
+       z = output.x, w = output.z, rho = output.ρ, iters = output.residual_evaluations,
+       output.residual, output.relaxed_residual, eta = output.η,
+       history = output.relaxed_residual_history, output)
 end
 
-# The accepted Armijo step length; fires after every line search, a failed one included
-# (α = 0).
-step_size_trace(tr) = tr === nothing ? nothing : (nt -> (push!(tr.alpha, nt.alpha); nothing))
+# The per-iteration series the convergence panels draw beside the result's ‖R‖ `history`: ‖K₀‖ at
+# each residual evaluation, and for each Newton step its η and accepted step length α, a failed line
+# search drawn as α = 0. ProjectedLM records them (`record_convergence`).
+new_traces() = (k₀ = Float64[], eta = Float64[], alpha = Float64[])
+
+"The convergence panels' series (`new_traces`) of one ProjectedLM solve."
+function convergence_traces(output)
+    failed = output.termination_reason === :line_search_failed
+    (; k₀ = copy(output.residual_history), eta = copy(output.η_history),
+       alpha = failed ? [output.step_size_history; 0.0] : copy(output.step_size_history))
+end
 
 """
     solve_rho_sweep(ctx, θ = scenario_parameters(ctx.scenario.x_init); z0, rho_schedule,
@@ -403,19 +404,16 @@ function solve_rho_sweep(ctx::RoboticArmContext, θ = scenario_parameters(ctx.sc
     kkt = ctx.kkt
     scale = sqrt(ctx.m)
     k₀(r) = r.residual / scale
-    new_trace() = collect_traces ? new_traces() : nothing
-    solve_at(ρ; w₀ = nothing, tr = nothing, eta_init = ETA_OPTIONS.eta_init) =
-        ReducedGOOP.solve(ReducedGOOP.Scholtes(), kkt, θ; z₀ = z0, w₀,
-            options = solver_options(ctx, ρ; linear_solver, proj_eps, max_inner, tol, eta_init),
-            trace = convergence_trace(kkt, tr), step_trace = step_size_trace(tr))
+    solve_at(ρ, start; eta_init = ETA_OPTIONS.eta_init) =
+        solve_arm(ctx, θ, start; options = solver_options(ctx, ρ; linear_solver, proj_eps, max_inner, tol, eta_init))
+    traces(r) = collect_traces ? convergence_traces(r.output) : nothing
     report(tag, ρ, r, t, tr) = on_result === nothing || on_result(tag, ρ, r, t, tr)
 
     warm = Tuple{String,Float64,Any,Any}[]
     cold = Pair{Float64,Any}[]
     for ρ in (stop_at_tol ? reverse(rho_schedule) : rho_schedule)
-        tr = new_trace()
-        t = @elapsed r = solve_at(ρ; tr)
-        report("cold", ρ, r, t, tr)
+        t = @elapsed r = solve_at(ρ, start_at(ctx, θ, z0, ρ))
+        report("cold", ρ, r, t, traces(r))
         push!(cold, ρ => r)
         stop_at_tol && k₀(r) < tol && return cold, warm
     end
@@ -430,9 +428,9 @@ function solve_rho_sweep(ctx::RoboticArmContext, θ = scenario_parameters(ctx.sc
     eq_cols = eq_columns(kkt)
     prev = seed
     for ρ in remaining
-        tr = new_trace()
-        w₀ = ReducedGOOP.scholtes_warm_start(kkt, θ, prev.z, ρ; eq_cols, eq = prev.w[eq_cols])
-        t = @elapsed r = solve_at(ρ; w₀, tr, eta_init = CONTINUE_ETA ? prev.eta : ETA_OPTIONS.eta_init)
+        w₀ = start_at(ctx, θ, prev.z, ρ; warm = true, eq_cols, eq = prev.w[eq_cols])
+        t = @elapsed r = solve_at(ρ, w₀; eta_init = CONTINUE_ETA ? prev.eta : ETA_OPTIONS.eta_init)
+        tr = traces(r)
         report("warm-z+eq", ρ, r, t, tr)
         push!(warm, ("warm-z+eq", ρ, r, tr))
         stop_at_tol && k₀(r) < tol && return cold, warm
