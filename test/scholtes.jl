@@ -391,6 +391,9 @@ end
         @test all(>(0), targets(k, w0, 1e-10)[relaxed_pairs(k)])
         @test all(w0[k.preference_slack_dims] .>= preference_slacks)
         @test w0[k.preference_slack_dims] ≈ preference_slacks atol = 1e-7
+        for invalid_seed in ([1.0], [NaN, 1.0], [1.0, Inf])
+            @test_throws ArgumentError scholtes_start(k, result.x, 1e-10; warm = true, preference_slacks = invalid_seed)
+        end
         for linear_solver in (:normal, :klu, :ldl)
             options = RG.ProjectedLMOptions(; linear_solver, ρ_schedule = [1e-10], max_inner_iters = 2, tol = 0.0,
                 tol_inner = 0.0)
@@ -530,6 +533,7 @@ end
         @test all(history[i + 1] < history[i] for i in 1:(length(history) - 1) if ρs[i + 1] == ρs[i])
     end
     @test_throws ArgumentError plm_solve(prob_A; τ = 1.5)
+    @test_throws ArgumentError plm_solve(prob_A; proj_eps = -1.0)
 end
 
 @testset "every linear solver solves with the projected steps" begin

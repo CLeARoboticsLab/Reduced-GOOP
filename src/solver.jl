@@ -1401,6 +1401,8 @@ function solve(
     0 < β < 1 && 0 < min_step < 1 ||
         throw(ArgumentError("β and min_step must lie in (0, 1), got $β and $min_step"))
     0 < τ < 1 || throw(ArgumentError("τ must lie in (0, 1), got $τ"))
+    proj_eps >= 0 || throw(ArgumentError("proj_eps must be nonnegative, got $proj_eps"))
+    0 < c < 1 || throw(ArgumentError("c must lie in (0, 1), got $c"))
 
     # Initial point: s, σ and γ at 1, every other variable at 0, unless z₀ gives them.
     z = zeros(kkt.variable_dimension)
@@ -1623,6 +1625,7 @@ itself, kept in `normal_equations` from one step to the next. Returns `(; fallba
 when the step fell back to the `:svd` step (`:sparseQR_Jᵀ` with J without full row rank, or a singular or
 failed factorization), else 0; `η` is the η the step used (`:normal` raises it when its factorization fails).
 """
+#TODO: Same treatment (as :normal) for :klu and :ldl: Fill K in place and reuse symbolic factorization 
 function _newton_step!(δz, J, F, linear_solver, η, normal_equations = _normal_equations(J, linear_solver))
     m, n = size(J)
     if linear_solver === :svd

@@ -1005,6 +1005,13 @@ function initialize_scholtes!(
 )
     kkt.kind === :scholtes ||
         throw(ArgumentError("initialize_scholtes! needs the Scholtes system, got kind = $(kkt.kind)"))
+    isnothing(preference_slacks) || length(preference_slacks) == length(kkt.preference_slack_dims) || throw(
+        ArgumentError(
+            "preference_slacks has length $(length(preference_slacks)), expected $(length(kkt.preference_slack_dims))",
+        ),
+    )
+    isnothing(preference_slacks) || all(isfinite, preference_slacks) ||
+        throw(ArgumentError("preference_slacks must be finite"))
     targets = zeros(length(kkt.slack_expressions))
     relaxed = filter(p -> p.u_relaxation != 0, kkt.complementarity_pairs)
     exact = filter(p -> p.u_relaxation == 0, kkt.complementarity_pairs)

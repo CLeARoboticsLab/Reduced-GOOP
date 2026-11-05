@@ -222,7 +222,8 @@ end
                     RG.ProjectedLMOptions(; η_min = 0.0), RG.ProjectedLMOptions(; η_min = 2.0, η_max = 1.0),
                     RG.ProjectedLMOptions(; gain_low = 0.8, gain_high = 0.5),
                     RG.ProjectedLMOptions(; gain_low = -0.1), RG.ProjectedLMOptions(; τ = 0.0),
-                    RG.ProjectedLMOptions(; τ = 1.0))
+                    RG.ProjectedLMOptions(; τ = 1.0), RG.ProjectedLMOptions(; proj_eps = -1.0),
+                    RG.ProjectedLMOptions(; c = 0.0), RG.ProjectedLMOptions(; c = 1.0))
         @test_throws ArgumentError RG.solve(RG.ProjectedLM(), k, θ; options)
     end
     # Algorithm 5.1 has no rule for the Scholtes system's exact products σ̂ ⊙ ϕ = 0.
