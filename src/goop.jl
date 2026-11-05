@@ -52,6 +52,23 @@ function ParametricGOOP(
     )
 end
 
+"""
+    is_feasible(goop, z, θ; tol = 1e-6) -> (; feasible, worst, per_player)
+
+Worst (most negative) inequality component across all players at primal `z`; a player
+with no inequalities reports `Inf`.
+"""
+function is_feasible(goop::ParametricGOOP, z, θ; tol = 1e-6)
+    x = BlockArray(collect(z), goop.primal_dims)
+    θ_blocks = BlockArray(collect(θ), goop.parameter_dims)
+    per_player = [
+        goop.inequality_dims[i] > 0 ? minimum(goop.inequality_constraints[i](x, θ_blocks)) :
+        Inf for i in 1:(goop.num_players)
+    ]
+    worst = minimum(per_player)
+    return (feasible = worst >= -tol, worst, per_player)
+end
+
 mutable struct QuasiLagrangianTerm{T<:Symbolics.Num}
     expr::Union{AbstractVector{T},T}
     duals::Union{AbstractVector{T},Nothing}
@@ -981,8 +998,8 @@ end
                          preference_slacks = nothing, warm = true) -> z
 
 A start for the Scholtes system (`generate_slacked_scholtes_reduced_kkt_system`) at the primal `x`
-and the level ρ, written into `z`: the Scholtes engine's starts, value for value. With `warm` (its
-`scholtes_warm_start`, a continuation start):
+and the level ρ, written into `z`: the Scholtes engine's starts, value for value. With `warm` (a
+continuation start):
 
     s     the preference slacks: max(seed, margin, margin − h), margin = max(s_floor, 0.1ρ);
     λ, ψ  `eq` at `eq_cols` (the multipliers kept from the previous stage), the others 0;

@@ -207,39 +207,6 @@ function _initial_w(kkt::AbstractScholtesKKTSystem, z0, ρ₁::Float64; gamma_co
 end
 
 """
-    scholtes_warm_start(kkt, θ, z, ρ; eq_cols = Int[], eq = Float64[],
-                        s_floor = 1e-8, preference_slacks = nothing) -> w
-
-A continuation start at primal `z` and level `ρ`, optionally keeping the
-equality/policy multipliers `eq` at columns `eq_cols` (source `_warm_w`). Explicit
-preference slacks may be seeded with `preference_slacks`; each is raised as needed
-to keep both its own bound and its relaxed preference strictly feasible.
-"""
-function scholtes_warm_start(
-    kkt::ScholtesKKTSystem, θ, z, ρ;
-    eq_cols = Int[], eq = Float64[], s_floor = 1e-8, preference_slacks = nothing,
-)
-    _set_theta!(kkt, θ)
-    _set_rho!(kkt, ρ)
-    cols = _gamma_columns(kkt)
-    y = zeros(kkt.n)
-    y[kkt.primal_dims] .= z
-    _initialize_preference_slacks!(
-        kkt, y; margin = max(s_floor, 0.1ρ), preference_slacks,
-    )
-    y[eq_cols] .= eq
-    kkt.n_comp == 0 && return y
-    ng = kkt.original_nc
-    s = max.(_a(kkt, y), s_floor)
-    y[cols[1:ng]] .= 0.1ρ ./ max.(s[1:ng], ρ)
-    a = _a(kkt, y)
-    s[(ng + 1):end] .= max.(a[(ng + 1):end], min(s_floor, 0.1ρ))
-    y[cols[(ng + 1):end]] .= 0.1ρ ./ max.(s[(ng + 1):end], ρ)
-    u = max.(ρ .- s .* _b(kkt, y), 1e-6ρ)
-    return [y; s; u[findall(!iszero, kkt.u_index)]]
-end
-
-"""
     solve(::Scholtes, kkt::AbstractScholtesKKTSystem, θ; z₀ = nothing, w₀ = nothing,
           options = ScholtesOptions(), trace = nothing, step_trace = nothing)
 

@@ -4,23 +4,6 @@
 # set; under the Scholtes relaxation the relaxed system's solution set contains it at
 # every ρ, so different starts land in different places and a dedupe recovers the set.
 
-"""
-    is_feasible(goop, z, θ; tol = 1e-6) -> (; feasible, worst, per_player)
-
-Worst (most negative) inequality component across all players at primal `z`; a player
-with no inequalities reports `Inf`.
-"""
-function is_feasible(goop::ParametricGOOP, z, θ; tol = 1e-6)
-    x = BlockArray(collect(z), goop.primal_dims)
-    θ_blocks = BlockArray(collect(θ), goop.parameter_dims)
-    per_player = [
-        goop.inequality_dims[i] > 0 ? minimum(goop.inequality_constraints[i](x, θ_blocks)) :
-        Inf for i in 1:(goop.num_players)
-    ]
-    worst = minimum(per_player)
-    return (feasible = worst >= -tol, worst, per_player)
-end
-
 # One start, walked down the `retries` ladder until a solve is accepted (converged,
 # inside the sign box, finite). `nothing` if every attempt failed.
 function _solve_from(kkt, θ, z₀, tol, retries, options)

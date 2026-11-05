@@ -750,45 +750,6 @@ end
     @test !k.Jvalid[]
 end
 
-@testset "the certificate separates a solve from a stall" begin
-    k = skkt(prob_C)
-    r = ssolve(k, prob_C.z0; tol = 1e-8)
-    @test RG.stat_feas(k, θ0, r) >= 0
-    @test RG.stat_feas(k, θ0, r) <= r.residual + 1e-12
-    @test r.converged && RG.stat_feas(k, θ0, r) < 1e-6
-    k1 = skkt(prob_A)
-    r1 = ssolve(k1, [1.0])
-    @test RG.stat_feas(k1, θ0, r1) >= 0
-end
-
-@testset "solve_certified returns a certificate, and it is honest" begin
-    for prob in (prob_A, prob_C, prob_D)
-        k = skkt(prob)
-        cr = RG.solve_certified(k, θ0, prob.z0; options = SRC_DEFAULTS)
-        @test cr.attempts >= 1
-        @test cr.stat ≈ RG.stat_feas(k, θ0, cr.result) atol = 1e-12
-        @test cr.shortfall == cr.result.shortfall
-        if cr.certified
-            @test cr.rung >= 1
-            @test cr.stat < 1e-6
-            @test cr.margin >= -1e-8
-        else
-            @test cr.rung == 0
-        end
-    end
-    k = skkt(prob_C)
-    hopeless = RG.solve_certified(k, θ0, prob_C.z0; ladder = [[1e-2]], tol_stat = 1e-30,
-                                   options = SRC_DEFAULTS)
-    @test !hopeless.certified && hopeless.rung == 0
-    @test hopeless.attempts == 1
-    @test_throws ArgumentError RG.solve_certified(k, θ0, prob_C.z0; ladder = Vector{Float64}[])
-    L = RG.certified_ladder()
-    @test all(!isempty, L)
-    @test length(L[1]) == 1
-    @test issorted(length.(L))
-    @test minimum(L[end]) <= minimum(L[1])
-end
-
 @testset "non-monotone line search" begin
     k = skkt(prob_C)
     r1 = ssolve(k, prob_C.z0; nonmonotone = 1)

@@ -22,7 +22,7 @@ the paper, including the two-player intersection scenario and quadratic hierarch
 benchmarks, plus a two-arm robotic pot-carrying game solved in Scholtes form.
 
 The Scholtes relaxation scheme (the explicit φ formulation, projected two-metric
-step and ρ homotopy, with the certificate and multistart layers) was designed and
+step and ρ homotopy, with the multistart layer) was designed and
 first implemented by **Jingqi Li** in ScholtesReducedGOOP.jl, and is ported here.
 
 ## Installation and Usage
@@ -99,6 +99,7 @@ dual solution independently with `NonlinearSolve`.
 | --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `ParametricGOOP`                  | Stores player preferences, prioritized-constraint flags, player-wise equality and inequality constraints, dimensions, and number of players. (Shared constraints were removed; write a shared constraint into each player's own constraints.) |
 | `ParametricGOOP(x, theta; ...)`   | Convenience constructor that infers primal, parameter, equality, and inequality dimensions from template block vectors.                                                                                                                       |
+| `is_feasible(goop, z, θ)`         | The worst (most negative) inequality value at a primal point, over all players, and whether it is within `tol` of feasible. |
 | `QuasiLagrangianTerm` and helpers | Internal machinery for the quasi formulation; it builds gradients while dropping higher-order derivative terms after a bounded order.                                                                                                         |
 
 #### KKT-Based Formulations
@@ -188,9 +189,8 @@ uses `ProjectedLM` on `generate_slacked_scholtes_reduced_kkt_system`.
 | `scholtes_kkt.jl`                          | `ScholtesKKTSystem`: stationarity and equalities `F_nc`, level inequalities `a` (including prioritized preference slacks, then φ slacks ρ𝟙 − G ⊙ γ), and their duals `b`. Only the explicit formulation (φ = true) is supported. |
 | `scholtes_residual.jl`                     | The relaxed residual `R(w; ρ)` (`s ⊙ γ + u = ρ𝟙`, exact `σ ⊙ φ = 0`), the true residual ‖K₀‖ and the sign box.                                                                                                                                               |
 | `scholtes_linsolve.jl`, `scholtes_step.jl` | The regularized least-squares Newton step `δ = −Jᵀ(η²I + JJᵀ)⁻¹r` (`:normal`, `:klu_eta`, `:klu_sqrt_eta`, `:svd`) and the projected two-metric bound rule.                                                                                                   |
-| `scholtes_solver.jl`                       | `Scholtes`, `ScholtesOptions`, `solve`, `geometric_schedule`, `scholtes_warm_start`.                                                                                                                                                                          |
-| `scholtes_certify.jl`                      | `stat_feas`, `solve_certified`: judge a fixed-ρ solve on the hypotheses of Scholtes' theorem (stationarity/feasibility, complementarity shortfall ≈ ρ, constraint margin).                                                                                    |
-| `scholtes_multistart.jl`                   | `solve_multi`, `random_starts`, `grid_starts`, `is_feasible`.                                                                                                                                                                                                 |
+| `scholtes_solver.jl`                       | `Scholtes`, `ScholtesOptions`, `solve`, `geometric_schedule`.                                                                                                                                                                          |
+| `scholtes_multistart.jl`                   | `solve_multi`, `random_starts`, `grid_starts`.                                                                                                                                                                                                 |
 
 ## Experiments
 
