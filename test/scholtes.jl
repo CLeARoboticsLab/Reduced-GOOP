@@ -65,17 +65,17 @@ function plm_solve(k, x; ρ_schedule = [10.0^(-j) for j in 0:10], kwargs...)
 end
 plm_solve(p::NamedTuple; kwargs...) = plm_solve(scholtes_kkt(p), p.z0; kwargs...)
 
-"F(z; ρ)."
+"K_ρ(z)."
 function residual(k, z, ρ)
-    F = zeros(k.kkt_dimension)
-    k.F!(F, z; θ = θ0, ρ)
-    F
+    K_ρ = zeros(k.kkt_dimension)
+    k.K_ρ!(K_ρ, z; θ = θ0, ρ)
+    K_ρ
 end
 
-"∇F(z; ρ)."
+"∇K_ρ(z)."
 function jacobian(k, z, ρ)
-    J = copy(k.∇F_z!.result_buffer)
-    k.∇F_z!(J, z; θ = θ0, ρ)
+    J = copy(k.∇K_ρ!.result_buffer)
+    k.∇K_ρ!(J, z; θ = θ0, ρ)
     J
 end
 
@@ -93,11 +93,11 @@ multipliers(k, z) = z[[pair.multiplier for pair in k.complementarity_pairs]]
 relaxed_pairs(k) = findall(pair -> pair.u_relaxation != 0, k.complementarity_pairs)
 exact_pairs(k) = findall(pair -> pair.u_relaxation == 0, k.complementarity_pairs)
 
-"The row of F that puts each pair's slack on its target: G − σ = 0, or ρ𝟙 − Gₘ ⊙ γₘ − σ̂ = 0."
-slack_rows(k) = [only(findall(isequal(e - k.z_symbolic[pair.slack]), k.F_symbolic))
+"The row of K_ρ that puts each pair's slack on its target: G − σ = 0, or ρ𝟙 − Gₘ ⊙ γₘ − σ̂ = 0."
+slack_rows(k) = [only(findall(isequal(e - k.z_symbolic[pair.slack]), k.K_ρ_symbolic))
                  for (e, pair) in zip(k.slack_expressions, k.complementarity_pairs)]
 
-"The Jacobian of the slack targets at z: the slack rows of ∇F, less their −1 in the slack's own column."
+"The Jacobian of the slack targets at z: the slack rows of ∇K_ρ, less their −1 in the slack's own column."
 function target_jacobian(k, z, ρ)
     Ja = Matrix(jacobian(k, z, ρ)[slack_rows(k), :])
     for (j, pair) in enumerate(k.complementarity_pairs)
@@ -106,7 +106,7 @@ function target_jacobian(k, z, ρ)
     Ja
 end
 
-"Whether a row of F holds a slack σ or σ̂: the slack and product rows do, the stationarity rows do not."
+"Whether a row of K_ρ holds a slack σ or σ̂: the slack and product rows do, the stationarity rows do not."
 function slack_row_filter(k)
     slacks = Set(Symbolics.unwrap.(k.z_symbolic[[pair.slack for pair in k.complementarity_pairs]]))
     row -> any(in(slacks), Symbolics.get_variables(row))
@@ -235,7 +235,7 @@ end
             values = residual(k, y, 0.1)
             a, b = targets(k, y, 0.1), multipliers(k, y)
             Ja = target_jacobian(k, y, 0.1)
-            # F lists a level's stationarity rows, then two rows per pair of that level (its slack row and its
+            # K_ρ lists a level's stationarity rows, then two rows per pair of that level (its slack row and its
             # product), then the levels below: level ℓ's stationarity follows the rows of the levels above it.
             level_rows(level) = dimensions[level] + 2count(l -> l.level == level, labels)
             stationarity_row(level, component) = sum(level_rows, 1:(level - 1); init = 0) + 1 + component
@@ -355,7 +355,7 @@ end
                         (pair.label.inequality == 1 ? 2(x + 0.75) : 0.0)
                 end
             end
-            # The slacks on their targets at ρ = 0 (σ = G, σ̂ = −Gₘ ⊙ γₘ), ϕ = 0 and u = 0: a root of F(·; 0).
+            # The slacks on their targets at ρ = 0 (σ = G, σ̂ = −Gₘ ⊙ γₘ), ϕ = 0 and u = 0: a root of K_ρ at ρ = 0.
             a = targets(k, z, 0.0)
             @test all(>=(0), a) && all(>=(0), multipliers(k, z))
             z[[pair.slack for pair in pairs]] .= a
@@ -407,12 +407,12 @@ end
         @test kq.complementarity_pairs == ke.complementarity_pairs
         @test isequal(kq.slack_expressions, ke.slack_expressions)
         @test kq.kkt_dimension == ke.kkt_dimension - dropped
-        @test !any(iszero, kq.F_symbolic)
+        @test !any(iszero, kq.K_ρ_symbolic)
         # Every dropped row is a stationarity row: the slack and product rows are the full system's, in order.
         has_slack = slack_row_filter(ke)
-        @test isequal(filter(has_slack, kq.F_symbolic), filter(has_slack, ke.F_symbolic))
-        @test count(has_slack, kq.F_symbolic) == 2length(kq.complementarity_pairs)
-        @test nnz(kq.∇F_z!.result_buffer) <= nnz(ke.∇F_z!.result_buffer)
+        @test isequal(filter(has_slack, kq.K_ρ_symbolic), filter(has_slack, ke.K_ρ_symbolic))
+        @test count(has_slack, kq.K_ρ_symbolic) == 2length(kq.complementarity_pairs)
+        @test nnz(kq.∇K_ρ!.result_buffer) <= nnz(ke.∇K_ρ!.result_buffer)
     end
     @test_throws ArgumentError scholtes_kkt(prob_E; quasi = true, quasi_order = 0)
 end
@@ -429,7 +429,7 @@ end
                         maximum(abs, targets(kq, z, 0.3) .- targets(ke, z, 0.3); init = 0.0))
         end
         @test worst == 0.0
-        @test findnz(kq.∇F_z!.result_buffer)[1:2] == findnz(ke.∇F_z!.result_buffer)[1:2]
+        @test findnz(kq.∇K_ρ!.result_buffer)[1:2] == findnz(ke.∇K_ρ!.result_buffer)[1:2]
     end
     for prob in (prob_E, prob_F)
         re = plm_solve(scholtes_kkt(prob; quasi = false), prob.z0)
@@ -444,7 +444,7 @@ end
     Random.seed!(6)
     z = randn(ke.variable_dimension)
     @test !isapprox(residual(kq, z, 0.3), residual(ke, z, 0.3); atol = 1e-8)
-    @test nnz(kq.∇F_z!.result_buffer) < nnz(ke.∇F_z!.result_buffer)
+    @test nnz(kq.∇K_ρ!.result_buffer) < nnz(ke.∇K_ρ!.result_buffer)
     re, rq = plm_solve(ke, prob_G.z0), plm_solve(kq, prob_G.z0)
     @test re.status === :solved && rq.status === :solved
     @test minimum(rq.z[kq.nonnegative_dims]) > 0
@@ -457,7 +457,7 @@ end
     psi_cols = findall(v -> startswith(string(v), "ψ_"), k1.z_symbolic)
     @test !isempty(psi_cols)
     # ψ multiplies the policy gradient π, whose derivative is second-order: no row depends on ψ.
-    @test all(j -> isempty(nzrange(k1.∇F_z!.result_buffer, j)), psi_cols)
+    @test all(j -> isempty(nzrange(k1.∇K_ρ!.result_buffer, j)), psi_cols)
     Random.seed!(8)
     ke, kq = scholtes_kkt(prob_G; quasi = false), scholtes_kkt(prob_G; quasi = true, quasi_order = 10)
     z = randn(ke.variable_dimension)
@@ -469,7 +469,7 @@ end
         kq = RG.generate_slacked_scholtes_quasi_kkt_system(prob_G.goop; quasi_order)
         ke = scholtes_kkt(prob_G; quasi = true, quasi_order)
         @test string.(kq.z_symbolic) == string.(ke.z_symbolic)
-        @test isequal(kq.F_symbolic, ke.F_symbolic)
+        @test isequal(kq.K_ρ_symbolic, ke.K_ρ_symbolic)
     end
 end
 
@@ -520,15 +520,15 @@ end
     @test_throws ArgumentError RG.solve(RG.ProjectedLM(), k, θ0; z₀ = z)
 end
 
-@testset "the projected steps stay in the sign box and lower ‖F‖" begin
+@testset "the projected steps stay in the sign box and lower ‖K_ρ‖" begin
     # Every iterate is positive on nonnegative_dims (σ, γ, ϕ, σ̂, u), and every accepted step lowers
-    # ‖F(z; ρ)‖ strictly within a stage.
+    # ‖K_ρ(z)‖ strictly within a stage.
     for prob in (prob_A, prob_B, prob_single)
         k = scholtes_kkt(prob)
         r = plm_solve(k, prob.z0; record_convergence = true)
         @test r.status === :solved
         @test minimum(r.z[k.nonnegative_dims]) > 0
-        history, ρs = r.relaxed_residual_history, r.ρ_history
+        history, ρs = r.norm_K_ρ_history, r.ρ_history
         @test all(history[i + 1] < history[i] for i in 1:(length(history) - 1) if ρs[i + 1] == ρs[i])
     end
     @test_throws ArgumentError plm_solve(prob_A; τ = 1.5)
@@ -630,7 +630,7 @@ end
     v = sin.(1.0:(k.variable_dimension))
     h = 1e-6
     @test norm((residual(k, w + h * v, rho) - residual(k, w - h * v, rho)) / (2h) - jacobian(k, w, rho) * v) < 1e-8
-    # K₀ is F at ρ = 0 with u = 0.
+    # K₀ is K_ρ at ρ = 0 with u = 0.
     K = zeros(k.kkt_dimension)
     k.K₀!(K, w; θ = θ0)
     wzero = copy(w)
@@ -701,7 +701,7 @@ end
             @test σ̂ == (warm ? max(target, min(s_floor, 0.1ρ)) : target)
             @test ϕ == (warm ? 0.1ρ / max(σ̂, ρ) : 0.1 * ρ / σ̂)
         end
-        # The cold start puts every slack on its target: the slack rows of F hold.
+        # The cold start puts every slack on its target: the slack rows of K_ρ hold.
         warm || @test maximum(abs, residual(k, z, ρ)[slack_rows(k)]) <= 1e-14
     end
     # The multipliers kept from a previous stage, and a seed for the preference slacks.
@@ -883,9 +883,9 @@ end
 		ρ = 0.1
 
 		F = zeros(m)
-		kkt.F!(F, z; θ, ρ)
-		J = kkt.∇F_z!.result_buffer
-		kkt.∇F_z!(J, z; θ, ρ)
+		kkt.K_ρ!(F, z; θ, ρ)
+		J = kkt.∇K_ρ!.result_buffer
+		kkt.∇K_ρ!(J, z; θ, ρ)
 
 		# High-η cases lock in the √η-balanced augmented scaling: the naive
 		# [I J; Jᵀ -ηI] form loses the tiny ~1/η step to cancellation there.

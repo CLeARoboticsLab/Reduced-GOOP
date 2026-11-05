@@ -48,7 +48,7 @@ set as g(x) >= 0 because exp(r) - 1 = 0 iff r = 0, and exp(r) - 1 > 0 iff r > 0.
 """
 PDIP options of the known-solution tests: the regularized `:klu` step (Levenberg–Marquardt with the
 default η = 1e-6) at a single relaxation ρ = 1e-9, from the known primals. On the multi-level benchmarks J is
-rank-deficient near the solution, where the exact step −J⁺F (`:svd`) stalls, and a ladder from ρ = 1 ends
+rank-deficient near the solution, where the exact step −J⁺K_ρ (`:svd`) stalls, and a ladder from ρ = 1 ends
 farther from x*.
 """
 default_pdip_options(; record_convergence = false) =

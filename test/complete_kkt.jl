@@ -9,7 +9,7 @@ const BUILDERS = (exact, perturbed)
 
 function evaluate(kkt, y, rho; theta = zeros(kkt.parameter_dimension))
     r = zeros(kkt.kkt_dimension)
-    kkt.F!(r, y; θ = theta, ρ = rho)
+    kkt.K_ρ!(r, y; θ = theta, ρ = rho)
     r
 end
 
@@ -21,8 +21,8 @@ function slack_values(kkt, y; theta = zeros(kkt.parameter_dimension))
 end
 
 function jacobian(kkt, y, rho)
-    J = copy(kkt.∇F_z!.result_buffer)
-    kkt.∇F_z!(J, y; θ = zeros(kkt.parameter_dimension), ρ = rho)
+    J = copy(kkt.∇K_ρ!.result_buffer)
+    kkt.∇K_ρ!(J, y; θ = zeros(kkt.parameter_dimension), ρ = rho)
     J
 end
 
@@ -73,7 +73,7 @@ end
     G1 = [g;outer.gamma;inner.gamma]
     reference = [F1;g-k.z_symbolic[k.interior_point_slack_dims]]
     @test length(reference) == k.kkt_dimension == k.variable_dimension
-    @test all(iszero, Symbolics.simplify.(reference-k.F_symbolic))
+    @test all(iszero, Symbolics.simplify.(reference-k.K_ρ_symbolic))
     @test iszero(Symbolics.simplify(L1-outer.L))
     @test all(iszero, Symbolics.simplify.(G1-k.G_symbolic))
     @test length(inner.complementary_slackness) == 2
@@ -103,7 +103,7 @@ end
     reference = [Symbolics.gradient(L1,z2);G2 .* top.gamma;F2;
         g-k3.z_symbolic[k3.interior_point_slack_dims]]
     @test k3.variable_dimension == k3.kkt_dimension == length(reference)
-    @test all(iszero,Symbolics.simplify.(reference-k3.F_symbolic))
+    @test all(iszero,Symbolics.simplify.(reference-k3.K_ρ_symbolic))
     y = 0.5 .+ 0.1sin.(1:k3.variable_dimension)
     d = cos.(1:k3.variable_dimension);d ./= norm(d)
     @test jacobian(k3,y,1.0)*d ≈ (evaluate(k3,y+1e-6d,1.0)-evaluate(k3,y-1e-6d,1.0))/2e-6 atol=1e-7
@@ -193,8 +193,8 @@ end
         σ, s = k.z_symbolic[k.interior_point_slack_dims], k.z_symbolic[k.preference_slack_dims]
         @test k.nonnegative_dims == [k.interior_point_slack_dims; k.inequality_constraint_dual_dims]
         @test !isempty(s) && isempty(intersect(k.nonnegative_dims, k.preference_slack_dims))
-        # s ≥ 0 has its slack rows: every preference slack minus a slack σ is a row of F.
-        @test all(v -> any(w -> any(isequal(v - w), k.F_symbolic), σ), s)
+        # s ≥ 0 has its slack rows: every preference slack minus a slack σ is a row of K_ρ.
+        @test all(v -> any(w -> any(isequal(v - w), k.K_ρ_symbolic), σ), s)
     end
     @test isempty(reduced.slack_expressions)
     @test (reduced.kind, reduced.complementarity) == (:reduced, :interior_point)
@@ -202,8 +202,8 @@ end
     for k in complete_systems
         σ = k.z_symbolic[k.interior_point_slack_dims]
         @test length(k.slack_expressions) == length(σ)
-        # Every slack row expression − σ is a row of F.
-        @test all(((e, v),) -> any(isequal(e - v), k.F_symbolic), zip(k.slack_expressions, σ))
+        # Every slack row expression − σ is a row of K_ρ.
+        @test all(((e, v),) -> any(isequal(e - v), k.K_ρ_symbolic), zip(k.slack_expressions, σ))
         y = 0.5 .+ 0.1 .* sin.(1:k.variable_dimension)
         G = zeros(length(σ))
         k.slack_targets!(G, y; θ = Float64[], ρ = 0.0)
@@ -219,7 +219,7 @@ end
         [pair.u_relaxation for pair in pairs if pair.u_relaxation != 0]])
     @test isempty(intersect(scholtes.nonnegative_dims, scholtes.preference_slack_dims))
     σ, s = scholtes.z_symbolic[scholtes.interior_point_slack_dims], scholtes.z_symbolic[scholtes.preference_slack_dims]
-    @test all(v -> any(w -> any(isequal(v - w), scholtes.F_symbolic), σ), s)
+    @test all(v -> any(w -> any(isequal(v - w), scholtes.K_ρ_symbolic), σ), s)
 end
 
 @testset "ProjectedLM solves the exact complete system" begin
@@ -264,8 +264,8 @@ end
 
 	@test complete.status === :solved
 	@test reduced.output.status === :solved
-	@test complete.residual <= 1e-8
-	@test reduced.output.residual <= 1e-8
+	@test complete.norm_K₀ <= 1e-8
+	@test reduced.output.norm_K₀ <= 1e-8
 	@test isapprox(complete.x, case.expected; atol = IP_ATOL, rtol = 0.0)
 	@test isapprox(reduced.primals, case.expected; atol = IP_ATOL, rtol = 0.0)
 	@test isapprox(reduced.primals, complete.x; atol = IP_ATOL, rtol = 0.0)

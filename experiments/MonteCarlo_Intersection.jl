@@ -424,7 +424,7 @@ function build_systems(variant, builders, dynamics, settings)
         # The exact system is square; the fixed-primal Jacobian keeps every row but drops the
         # physical columns.
         builder.name === :exact && @assert complete_kkt.variable_dimension == complete_kkt.kkt_dimension
-        @assert size(fixed.system.∇F_z!.result_buffer) ==
+        @assert size(fixed.system.∇K_ρ!.result_buffer) ==
                 (complete_kkt.kkt_dimension, complete_kkt.variable_dimension-length(complete_kkt.primal_dims))
         (;
             builder.name,
@@ -927,10 +927,10 @@ a next step would start from): `newton_steps` + 1 rows.
 """
 function solver_history(output)
     history = NamedTuple{(:raw, :unrelaxed, :eta),NTuple{3,Float64}}[
-        (; raw=output.relaxed_residual_history[k], unrelaxed=output.residual_history[k], eta=output.η_history[k])
+        (; raw=output.norm_K_ρ_history[k], unrelaxed=output.norm_K₀_history[k], eta=output.η_history[k])
         for k in 1:output.newton_steps
     ]
-    push!(history, (; raw=output.relaxed_residual, unrelaxed=output.residual, eta=output.η))
+    push!(history, (; raw=output.norm_K_ρ, unrelaxed=output.norm_K₀, eta=output.η))
 end
 
 """
@@ -945,8 +945,8 @@ function study_output(output, kkt)
         z=output.x,
         w=output.z,
         output.newton_steps,
-        output.residual,
-        output.relaxed_residual,
+        output.norm_K₀,
+        output.norm_K_ρ,
         eta=output.η,
         preference_slacks=output.z[kkt.preference_slack_dims],
         sign_min=minimum(output.z[kkt.nonnegative_dims]; init=Inf),
@@ -1036,15 +1036,15 @@ function solve_reduced(reduced_kkt, problem, θ, initial_guess, settings; contex
             stages,
             stage_record(; ρ, parameter=:rho_reduced, timed=merge(timed, (; value=output)), history, initial=copy(w₀), final=copy(output.w)),
         )
-        reduced_kkt.F!(r, output.w; θ, ρ)
+        reduced_kkt.K_ρ!(r, output.w; θ, ρ)
         reduced_kkt.K₀!(k₀_rows, output.w; θ)
         print_kkt_stage(;
             ρ,
             status=output.status,
             newton_steps=output.newton_steps,
             seconds=last(stages).seconds,
-            relaxed_rms=output.relaxed_residual/residual_scale,
-            unrelaxed_rms=output.residual/residual_scale,
+            relaxed_rms=output.norm_K_ρ/residual_scale,
+            unrelaxed_rms=output.norm_K₀/residual_scale,
             unrelaxed_min=minimum(k₀_rows),
             unrelaxed_max=maximum(k₀_rows),
             physical=output.z,
@@ -1056,7 +1056,7 @@ function solve_reduced(reduced_kkt, problem, θ, initial_guess, settings; contex
         previous_w = output.w
         stage_preference_slacks = output.preference_slacks
         # Track the stage with the lowest ‖K₀‖ (a non-finite residual counts as Inf).
-        k₀ = isfinite(output.residual) ? output.residual : Inf
+        k₀ = isfinite(output.norm_K₀) ? output.norm_K₀ : Inf
         if isnothing(best) || k₀ < best.k₀
             best = (; output, ρ, k₀, index=length(stages))
         end
@@ -1064,7 +1064,7 @@ function solve_reduced(reduced_kkt, problem, θ, initial_guess, settings; contex
     # Judge and keep the best stage, not the last: each stage restarts γ/φ, s and u, so a later
     # stage can end worse than an earlier, converged one.
     (; output, ρ) = best
-    reduced_kkt.F!(r, output.w; θ, ρ)
+    reduced_kkt.K_ρ!(r, output.w; θ, ρ)
     reduced_kkt.K₀!(k₀_rows, output.w; θ)
     validation = validate_solution(
         problem,
@@ -1116,7 +1116,7 @@ function fixed_primal_formulation(kkt)
     # index sets shift down by nx.
     free == collect((nx+1):kkt.variable_dimension) || error("expected the physical columns to come first in y")
     full = zeros(kkt.variable_dimension)
-    full_J = copy(kkt.∇F_z!.result_buffer)
+    full_J = copy(kkt.∇K_ρ!.result_buffer)
     # `slots` has full_J's sparsity pattern with values 1:nnz. Its free columns list, in CSC
     # order, which entries of nonzeros(full_J) form J = full_J[:, free], so J! can refresh J's
     # values in place without building a new sparse matrix.
@@ -1131,9 +1131,9 @@ function fixed_primal_formulation(kkt)
         θ_buffer .= view(θx, 1:nθ)
         full
     end
-    F! = (out, v; θ, ρ) -> kkt.F!(out, fill_full!(v, θ); θ=θ_buffer, ρ)
+    F! = (out, v; θ, ρ) -> kkt.K_ρ!(out, fill_full!(v, θ); θ=θ_buffer, ρ)
     J! = function (J_out, v; θ, ρ)
-        kkt.∇F_z!(full_J, fill_full!(v, θ); θ=θ_buffer, ρ)
+        kkt.∇K_ρ!(full_J, fill_full!(v, θ); θ=θ_buffer, ρ)
         nonzeros(J_out) .= view(nonzeros(full_J), selected_slots)
         J_out
     end
@@ -1157,7 +1157,7 @@ function fixed_primal_formulation(kkt)
         shift(kkt.all_equality_stationarity_dual_dims),
         shift(kkt.innermost_stationarity_dual_dims),
         shift(kkt.nonnegative_dims),
-        kkt.F_symbolic,
+        kkt.K_ρ_symbolic,
         kkt.z_symbolic[free],
         kkt.slack_expressions,
         kkt.G_symbolic,
@@ -1282,8 +1282,8 @@ function solve_complete(
             )
             # Residuals of the full complete iterate, for the table and the best-stage choice.
             r, r0 = zeros(complete_kkt.kkt_dimension), zeros(complete_kkt.kkt_dimension)
-            complete_kkt.F!(r, y; θ, ρ)
-            complete_kkt.F!(r0, y; θ, ρ=0.0)
+            complete_kkt.K_ρ!(r, y; θ, ρ)
+            complete_kkt.K_ρ!(r0, y; θ, ρ=0.0)
             print_kkt_stage(;
                 ρ,
                 status=output.status,
@@ -1308,8 +1308,8 @@ function solve_complete(
         # retains stationarity, equality, complementarity, and slack equations.
         y = best.y
         r, r0 = zeros(complete_kkt.kkt_dimension), zeros(complete_kkt.kkt_dimension)
-        complete_kkt.F!(r, y; θ, ρ=best.ρ)
-        complete_kkt.F!(r0, y; θ, ρ=0.0)
+        complete_kkt.K_ρ!(r, y; θ, ρ=best.ρ)
+        complete_kkt.K_ρ!(r0, y; θ, ρ=0.0)
         validation = validate_solution(
             problem,
             θ,

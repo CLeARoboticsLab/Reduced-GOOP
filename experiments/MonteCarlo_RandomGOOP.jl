@@ -774,9 +774,9 @@ A stage's trace from PDIP's histories (one entry per stopping test): one row, �
 """
 function stage_history(output)
     history = [
-        (; raw=output.relaxed_residual_history[k], unrelaxed=output.residual_history[k], eta=NaN) for k in 1:output.newton_steps
+        (; raw=output.norm_K_ρ_history[k], unrelaxed=output.norm_K₀_history[k], eta=NaN) for k in 1:output.newton_steps
     ]
-    push!(history, (; raw=output.relaxed_residual, unrelaxed=output.residual, eta=NaN))
+    push!(history, (; raw=output.norm_K_ρ, unrelaxed=output.norm_K₀, eta=NaN))
 end
 
 """
@@ -802,7 +802,7 @@ function solve_algorithm51(formulation, problem, θ, initial_guess, settings; co
         output = timed.value
         y .= output.z
         push!(stages, MCI.stage_record(; ρ, parameter=:rho, timed, history=stage_history(output), initial=stage_initial, final=copy(y)))
-        kkt.F!(r, y; θ, ρ)
+        kkt.K_ρ!(r, y; θ, ρ)
         kkt.K₀!(r0, y; θ)
         print_kkt_stage(;
             ρ,
@@ -828,7 +828,7 @@ function solve_algorithm51(formulation, problem, θ, initial_guess, settings; co
     # Judge the best stage, not the last. The full residual retains stationarity, equality,
     # complementarity and slack equations.
     y = best.y
-    kkt.F!(r, y; θ, ρ=best.ρ)
+    kkt.K_ρ!(r, y; θ, ρ=best.ρ)
     kkt.K₀!(r0, y; θ)
     validation = MCI.validate_solution(
         problem,

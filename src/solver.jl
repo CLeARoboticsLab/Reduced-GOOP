@@ -26,16 +26,16 @@ Options for `solve(PDIP(), …)`.
     interior-point solver, is multiplied by `1 - exp(-tightening_rate)` after a solved level and by
     `1 + exp(-loosening_rate)` after an unsolved one (capped at 1), for at most `max_outer_iters` levels.
   - `max_inner_iters`: Newton steps per level (Algorithm 5.1's t_max).
-  - `tol`: bar on ‖K₀‖ = ‖F(z; ρ = 0)‖, checked before every Newton step; below it the solve stops.
-    `tol_inner`: bar on ‖F(z; ρ)‖; below it the level is solved.
-  - `linesearch`: `:backtracking` (Algorithm 5.1: α ← β α while ‖F(z + α δz; ρ)‖ ≥ ‖F(z; ρ)‖ or a
-    coordinate in `nonnegative_dims` would not stay positive, so that an accepted step decreases ‖F‖
+  - `tol`: bar on ‖K₀(z)‖ (K₀ = K_ρ at ρ = 0), checked before every Newton step; below it the solve stops.
+    `tol_inner`: bar on ‖K_ρ(z)‖; below it the level is solved.
+  - `linesearch`: `:backtracking` (Algorithm 5.1: α ← β α while ‖K_ρ(z + α δz)‖ ≥ ‖K_ρ(z)‖ or a
+    coordinate in `nonnegative_dims` would not stay positive, so that an accepted step decreases ‖K_ρ‖
     strictly; the step fails below `min_step`) or `:fraction_to_boundary` (the old
     solver's τ-rule: γ moves by α_γ, every other variable by α_σ, with no decrease test).
   - `linear_solver`: `:svd` (default), `:sparseQR_J`, `:sparseQR_Jᵀ`, `:klu` or `:ldl`; see
     `_newton_step!`.
   - `η > 0`: the Levenberg–Marquardt parameter of `:klu` and `:ldl`, whose step is
-    −Jᵀ(JJᵀ + η²I)⁻¹F (→ −J⁺F as η → 0); the default 1e-6 regularizes JJᵀ by 1e-12 I. `:svd` and
+    −Jᵀ(JJᵀ + η²I)⁻¹K_ρ (→ −J⁺K_ρ as η → 0); the default 1e-6 regularizes JJᵀ by 1e-12 I. `:svd` and
     the sparse QR steps do not use it.
   - `record_convergence`: also return the per-iteration histories.
 """
@@ -60,8 +60,8 @@ end
 """
     solve(PDIP(), kkt::GOOPKKTSystem, θ; z₀ = nothing, options = PDIPOptions())
 
-Algorithm 5.1 of manuscript/main.pdf: Newton's method on F(z; ρ) = 0 for each relaxation ρ, with the
-step J δz = −F (J = ∇F) and a line search that keeps `kkt.nonnegative_dims` positive: the slacks σ
+Algorithm 5.1 of manuscript/main.pdf: Newton's method on K_ρ(z) = 0 for each relaxation ρ, with the
+step J δz = −K_ρ (J = ∇K_ρ) and a line search that keeps `kkt.nonnegative_dims` positive: the slacks σ
 and the inequality duals γ, of the reduced or the complete system. The preference slacks s are not
 bounded directly: s ≥ 0 is a row of G (s − σ = 0).
 
@@ -69,13 +69,13 @@ bounded directly: s ≥ 0 is a row of G (s − σ = 0).
 a primal one (length of `kkt.primal_dims`; then s, σ and γ start at 1 and every other variable at 0), or
 `nothing` (the same start with x = 0).
 
-Returns `(; status, termination_reason, z, x, ρ, residual, relaxed_residual, newton_steps,
-svd_fallbacks)`, and with `record_convergence` also `ρ_history`, `relaxed_residual_history`,
-`residual_history` (one entry per stopping test: the iterate before each Newton step and, unless the
+Returns `(; status, termination_reason, z, x, ρ, norm_K₀, norm_K_ρ, newton_steps,
+svd_fallbacks)`, and with `record_convergence` also `ρ_history`, `norm_K_ρ_history`,
+`norm_K₀_history` (one entry per stopping test: the iterate before each Newton step and, unless the
 level ended at `max_inner_iters`, the one it stopped at) and `step_size_history` (one per Newton step).
 `newton_steps` counts the Newton steps taken over every level; a step the line search rejects is not one.
-`residual` is ‖K₀‖ = ‖F(z; ρ = 0)‖ at the returned `z`, `status` is `:solved` iff it is below `tol`, and
-`relaxed_residual` is ‖F(z; ρ)‖ at the last level.
+`norm_K₀` is ‖K₀(z)‖ (K₀ = K_ρ at ρ = 0) at the returned `z`, `status` is `:solved` iff it is
+below `tol`, and `norm_K_ρ` is ‖K_ρ(z)‖ at the last level.
 """
 function solve(
     ::PDIP,
@@ -127,10 +127,10 @@ function solve(
         throw(ArgumentError("z₀ must be positive on nonnegative_dims (σ and γ)."))
 
     # Set up common memory.
-    J = kkt.∇F_z!.result_buffer
-    F = zeros(kkt.kkt_dimension) # F(z; ρ)
-    F_trial = zeros(kkt.kkt_dimension) # F(z + α δz; ρ)
-    F₀ = zeros(kkt.kkt_dimension) # K₀(z): F(z; 0) (for the Scholtes system with u = 0), for ‖K₀‖
+    J = kkt.∇K_ρ!.result_buffer
+    K_ρ = zeros(kkt.kkt_dimension) # K_ρ(z)
+    K_ρ_trial = zeros(kkt.kkt_dimension) # K_ρ(z + α δz)
+    K₀ = zeros(kkt.kkt_dimension) # K₀(z): K_ρ(z) at ρ = 0 (for the Scholtes system with u = 0), for ‖K₀‖
     δz = zeros(kkt.variable_dimension)
     z_trial = similar(z)
     nonnegative_trial = @view z_trial[kkt.nonnegative_dims] # @view to avoid copy of selected entries
@@ -138,57 +138,57 @@ function solve(
     δγ = @view δz[kkt.inequality_constraint_dual_dims]
     not_γ = setdiff(1:(kkt.variable_dimension), kkt.inequality_constraint_dual_dims)
 
-    ρ_history, relaxed_residual_history, residual_history, step_size_history =
+    ρ_history, norm_K_ρ_history, norm_K₀_history, step_size_history =
         Float64[], Float64[], Float64[], Float64[]
     newton_steps, svd_fallbacks = 0, 0
-    residual = Inf
+    norm_K₀ = Inf
     termination_reason = :max_inner_iters
     converged = false
     ρ = first(ρ_schedule)
     level = 1
     while true
-        kkt.F!(F, z; θ, ρ)
-        relaxed_residual = norm(F)
+        kkt.K_ρ!(K_ρ, z; θ, ρ)
+        norm_K_ρ = norm(K_ρ)
         level_solved = false
         termination_reason = :max_inner_iters
         for _ in 1:max_inner_iters
-            # Stopping tests: ‖K₀‖ < tol ends the solve, ‖F(z; ρ)‖ < tol_inner ends this level.
-            kkt.K₀!(F₀, z; θ)
-            residual = norm(F₀)
+            # Stopping tests: ‖K₀‖ < tol ends the solve, ‖K_ρ(z)‖ < tol_inner ends this level.
+            kkt.K₀!(K₀, z; θ)
+            norm_K₀ = norm(K₀)
             if record_convergence
                 push!(ρ_history, ρ)
-                push!(relaxed_residual_history, relaxed_residual)
-                push!(residual_history, residual)
+                push!(norm_K_ρ_history, norm_K_ρ)
+                push!(norm_K₀_history, norm_K₀)
             end
-            if !isfinite(relaxed_residual)
+            if !isfinite(norm_K_ρ)
                 termination_reason = :nonfinite_residual
                 break
             end
-            if residual < tol
+            if norm_K₀ < tol
                 converged = true
                 break
             end
-            if relaxed_residual < tol_inner
+            if norm_K_ρ < tol_inner
                 level_solved = true
                 termination_reason = :inner_tolerance_reached
                 break
             end
 
-            # Newton step: J δz = −F.
-            kkt.∇F_z!(J, z; θ, ρ)
-            svd_fallbacks += _newton_step!(δz, J, F, linear_solver, η).fallback
+            # Newton step: J δz = −K_ρ.
+            kkt.∇K_ρ!(J, z; θ, ρ)
+            svd_fallbacks += _newton_step!(δz, J, K_ρ, linear_solver, η).fallback
 
             if linesearch === :backtracking
-                # Algorithm 5.1: α ← β α while ‖F(z + α δz; ρ)‖ ≥ ‖F(z; ρ)‖ or a coordinate in
+                # Algorithm 5.1: α ← β α while ‖K_ρ(z + α δz)‖ ≥ ‖K_ρ(z)‖ or a coordinate in
                 # nonnegative_dims would not stay positive. The decrease is strict: a step that
-                # leaves ‖F‖ unchanged (at tiny α, z + α δz rounds to z) makes no progress.
+                # leaves ‖K_ρ‖ unchanged (at tiny α, z + α δz rounds to z) makes no progress.
                 α = 1.0
                 accepted = false
                 while α >= min_step
                     @. z_trial = z + α * δz
                     if all(>(0), nonnegative_trial) # keep σ and γ positive. 
-                        kkt.F!(F_trial, z_trial; θ, ρ)
-                        if norm(F_trial) < relaxed_residual
+                        kkt.K_ρ!(K_ρ_trial, z_trial; θ, ρ)
+                        if norm(K_ρ_trial) < norm_K_ρ
                             accepted = true
                             break
                         end
@@ -200,7 +200,7 @@ function solve(
                     break
                 end
                 z .= z_trial
-                F .= F_trial
+                K_ρ .= K_ρ_trial
             else
                 # Fraction to the boundary: γ moves by α_γ, every other variable by α_σ.
                 α_σ = _fraction_to_the_boundary(σ, δσ; τ, decay = β, tol = min_step)
@@ -211,15 +211,15 @@ function solve(
                 end
                 @views z[not_γ] .+= α_σ .* δz[not_γ]
                 γ .+= α_γ .* δγ
-                kkt.F!(F, z; θ, ρ)
+                kkt.K_ρ!(K_ρ, z; θ, ρ)
                 α = min(α_σ, α_γ)
             end
-            relaxed_residual = norm(F)
+            norm_K_ρ = norm(K_ρ)
             newton_steps += 1
             record_convergence && push!(step_size_history, α)
         end
         verbose && println(
-            "ρ = $ρ: $termination_reason, ‖F(z; ρ)‖ = $relaxed_residual, ‖K₀‖ = $residual",
+            "ρ = $ρ: $termination_reason, ‖K_ρ(z)‖ = $norm_K_ρ, ‖K₀‖ = $norm_K₀",
         )
         converged && break
 
@@ -237,9 +237,9 @@ function solve(
     end
 
     # Evaluate the stopping criterion at the returned iterate.
-    kkt.K₀!(F₀, z; θ)
-    residual = norm(F₀)
-    converged = residual < tol
+    kkt.K₀!(K₀, z; θ)
+    norm_K₀ = norm(K₀)
+    converged = norm_K₀ < tol
     converged && (termination_reason = :tolerance_reached)
     result = (;
         status = converged ? :solved : :failed,
@@ -247,13 +247,13 @@ function solve(
         z,
         x = z[kkt.primal_dims],
         ρ,
-        residual,
-        relaxed_residual = norm(F),
+        norm_K₀,
+        norm_K_ρ = norm(K_ρ),
         newton_steps,
         svd_fallbacks,
     )
     record_convergence || return result
-    (; result..., ρ_history, relaxed_residual_history, residual_history, step_size_history)
+    (; result..., ρ_history, norm_K_ρ_history, norm_K₀_history, step_size_history)
 end
 
 """Helper function to compute the step size `α` which solves:
@@ -295,19 +295,19 @@ Options for `solve(ProjectedLM(), …)`. The fields it shares with `PDIPOptions`
 
   - `ρ_schedule`: the relaxation of each stage; the levels are solved in turn.
   - `max_inner_iters`: Newton steps per stage.
-  - `tol`: bar on ‖K₀‖ = ‖F(z; ρ = 0)‖, checked before every Newton step; below it the solve stops.
-    `tol_inner`: bar on ‖F(z; ρ)‖; below it the level is solved.
+  - `tol`: bar on ‖K₀(z)‖ (K₀ = K_ρ at ρ = 0), checked before every Newton step; below it the solve stops.
+    `tol_inner`: bar on ‖K_ρ(z)‖; below it the level is solved.
   - `linear_solver`: `:normal` (default), `:klu` or `:ldl`; see `_newton_step!`.
   - `η`: the first Levenberg–Marquardt parameter; the step on the free coordinates is
-    −J_Fᵀ(J_F J_Fᵀ + η²I)⁻¹F. After each line search η is updated from the gain ratio (the actual over
-    the predicted decrease of ½‖F‖²): multiplied by `1 + exp(-η_loosening_rate)` when the ratio is at
+    −J_Fᵀ(J_F J_Fᵀ + η²I)⁻¹K_ρ. After each line search η is updated from the gain ratio (the actual over
+    the predicted decrease of ½‖K_ρ‖²): multiplied by `1 + exp(-η_loosening_rate)` when the ratio is at
     most `gain_low` or the step was shortened (α < 0.99), by `1 - exp(-η_tightening_rate)` when it
     exceeds `gain_high`, and kept within [`η_min`, `η_max`].
   - `τ`, `proj_eps`: the two-metric projection. Each step clips the coordinates in `nonnegative_dims`
     at their floor (1 − τ) z_k; a coordinate within min(`proj_eps`, ‖projected gradient‖) of its floor
     whose gradient pushes it lower is held: it leaves the Levenberg–Marquardt step and takes its own
     scaled gradient step.
-  - `β`, `min_step`, `c`: the line search along the projected arc: α ← β α until ‖F‖ falls by the
+  - `β`, `min_step`, `c`: the line search along the projected arc: α ← β α until ‖K_ρ‖ falls by the
     fraction c α (Armijo), and strictly; the step fails below `min_step`.
   - `record_convergence`: also return the per-iteration histories.
 """
@@ -336,15 +336,16 @@ end
 """
     solve(ProjectedLM(), kkt::GOOPKKTSystem, θ; z₀ = nothing, options = ProjectedLMOptions())
 
-The projected Levenberg–Marquardt method: Newton's method on F(z; ρ) = 0 for each relaxation ρ, 
+The projected Levenberg–Marquardt method: Newton's method on K_ρ(z) = 0 for each relaxation ρ, 
     keeping `kkt.nonnegative_dims` positive. Each Newton step differs from PDIP's in four places:
 
   1. the direction: the coordinates in `nonnegative_dims` at their floor (1 − τ) z_k that the gradient
-     g = JᵀF of ½‖F‖² pushes lower are held; the other coordinates take the Levenberg–Marquardt step
-     −J_Fᵀ(J_F J_Fᵀ + η²I)⁻¹F (J_F: J with the held columns zeroed), each held one the scaled gradient
-     step −g_k / ‖J e_k‖², stopped at its floor (Bertsekas' two-metric projection);
+     g = JᵀK_ρ of ½‖K_ρ‖² pushes lower are held; the other coordinates take the Levenberg–Marquardt
+     step −J_Fᵀ(J_F J_Fᵀ + η²I)⁻¹K_ρ (J_F: J on the free coordinates, the held columns zeroed), each
+     held one the scaled gradient step −g_k / ‖J e_k‖², stopped at its floor (Bertsekas' two-metric
+     projection);
   2. the trial point: z + α δz with every coordinate in `nonnegative_dims` clipped at its floor;
-  3. the acceptance test: ‖F‖ falls by the fraction c α (Armijo), and strictly;
+  3. the acceptance test: ‖K_ρ‖ falls by the fraction c α (Armijo), and strictly;
   4. the η update from the gain ratio, after the line search.
 
 `z₀` and the outputs are as for `PDIP`; the outputs add `η`, the η after the last step (to continue a
@@ -397,59 +398,59 @@ function solve(
         throw(ArgumentError("z₀ must be positive on nonnegative_dims (σ and γ)."))
 
     # Set up common memory.
-    J = kkt.∇F_z!.result_buffer
+    J = kkt.∇K_ρ!.result_buffer
     J_F = copy(J) # J with the held columns zeroed
     normal_equations = _normal_equations(J_F, linear_solver) # J_F J_Fᵀ and its factor, kept across steps (:normal)
-    F = zeros(kkt.kkt_dimension) # F(z; ρ)
-    F_trial = zeros(kkt.kkt_dimension) # F(z_trial; ρ)
-    F₀ = zeros(kkt.kkt_dimension) # K₀(z): F(z; 0) (for the Scholtes system with u = 0), for ‖K₀‖
+    K_ρ = zeros(kkt.kkt_dimension) # K_ρ(z)
+    K_ρ_trial = zeros(kkt.kkt_dimension) # K_ρ(z_trial)
+    K₀ = zeros(kkt.kkt_dimension) # K₀(z): K_ρ(z) at ρ = 0 (for the Scholtes system with u = 0), for ‖K₀‖
     δz = zeros(kkt.variable_dimension)
     z_trial = similar(z)
     nonnegative_trial = @view z_trial[kkt.nonnegative_dims] # @view to avoid copy of selected entries
-    g = zeros(kkt.variable_dimension) # JᵀF, the gradient of ½‖F‖²
+    g = zeros(kkt.variable_dimension) # JᵀK_ρ, the gradient of ½‖K_ρ‖²
     floors = zeros(length(kkt.nonnegative_dims)) # (1 − τ) z_k for k in nonnegative_dims
     held = falses(length(kkt.nonnegative_dims))
     Δz = similar(z) # z_trial − z, for the gain ratio
-    JΔz = zeros(kkt.kkt_dimension) # J Δz, the change of F the linear model predicts
+    JΔz = zeros(kkt.kkt_dimension) # J Δz, the change of K_ρ the linear model predicts
 
     η = clamp(η, η_min, η_max)
-    ρ_history, relaxed_residual_history, residual_history, step_size_history, η_history =
+    ρ_history, norm_K_ρ_history, norm_K₀_history, step_size_history, η_history =
         Float64[], Float64[], Float64[], Float64[], Float64[]
     newton_steps, svd_fallbacks = 0, 0
-    residual = Inf
+    norm_K₀ = Inf
     termination_reason = :max_inner_iters
     converged = false
     ρ = first(ρ_schedule)
     level = 1
     while true
-        kkt.F!(F, z; θ, ρ)
-        relaxed_residual = norm(F)
+        kkt.K_ρ!(K_ρ, z; θ, ρ)
+        norm_K_ρ = norm(K_ρ)
         termination_reason = :max_inner_iters
         for _ in 1:max_inner_iters
-            # Stopping tests: ‖K₀‖ < tol ends the solve, ‖F(z; ρ)‖ < tol_inner ends this level.
-            kkt.K₀!(F₀, z; θ)
-            residual = norm(F₀)
+            # Stopping tests: ‖K₀‖ < tol ends the solve, ‖K_ρ(z)‖ < tol_inner ends this level.
+            kkt.K₀!(K₀, z; θ)
+            norm_K₀ = norm(K₀)
             if record_convergence
                 push!(ρ_history, ρ)
-                push!(relaxed_residual_history, relaxed_residual)
-                push!(residual_history, residual)
+                push!(norm_K_ρ_history, norm_K_ρ)
+                push!(norm_K₀_history, norm_K₀)
             end
-            if !isfinite(relaxed_residual)
+            if !isfinite(norm_K_ρ)
                 termination_reason = :nonfinite_residual
                 break
             end
-            if residual < tol
+            if norm_K₀ < tol
                 converged = true
                 break
             end
-            if relaxed_residual < tol_inner
+            if norm_K_ρ < tol_inner
                 termination_reason = :inner_tolerance_reached
                 break
             end
 
             # Two-metric projection: hold the coordinates at their floor that the gradient pushes lower.
-            kkt.∇F_z!(J, z; θ, ρ)
-            mul!(g, transpose(J), F)
+            kkt.∇K_ρ!(J, z; θ, ρ)
+            mul!(g, transpose(J), K_ρ)
             projected_gradient² = 0.0 # ‖z − max(z − g, floor)‖² over nonnegative_dims
             for (k, i) in enumerate(kkt.nonnegative_dims)
                 floors[k] = (1 - τ) * z[i]
@@ -462,8 +463,8 @@ function solve(
                 held[k] && (view(SparseArrays.nonzeros(J_F), SparseArrays.nzrange(J_F, i)) .*= 0.0) # free
             end
 
-            # Newton step on the free coordinates: J_F δz = −F, regularized by η² (Levenberg–Marquardt).
-            step = _newton_step!(δz, J_F, F, linear_solver, η, normal_equations)
+            # Newton step on the free coordinates: J_F δz = −K_ρ, regularized by η² (Levenberg–Marquardt).
+            step = _newton_step!(δz, J_F, K_ρ, linear_solver, η, normal_equations)
             svd_fallbacks += step.fallback
             # A held coordinate's own step: −g_k / ‖J e_k‖², stopped at its floor.
             for (k, i) in enumerate(kkt.nonnegative_dims)
@@ -479,21 +480,21 @@ function solve(
                 break
             end
 
-            # Line search along the projected arc: α ← β α while ‖F‖ does not fall by c α (Armijo), and
+            # Line search along the projected arc: α ← β α while ‖K_ρ‖ does not fall by c α (Armijo), and
             # strictly: below α ≈ 1e-12, 1 − c α rounds to 1 and the Armijo test alone would accept a step
-            # that leaves ‖F‖ unchanged.
+            # that leaves ‖K_ρ‖ unchanged.
             α = 1.0
             accepted = false
-            trial_residual = Inf
+            norm_K_ρ_trial = Inf
             while α >= min_step
                 @. z_trial = z + α * δz
                 for (k, i) in enumerate(kkt.nonnegative_dims)
                     z_trial[i] < floors[k] && (z_trial[i] = floors[k]) # clip at the floor
                 end
                 if all(>(0), nonnegative_trial) # keep σ and γ positive.
-                    kkt.F!(F_trial, z_trial; θ, ρ)
-                    trial_residual = norm(F_trial)
-                    if trial_residual <= (1 - c * α) * relaxed_residual && trial_residual < relaxed_residual
+                    kkt.K_ρ!(K_ρ_trial, z_trial; θ, ρ)
+                    norm_K_ρ_trial = norm(K_ρ_trial)
+                    if norm_K_ρ_trial <= (1 - c * α) * norm_K_ρ && norm_K_ρ_trial < norm_K_ρ
                         accepted = true
                         break
                     end
@@ -501,12 +502,12 @@ function solve(
                 α *= β
             end
 
-            # η from the gain ratio, the actual over the predicted decrease of ½‖F‖².
+            # η from the gain ratio, the actual over the predicted decrease of ½‖K_ρ‖².
             gain_ratio = -Inf
             if accepted
                 @. Δz = z_trial - z
                 mul!(JΔz, J, Δz)
-                gain_ratio = _gain_ratio(F, JΔz, relaxed_residual, trial_residual)
+                gain_ratio = _gain_ratio(K_ρ, JΔz, norm_K_ρ, norm_K_ρ_trial)
             end
             record_convergence && push!(η_history, step.η)
             η = _scheduled_η(
@@ -525,13 +526,13 @@ function solve(
                 break
             end
             z .= z_trial
-            F .= F_trial
-            relaxed_residual = norm(F)
+            K_ρ .= K_ρ_trial
+            norm_K_ρ = norm(K_ρ)
             newton_steps += 1
             record_convergence && push!(step_size_history, α)
         end
         verbose && println(
-            "ρ = $ρ: $termination_reason, ‖F(z; ρ)‖ = $relaxed_residual, ‖K₀‖ = $residual, η = $η",
+            "ρ = $ρ: $termination_reason, ‖K_ρ(z)‖ = $norm_K_ρ, ‖K₀‖ = $norm_K₀, η = $η",
         )
         converged && break
 
@@ -542,9 +543,9 @@ function solve(
     end
 
     # Evaluate the stopping criterion at the returned iterate.
-    kkt.K₀!(F₀, z; θ)
-    residual = norm(F₀)
-    converged = residual < tol
+    kkt.K₀!(K₀, z; θ)
+    norm_K₀ = norm(K₀)
+    converged = norm_K₀ < tol
     converged && (termination_reason = :tolerance_reached)
     result = (;
         status = converged ? :solved : :failed,
@@ -552,23 +553,23 @@ function solve(
         z,
         x = z[kkt.primal_dims],
         ρ,
-        residual,
-        relaxed_residual = norm(F),
+        norm_K₀,
+        norm_K_ρ = norm(K_ρ),
         newton_steps,
         svd_fallbacks,
         η,
     )
     record_convergence || return result
-    (; result..., ρ_history, relaxed_residual_history, residual_history, step_size_history, η_history)
+    (; result..., ρ_history, norm_K_ρ_history, norm_K₀_history, step_size_history, η_history)
 end
 
 """
-The gain ratio of a step: the actual decrease of ½‖F‖², from `residual` = ‖F‖ to `trial_residual`, over
-the decrease that the linear model F + J Δz predicts (`JΔz` = J Δz); −Inf when none is predicted.
+The gain ratio of a step: the actual decrease of ½‖K_ρ‖², from `norm_K_ρ` = ‖K_ρ‖ to `norm_K_ρ_trial`, over
+the decrease that the linear model K_ρ + J Δz predicts (`JΔz` = J Δz); −Inf when none is predicted.
 """
-function _gain_ratio(F, JΔz, residual, trial_residual)
-    predicted = -dot(F, JΔz) - 0.5 * dot(JΔz, JΔz)
-    actual = (residual - trial_residual) * (0.5residual + 0.5trial_residual)
+function _gain_ratio(K_ρ, JΔz, norm_K_ρ, norm_K_ρ_trial)
+    predicted = -dot(K_ρ, JΔz) - 0.5 * dot(JΔz, JΔz)
+    actual = (norm_K_ρ - norm_K_ρ_trial) * (0.5norm_K_ρ + 0.5norm_K_ρ_trial)
     predicted > 0 && isfinite(predicted) && isfinite(actual) ? actual / predicted : -Inf
 end
 
@@ -592,55 +593,55 @@ end
 # ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 """
-The Newton step δz with J δz = −F, by `linear_solver`, for `PDIP` (Algorithm 5.1) and `ProjectedLM` (on
+The Newton step δz with J δz = −K_ρ, by `linear_solver`, for `PDIP` (Algorithm 5.1) and `ProjectedLM` (on
 the masked Jacobian J_F). The regularized solvers take the Levenberg–Marquardt step with parameter η,
-δz = −Jᵀ(JJᵀ + η²I)⁻¹F, the minimizer of ½‖F + J δz‖² + ½η²‖δz‖² (→ −J⁺F as η → 0): `:klu` and `:ldl`
-solve the balanced augmented system [ηI J; Jᵀ −ηI] [w; δz] = [−F; 0]; `:normal` factorizes JJᵀ + η²I
+δz = −Jᵀ(JJᵀ + η²I)⁻¹K_ρ, the minimizer of ½‖K_ρ + J δz‖² + ½η²‖δz‖² (→ −J⁺K_ρ as η → 0): `:klu` and `:ldl`
+solve the balanced augmented system [ηI J; Jᵀ −ηI] [w; δz] = [−K_ρ; 0]; `:normal` factorizes JJᵀ + η²I
 itself, kept in `normal_equations` from one step to the next. Returns `(; fallback, η)`: `fallback` is 1
 when the step fell back to the `:svd` step (`:sparseQR_Jᵀ` with J without full row rank, or a singular or
 failed factorization), else 0; `η` is the η the step used (`:normal` raises it when its factorization fails).
 """
-#TODO: Same treatment (as :normal) for :klu and :ldl: Fill K in place and reuse symbolic factorization (https://klu.juliasparse.org/dev/)
-function _newton_step!(δz, J, F, linear_solver, η, normal_equations = _normal_equations(J, linear_solver))
+#TODO: Same treatment (as :normal) for :klu and :ldl: Fill the augmented matrix (K) in place and reuse symbolic factorization (https://klu.juliasparse.org/dev/)
+function _newton_step!(δz, J, K_ρ, linear_solver, η, normal_equations = _normal_equations(J, linear_solver))
     m, n = size(J)
     if linear_solver === :svd
-        # :svd: the minimum-norm step −J⁺F by the dense pseudoinverse (Algorithm 5.1).
-        δz .= pinv(Matrix(J)) * (-F)
+        # :svd: the minimum-norm step −J⁺K_ρ by the dense pseudoinverse (Algorithm 5.1).
+        δz .= pinv(Matrix(J)) * (-K_ρ)
     elseif linear_solver === :sparseQR_J
         # :sparseQR_J: a least-squares step by a sparse QR of J (SPQR), not the minimum-norm one. `qr(J)`, not
-        # `J \ (−F)`: for a square J, `\` takes an LU, which fails when J is singular.
-        δz .= qr(J) \ (-F)
+        # `J \ (−K_ρ)`: for a square J, `\` takes an LU, which fails when J is singular.
+        δz .= qr(J) \ (-K_ρ)
     elseif linear_solver === :sparseQR_Jᵀ
-        # :sparseQR_Jᵀ: −J⁺F by a sparse QR of Jᵀ, Jᵀ[prow, pcol] = QR, when J has full row rank.
+        # :sparseQR_Jᵀ: −J⁺K_ρ by a sparse QR of Jᵀ, Jᵀ[prow, pcol] = QR, when J has full row rank.
         QR = qr(SparseArrays.sparse(J'))
         if rank(QR) < m
-            δz .= pinv(Matrix(J)) * (-F) # J without full row rank: the :svd step
+            δz .= pinv(Matrix(J)) * (-K_ρ) # J without full row rank: the :svd step
             return (; fallback = 1, η)
         end
-        c = -(UpperTriangular(QR.R)' \ F[QR.pcol]) # R₁ᵀ c = −Pcᵀ F
+        c = -(UpperTriangular(QR.R)' \ K_ρ[QR.pcol]) # R₁ᵀ c = −Pcᵀ K_ρ
         δz[QR.prow] .= QR.Q * [c; zeros(n - m)] # δz = Prᵀ Q [c; 0]
     elseif linear_solver === :klu
-        # :klu: −Jᵀ(JJᵀ + η²I)⁻¹F by a sparse LU (KLU) of the augmented matrix [ηI J; Jᵀ −ηI].
+        # :klu: −Jᵀ(JJᵀ + η²I)⁻¹K_ρ by a sparse LU (KLU) of the augmented matrix [ηI J; Jᵀ −ηI].
         K = [η*SparseArrays.sparse(1.0I, m, m) J; J' -η*SparseArrays.sparse(1.0I, n, n)]
         solution = try
-            KLU.klu(K) \ [-F; zeros(n)]
+            KLU.klu(K) \ [-K_ρ; zeros(n)]
         catch err
             err isa LinearAlgebra.SingularException || rethrow()
-            δz .= pinv(Matrix(J)) * (-F) # a singular factorization: the :svd step
+            δz .= pinv(Matrix(J)) * (-K_ρ) # a singular factorization: the :svd step
             return (; fallback = 1, η)
         end
         δz .= view(solution, (m + 1):(m + n))
     elseif linear_solver === :ldl
-        # :ldl: −Jᵀ(JJᵀ + η²I)⁻¹F by a sparse LDLᵀ (CHOLMOD) of the augmented matrix [ηI J; Jᵀ −ηI].
+        # :ldl: −Jᵀ(JJᵀ + η²I)⁻¹K_ρ by a sparse LDLᵀ (CHOLMOD) of the augmented matrix [ηI J; Jᵀ −ηI].
         K = [η*SparseArrays.sparse(1.0I, m, m) J; J' -η*SparseArrays.sparse(1.0I, n, n)]
         factor = ldlt(Symmetric(K, :L); check = false) # one triangle: J may store zeros
         if !issuccess(factor)
-            δz .= pinv(Matrix(J)) * (-F) # a failed factorization: the :svd step
+            δz .= pinv(Matrix(J)) * (-K_ρ) # a failed factorization: the :svd step
             return (; fallback = 1, η)
         end
-        δz .= view(factor \ [-F; zeros(n)], (m + 1):(m + n))
+        δz .= view(factor \ [-K_ρ; zeros(n)], (m + 1):(m + n))
     elseif linear_solver === :normal
-        # :normal: −Jᵀ(JJᵀ + η²I)⁻¹F by a sparse Cholesky (CHOLMOD) of JJᵀ + η²I. A failed factorization
+        # :normal: −Jᵀ(JJᵀ + η²I)⁻¹K_ρ by a sparse Cholesky (CHOLMOD) of JJᵀ + η²I. A failed factorization
         # (η² below the round-off of JJᵀ when J is rank-deficient) retries with 100 η, up to 5 times, and
         # then takes the :svd step, as the Scholtes engine does.
         JJᵀ = _gram!(normal_equations, J)
@@ -648,13 +649,13 @@ function _newton_step!(δz, J, F, linear_solver, η, normal_equations = _normal_
         for _ in 0:5
             factor = _cholesky!(normal_equations, JJᵀ, η) # CHOLMOD factorizes JJᵀ + η²I
             if issuccess(factor)
-                w = ldiv!(normal_equations.w, factor, normal_equations.minus_F .= .-F) # (JJᵀ + η²I) w = −F
+                w = ldiv!(normal_equations.w, factor, normal_equations.minus_K_ρ .= .-K_ρ) # (JJᵀ + η²I) w = −K_ρ
                 mul!(δz, transpose(J), w)
                 all(isfinite, δz) && return (; fallback = 0, η)
             end
             η *= 100
         end
-        δz .= pinv(Matrix(J)) * (-F) # every factorization failed: the :svd step
+        δz .= pinv(Matrix(J)) * (-K_ρ) # every factorization failed: the :svd step
         return (; fallback = 1, η = η₀)
     else
         throw(ArgumentError("Unsupported linear_solver $(linear_solver)."))
@@ -680,10 +681,10 @@ mutable struct _NormalEquations
     entry_products::Vector{UnitRange{Int}}
     "The last successful Cholesky factor of JJᵀ + η²I, whose symbolic analysis the next one reuses."
     factor::Union{Nothing,SparseArrays.CHOLMOD.Factor{Float64,Int}}
-    "The solve's result w, with (JJᵀ + η²I) w = −F."
+    "The solve's result w, with (JJᵀ + η²I) w = −K_ρ."
     w::Vector{Float64}
-    "The solve's right-hand side −F."
-    minus_F::Vector{Float64}
+    "The solve's right-hand side −K_ρ."
+    minus_K_ρ::Vector{Float64}
 end
 
 """

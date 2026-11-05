@@ -55,7 +55,7 @@ function pdip_chain(k; kwargs...)
 end
 
 @testset "The Newton step of every linear solver" begin
-    # δz with J δz = −F: `:svd`, and `:sparseQR_Jᵀ` when J has full row rank, take the minimum-norm step −J⁺F;
+    # δz with J δz = −K_ρ: `:svd`, and `:sparseQR_Jᵀ` when J has full row rank, take the minimum-norm step −J⁺K_ρ;
     # `:klu`, `:ldl` and `:normal` the Levenberg–Marquardt step −Jᵀ(JJᵀ + η²I)⁻¹F = −V diag(s / (s² + η²)) UᵀF
     # (J = U diag(s) Vᵀ); `:sparseQR_J` a least-squares step. At a point of each kind of system.
     case = build_benchmark_problem(; num_players = 1, levels = 3, kind = :quadratic)
@@ -66,21 +66,21 @@ end
         θ, ρ, η = zeros(k.parameter_dimension), 1e-2, 1e-3
         z = k.kind === :scholtes ? RG.initialize_scholtes!(zeros(k.variable_dimension), k, θ, case.expected, ρ) :
             0.5 .+ 0.1 .* sin.(1:(k.variable_dimension))
-        F = zeros(k.kkt_dimension)
-        k.F!(F, z; θ, ρ)
-        J = copy(k.∇F_z!.result_buffer)
-        k.∇F_z!(J, z; θ, ρ)
+        K_ρ = zeros(k.kkt_dimension)
+        k.K_ρ!(K_ρ, z; θ, ρ)
+        J = copy(k.∇K_ρ!.result_buffer)
+        k.∇K_ρ!(J, z; θ, ρ)
         U, s, V = svd(Matrix(J))
-        minimum_norm = -pinv(Matrix(J)) * F
-        levenberg_marquardt = -V * (s ./ (s .^ 2 .+ η^2) .* (U' * F))
+        minimum_norm = -pinv(Matrix(J)) * K_ρ
+        levenberg_marquardt = -V * (s ./ (s .^ 2 .+ η^2) .* (U' * K_ρ))
         δz = zeros(k.variable_dimension)
-        @test RG._newton_step!(δz, J, F, :svd, η) == (; fallback = 0, η)
+        @test RG._newton_step!(δz, J, K_ρ, :svd, η) == (; fallback = 0, η)
         @test δz == minimum_norm
         for linear_solver in (:klu, :ldl, :normal)
-            @test RG._newton_step!(δz, J, F, linear_solver, η) == (; fallback = 0, η)
+            @test RG._newton_step!(δz, J, K_ρ, linear_solver, η) == (; fallback = 0, η)
             @test δz ≈ levenberg_marquardt rtol = 1e-6
         end
-        step = RG._newton_step!(δz, J, F, :sparseQR_Jᵀ, η)
+        step = RG._newton_step!(δz, J, K_ρ, :sparseQR_Jᵀ, η)
         if rank(Matrix(J)) == k.kkt_dimension
             @test step.fallback == 0
             @test δz ≈ minimum_norm rtol = 1e-8
@@ -88,9 +88,9 @@ end
             @test step.fallback == 1 # J without full row rank: the :svd step
             @test δz == minimum_norm
         end
-        @test RG._newton_step!(δz, J, F, :sparseQR_J, η) == (; fallback = 0, η)
-        @test norm(J' * (J * δz + F)) <= 1e-8 * opnorm(Matrix(J))^2 * norm(F) # the normal equations
-        @test_throws ArgumentError RG._newton_step!(δz, J, F, :lu, η)
+        @test RG._newton_step!(δz, J, K_ρ, :sparseQR_J, η) == (; fallback = 0, η)
+        @test norm(J' * (J * δz + K_ρ)) <= 1e-8 * opnorm(Matrix(J))^2 * norm(K_ρ) # the normal equations
+        @test_throws ArgumentError RG._newton_step!(δz, J, K_ρ, :lu, η)
     end
     # :normal retries with 100 η when CHOLMOD cannot factorize JJᵀ + η²I. Below η ≈ 2e-162, η² underflows to 0
     # and the singular JJᵀ is factorized as it is: from η = 1e-170, the last of the six tries, at 1e-160,
@@ -118,7 +118,7 @@ end
     @test next_η(1.0, -Inf, 0.0) ≈ up # a failed line search
     @test next_η(1e2, -1.0, 1.0) == 1e2 # within [η_min, η_max]
     @test next_η(1e-8, 1.0, 1.0) == 1e-8
-    # The actual over the predicted decrease of ½‖F‖²: 1 for a step that lands where the linear model F + JΔz
+    # The actual over the predicted decrease of ½‖K_ρ‖²: 1 for a step that lands where the linear model K_ρ + JΔz
     # says, −Inf when the model predicts no decrease.
     @test RG._gain_ratio([1.0], [-1.0], 1.0, 0.0) == 1.0
     @test RG._gain_ratio([1.0], [-1.0], 1.0, 0.5) == 0.75
@@ -131,18 +131,18 @@ end
         for k in (RG.generate_slacked_reduced_kkt_system(goop),
                   RG.generate_slacked_complete_kkt_system(goop; complementarity = :perturbed))
             θ = zeros(k.parameter_dimension)
-            # J is rank-deficient at the start (s, σ and γ at 1, x = 0), and :svd still takes −J⁺F.
+            # J is rank-deficient at the start (s, σ and γ at 1, x = 0), and :svd still takes −J⁺K_ρ.
             start = RG.solve(RG.PDIP(), k, θ; z₀ = zeros(4), options = RG.PDIPOptions(; max_inner_iters = 0)).z
-            J = copy(k.∇F_z!.result_buffer)
-            k.∇F_z!(J, start; θ, ρ = 1.0)
+            J = copy(k.∇K_ρ!.result_buffer)
+            k.∇K_ρ!(J, start; θ, ρ = 1.0)
             @test rank(Matrix(J)) < k.kkt_dimension
             for linear_solver in (:svd, :klu, :ldl)
                 outputs = pdip_chain(k; linear_solver)
                 z = last(outputs).z
                 @test all(o -> o.termination_reason === :inner_tolerance_reached, outputs)
                 @test all(o -> o.svd_fallbacks == 0, outputs)
-                # Every accepted step lowers ‖F(z; ρ)‖ strictly.
-                @test all(o -> all(<(0), diff(o.relaxed_residual_history)), outputs)
+                # Every accepted step lowers ‖K_ρ(z)‖ strictly.
+                @test all(o -> all(<(0), diff(o.norm_K_ρ_history)), outputs)
                 @test norm(z[k.primal_dims] - COUPLED_EXPECTED) < 1e-8
                 @test minimum(z[k.nonnegative_dims]) > 0
             end
@@ -233,7 +233,7 @@ end
 
 @testset "Both solvers: termination reasons" begin
     quadratic = RG.generate_slacked_reduced_kkt_system(free_problem(x -> x^2))
-    # F = atan(x): from x = 2 the full Newton step overshoots, to |atan(x)| larger than at x = 2.
+    # K_ρ = atan(x): from x = 2 the full Newton step overshoots, to |atan(x)| larger than at x = 2.
     overshoot = RG.generate_slacked_reduced_kkt_system(free_problem(x -> x * atan(x) - log(1 + x^2) / 2))
     for (solver, Options) in SOLVERS
         solve_from(k, z₀; kwargs...) =
@@ -244,16 +244,16 @@ end
         @test (r.status, r.termination_reason, r.newton_steps) == (:failed, :inner_tolerance_reached, 0)
         r = solve_from(quadratic, [1.0]; max_inner_iters = 0, tol = 0.0, record_convergence = true)
         @test (r.termination_reason, r.newton_steps) == (:max_inner_iters, 0)
-        @test isempty(r.relaxed_residual_history)
+        @test isempty(r.norm_K_ρ_history)
         r = solve_from(quadratic, [1.0]; max_inner_iters = 1, tol = 0.0, tol_inner = 0.0, record_convergence = true)
         @test (r.termination_reason, r.newton_steps) == (:max_inner_iters, 1)
-        @test r.relaxed_residual < only(r.relaxed_residual_history)
+        @test r.norm_K_ρ < only(r.norm_K_ρ_history)
         # The returned iterate is judged again: a last step can meet tol after the last test before a step.
         r = solve_from(quadratic, [1.0]; max_inner_iters = 1, tol = 1e-6, tol_inner = 0.0)
         @test (r.status, r.termination_reason) == (:solved, :tolerance_reached)
         r = solve_from(quadratic, [NaN])
         @test (r.status, r.termination_reason) == (:failed, :nonfinite_residual)
-        @test isnan(r.relaxed_residual)
+        @test isnan(r.norm_K_ρ)
         # With min_step = 0.9 the line search tries α = 1 only, and the overshooting step fails it.
         r = solve_from(overshoot, [2.0]; min_step = 0.9, tol = 0.0, tol_inner = 0.0)
         @test (r.status, r.termination_reason, r.newton_steps) == (:failed, :line_search_failed, 0)
@@ -273,13 +273,13 @@ end
             (RG.ProjectedLM(), RG.ProjectedLMOptions, scholtes, scholtes_start(scholtes, θ, zeros(4), 1.0))]
     for (solver, Options, k, z₀) in runs, tol in (1e-6, 0.0)
         r = RG.solve(solver, k, θ; z₀, options = Options(; ρ_schedule = [1.0, 1e-2, 1e-4], max_inner_iters = 30, tol))
-        F = zeros(k.kkt_dimension)
-        k.K₀!(F, r.z; θ)
-        @test r.residual == norm(F)
-        k.F!(F, r.z; θ, r.ρ)
-        @test r.relaxed_residual == norm(F)
+        K = zeros(k.kkt_dimension)
+        k.K₀!(K, r.z; θ)
+        @test r.norm_K₀ == norm(K)
+        k.K_ρ!(K, r.z; θ, r.ρ)
+        @test r.norm_K_ρ == norm(K)
         @test r.x == r.z[k.primal_dims]
-        @test r.status === (r.residual < tol ? :solved : :failed)
+        @test r.status === (r.norm_K₀ < tol ? :solved : :failed)
         @test minimum(r.z[k.nonnegative_dims]) > 0
     end
 end
@@ -291,7 +291,7 @@ end
         options = RG.ProjectedLMOptions(; ρ_schedule = [1.0, 0.1], max_inner_iters = 1, tol = 0.0, tol_inner = 0.0,
             linear_solver, η = 0.1, record_convergence = true)
         r = RG.solve(RG.ProjectedLM(), k, Float64[]; z₀ = [1.0], options)
-        # F = 2x is linear: every full step lands where the model says (gain ratio 1), and η shrinks.
+        # K_ρ = 2x is linear: every full step lands where the model says (gain ratio 1), and η shrinks.
         @test r.step_size_history == [1.0, 1.0]
         @test r.η_history ≈ [0.1, 0.1down]
         @test r.η ≈ 0.1down^2

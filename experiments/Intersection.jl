@@ -474,7 +474,7 @@ function demo(;
         stop_reason = solver_stop_reason(output, options; scale = residual_scale)
         # ‖K₀‖ and η at each iterate a step was tried from, then at the returned one.
         tried = eachindex(output.η_history)
-        kkt_error_history = [output.residual_history[tried]; output.residual]
+        kkt_error_history = [output.norm_K₀_history[tried]; output.norm_K₀]
         eta_history = [output.η_history; output.η]
 
         strategies = @timeit TO "solution postprocessing" extract_player_strategies(
@@ -494,16 +494,16 @@ function demo(;
             "preference_slacks" => output.z[GOOP_kkt_system.preference_slack_dims],
             "x" => output.x, # Primal compatibility for existing trajectory readers.
             "solve_time_sec" => elapsed_time,
-            "kkt_error" => output.residual,
-            "kkt_error_per_equation" => output.residual / residual_scale,
+            "kkt_error" => output.norm_K₀,
+            "kkt_error_per_equation" => output.norm_K₀ / residual_scale,
             "rho" => output.ρ,
             "status" => output.status,
             "termination_reason" => output.termination_reason,
             "stop_reason" => stop_reason,
-            "relaxed_residual" => output.relaxed_residual,
+            "relaxed_residual" => output.norm_K_ρ,
             "newton_steps" => output.newton_steps,
             "kkt_error_history" => kkt_error_history,
-            "residual_history" => output.relaxed_residual_history,
+            "residual_history" => output.norm_K_ρ_history,
             "eta_history" => eta_history,
             "solver_options" => options,
             "speed_constraint" => :component,

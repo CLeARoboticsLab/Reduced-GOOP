@@ -363,14 +363,14 @@ start_at(ctx::RoboticArmContext, θ, z, ρ; warm = false, eq_cols = Int[], eq = 
 One ProjectedLM solve of the arm from the full start `z₀`, under the names the arm code and its
 figures read: `z` the plan, `w` the full iterate, `rho`, `newton_steps`, `eta` (the η
 a next solve would start from), `history` (‖R‖ at each stopping test) and `converged`, with
-`status`, `termination_reason`, `residual` (‖K₀‖) and `relaxed_residual`; `output` is ProjectedLM's own.
+`status`, `termination_reason`, `norm_K₀` and `norm_K_ρ`; `output` is ProjectedLM's own.
 """
 function solve_arm(ctx::RoboticArmContext, θ, z₀; options)
     output = ReducedGOOP.solve(ReducedGOOP.ProjectedLM(), ctx.kkt, θ; z₀, options)
     (; output.status, output.termination_reason, converged = output.status === :solved,
        z = output.x, w = output.z, rho = output.ρ, output.newton_steps,
-       output.residual, output.relaxed_residual, eta = output.η,
-       history = output.relaxed_residual_history, output)
+       output.norm_K₀, output.norm_K_ρ, eta = output.η,
+       history = output.norm_K_ρ_history, output)
 end
 
 # The per-iteration series the convergence panels draw beside the result's ‖R‖ `history`: ‖K₀‖ at
@@ -381,7 +381,7 @@ new_traces() = (k₀ = Float64[], eta = Float64[], alpha = Float64[])
 "The convergence panels' series (`new_traces`) of one ProjectedLM solve."
 function convergence_traces(output)
     failed = output.termination_reason === :line_search_failed
-    (; k₀ = copy(output.residual_history), eta = copy(output.η_history),
+    (; k₀ = copy(output.norm_K₀_history), eta = copy(output.η_history),
        alpha = failed ? [output.step_size_history; 0.0] : copy(output.step_size_history))
 end
 
@@ -403,7 +403,7 @@ function solve_rho_sweep(ctx::RoboticArmContext, θ = scenario_parameters(ctx.sc
                          stop_at_tol = false, collect_traces = false, on_result = nothing)
     kkt = ctx.kkt
     scale = sqrt(ctx.m)
-    k₀(r) = r.residual / scale
+    k₀(r) = r.norm_K₀ / scale
     solve_at(ρ, start; eta_init = ETA_OPTIONS.eta_init) =
         solve_arm(ctx, θ, start; options = solver_options(ctx, ρ; linear_solver, proj_eps, max_inner, tol, eta_init))
     traces(r) = collect_traces ? convergence_traces(r.output) : nothing

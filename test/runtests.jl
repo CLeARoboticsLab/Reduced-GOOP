@@ -18,7 +18,7 @@ function test_known_solution_case(;
 
 	@test output.status === :solved
 	@test isapprox(primals, case.expected; atol, rtol = 0.0)
-	@test output.residual <= 1e-7
+	@test output.norm_K₀ <= 1e-7
 	assert_active_set(
 		case.problem,
 		primals,
@@ -268,19 +268,19 @@ end
 	reduced = reduced_kkt_system(case.problem)
 	quasi(order) = ReducedGOOP.generate_slacked_quasi_kkt_system(case.problem; quasi_order = order)
 	@test_throws ArgumentError quasi(0)
-	@test isequal(quasi(2).F_symbolic, quasi_kkt_system(case.problem).F_symbolic)
+	@test isequal(quasi(2).K_ρ_symbolic, quasi_kkt_system(case.problem).K_ρ_symbolic)
 	full = quasi(10)
-	kept = findall(row -> !iszero(row), reduced.F_symbolic)
+	kept = findall(row -> !iszero(row), reduced.K_ρ_symbolic)
 	@test full.kkt_dimension == length(kept)
 	z = 0.5 .+ 0.1 .* sin.(1:(reduced.variable_dimension))
 	θ = zeros(reduced.parameter_dimension)
-	F, F_full = zeros(reduced.kkt_dimension), zeros(full.kkt_dimension)
-	reduced.F!(F, z; θ, ρ = 1e-3)
-	full.F!(F_full, z; θ, ρ = 1e-3)
-	@test F_full ≈ F[kept] rtol = 1e-12
+	K_ρ, K_ρ_full = zeros(reduced.kkt_dimension), zeros(full.kkt_dimension)
+	reduced.K_ρ!(K_ρ, z; θ, ρ = 1e-3)
+	full.K_ρ!(K_ρ_full, z; θ, ρ = 1e-3)
+	@test K_ρ_full ≈ K_ρ[kept] rtol = 1e-12
 	first_order = quasi(1)
 	ψ = findall(v -> startswith(string(v), "ψ_"), first_order.z_symbolic)
-	J = first_order.∇F_z!.result_buffer
+	J = first_order.∇K_ρ!.result_buffer
 	@test !isempty(ψ)
 	@test all(j -> isempty(ReducedGOOP.SparseArrays.nzrange(J, j)), ψ)
 end
@@ -344,11 +344,11 @@ end
 	@test fdgen_chunked.variable_dimension == native.variable_dimension
 
 	reference_symbolic_jacobian = ReducedGOOP.SymbolicTracingUtils.sparse_jacobian(
-		native.F_symbolic,
+		native.K_ρ_symbolic,
 		native.z_symbolic,
 	)
 	optimized_symbolic_jacobian =
-		ReducedGOOP._build_symbolics_sparse_jacobian(native.F_symbolic, native.z_symbolic)
+		ReducedGOOP._build_symbolics_sparse_jacobian(native.K_ρ_symbolic, native.z_symbolic)
 	@test isequal(reference_symbolic_jacobian, optimized_symbolic_jacobian)
 
 	n = native.variable_dimension
@@ -359,20 +359,20 @@ end
 
 		F_native = zeros(native.kkt_dimension)
 		F_fd = zeros(fdgen.kkt_dimension)
-		native.F!(F_native, z; θ, ρ)
-		fdgen.F!(F_fd, z; θ, ρ)
+		native.K_ρ!(F_native, z; θ, ρ)
+		fdgen.K_ρ!(F_fd, z; θ, ρ)
 		@test isapprox(F_native, F_fd; atol = 1e-12, rtol = 1e-12)
 
-		J_native = copy(native.∇F_z!.result_buffer)
-		J_fd = copy(fdgen.∇F_z!.result_buffer)
+		J_native = copy(native.∇K_ρ!.result_buffer)
+		J_fd = copy(fdgen.∇K_ρ!.result_buffer)
 		F_fd_chunked = zeros(fdgen_chunked.kkt_dimension)
-		fdgen_chunked.F!(F_fd_chunked, z; θ, ρ)
+		fdgen_chunked.K_ρ!(F_fd_chunked, z; θ, ρ)
 		@test isapprox(F_native, F_fd_chunked; atol = 1e-12, rtol = 1e-12)
 
-		J_fd_chunked = copy(fdgen_chunked.∇F_z!.result_buffer)
-		native.∇F_z!(J_native, z; θ, ρ)
-		fdgen.∇F_z!(J_fd, z; θ, ρ)
-		fdgen_chunked.∇F_z!(J_fd_chunked, z; θ, ρ)
+		J_fd_chunked = copy(fdgen_chunked.∇K_ρ!.result_buffer)
+		native.∇K_ρ!(J_native, z; θ, ρ)
+		fdgen.∇K_ρ!(J_fd, z; θ, ρ)
+		fdgen_chunked.∇K_ρ!(J_fd_chunked, z; θ, ρ)
 		@test isapprox(J_native, J_fd; atol = 1e-12, rtol = 1e-12)
 		@test isapprox(J_native, J_fd_chunked; atol = 1e-12, rtol = 1e-12)
 	end
@@ -445,7 +445,7 @@ end
 	)
 	output = ReducedGOOP.solve(ReducedGOOP.ProjectedLM(), kkt, θ; z₀, options)
 	@test all(isfinite, output.z)
-	@test isfinite(output.residual)
+	@test isfinite(output.norm_K₀)
 end
 
 include(joinpath(@__DIR__, "solver.jl"))

@@ -70,7 +70,7 @@ function warm_step(ctx, θ, z0, previous, coarser_rhos; eq_cols, linear_solver,
         w₀ = Core_.start_at(ctx, θ, shifted_z, ρ; warm = true, eq_cols, eq = previous.w[eq_cols])
         r = Core_.solve_arm(ctx, θ, w₀; options = Core_.solver_options(ctx, ρ; linear_solver, max_inner))
         push!(attempts, r)
-        r.residual / sqrt(ctx.m) < Core_.TOL &&
+        r.norm_K₀ / sqrt(ctx.m) < Core_.TOL &&
             return (; label = @sprintf("warm (rho %.0e)", ρ), result = r, attempts, shifted_z)
     end
     return (; label = "", result = nothing, attempts, shifted_z)
@@ -151,7 +151,7 @@ function demo(; receding_horizon::Integer = 1, plot_fig::Bool = true, output_dir
     # ── step 1: the source's open-loop demo ─────────────────────────────────────────────
     ctx = Core_.build_context(sc)
     scale = sqrt(ctx.m)
-    k₀(r) = r.residual / scale
+    k₀(r) = r.norm_K₀ / scale
     pairs = length(ctx.kkt.complementarity_pairs)
     @printf("\n%d primal variables, residual rows m = %d (stationarity and equality %d, complementarity pairs %d), √m = %.3f\n",
             length(ctx.kkt.primal_dims), ctx.m, ctx.m - 2pairs, pairs, scale)
@@ -188,8 +188,8 @@ function demo(; receding_horizon::Integer = 1, plot_fig::Bool = true, output_dir
     converged = filter(row -> k₀(row.result) < Core_.TOL, rows)
     ref_rows = filter(row -> row.tag == "cold" && row.rho == Core_.RHO_REF, rows)
     best = !isempty(converged) ?
-           argmin(row -> select === :goal_error ? row.metrics.goal_error : row.result.residual, converged) :
-           !isempty(ref_rows) ? first(ref_rows) : argmin(row -> row.result.residual, rows)
+           argmin(row -> select === :goal_error ? row.metrics.goal_error : row.result.norm_K₀, converged) :
+           !isempty(ref_rows) ? first(ref_rows) : argmin(row -> row.result.norm_K₀, rows)
     isempty(converged) && @warn "no row met ‖K₀‖/√m < $(Core_.TOL); the plan need not be feasible"
     m = best.metrics
     @printf("\nplan: rho = %.0e (%s), goal error %.4f, min gap %.3f (d_min %.2f), max tilt %.3f, handle drift %.1e, worst g %.1e\n",

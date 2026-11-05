@@ -1,6 +1,6 @@
 """ The KKT system of a GOOP,
 
-                    F(z; θ, ρ) = 0,      z_k > 0 for k in `nonnegative_dims`,
+                    K_ρ(z; θ) = 0,      z_k > 0 for k in `nonnegative_dims`,
 
 as the generators return it: the reduced interior-point system (5.2)
 (`generate_slacked_reduced_kkt_system`), the complete systems (2.12)–(2.17) and (6.1)
@@ -9,15 +9,15 @@ as the generators return it: the reduced interior-point system (5.2)
 complementarity rows.
 
 The fields, by group:
-  - compiled: the residual `F!(out, z; θ, ρ)`, its sparse Jacobian `∇F_z!(J, z; θ, ρ)`, for
+  - compiled: the residual `K_ρ!(out, z; θ, ρ)`, its sparse Jacobian `∇K_ρ!(J, z; θ, ρ)`, for
     complete and Scholtes systems `slack_targets!(out, z; θ, ρ)`, the expressions that the slacks
     σ stand for (rows expression − σ = 0), and `K₀!(out, z; θ)`, the unrelaxed residual;
-  - sizes: `kkt_dimension` (rows of F), `variable_dimension` (length of z),
+  - sizes: `kkt_dimension` (rows of K_ρ), `variable_dimension` (length of z),
     `parameter_dimension` (length of θ);
   - index sets of z: x, s, σ, γ, λ, ψ, and `nonnegative_dims`, the coordinates the solver keeps
     positive: σ and γ (and for the Scholtes system ϕ, σ̂ and u). The preference slacks s are not
-    among them: s ≥ 0 is a row of F, s − σ = 0, like every other inequality;
-  - symbolic: `F_symbolic`, `z_symbolic`, for complete and Scholtes systems also
+    among them: s ≥ 0 is a row of K_ρ, s − σ = 0, like every other inequality;
+  - symbolic: `K_ρ_symbolic`, `z_symbolic`, for complete and Scholtes systems also
     `slack_expressions`, for complete systems `G_symbolic` and `levels`;
   - the tags: `kind`, the system (`:reduced`, `:complete` or `:scholtes`), and `complementarity`,
     its complementarity rows (`:interior_point`, `:exact`, `:perturbed` or `:scholtes`);
@@ -39,7 +39,7 @@ level k carries its own copies λₖ, γₖ, σₖ (γₖ and σₖ over all of 
 where πₖ₊₁ = [∇Lₖ₊₁; πₖ₊₂; …] stacks the stationarity residuals of every level below
 k (the lower levels' policy, enforced through the multipliers ψₖ), and ∇ is the gradient
 w.r.t. player i's own xⁱ and, at a prioritized level, sₖ. The last two terms are absent at
-the innermost level. F stacks, for every player and level,
+the innermost level. K_ρ stacks, for every player and level,
 
     ∇Lₖ = 0                             stationarity
     f = 0                               innermost level only
@@ -49,22 +49,22 @@ the innermost level. F stacks, for every player and level,
 over z = [x; s; σ; λ; γ; ψ; φ]. The solver keeps σ and γ positive, drives ρ → 0,
 and recovers x from the primal block. φ enters only through the stationarity rows. With
 `drop_higher_order_terms = true` (quasi), every term of ∇Lₖ that would be differentiated
-more than twice is set to zero.
+more than `quasi_order` times (default 2) is set to zero.
 
 For the Scholtes form of the same hierarchy (exact φ rows, ρ homotopy) see
 `ScholtesKKTSystem` in src/scholtes_kkt.jl.
 """
 
 struct GOOPKKTSystem{T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T14}
-    "A callable function that computes F!(val, z; θ, ρ) in-place for 'val'"
-    F!::T1
-    "A `SparseFunction` that computes ∇F_z!(val, z; θ, ρ) in-place for 'val'; it carries the Jacobian's buffer (`result_buffer`) and pattern (`rows`, `cols`)"
-    ∇F_z!::T2
+    "A callable function that computes K_ρ!(val, z; θ, ρ) in-place for 'val'"
+    K_ρ!::T1
+    "A `SparseFunction` that computes ∇K_ρ!(val, z; θ, ρ) in-place for 'val'; it carries the Jacobian's buffer (`result_buffer`) and pattern (`rows`, `cols`)"
+    ∇K_ρ!::T2
     "A callable function that computes slack_targets!(val, z; θ, ρ), the slack expressions, in-place for 'val' (complete and Scholtes systems; a no-op otherwise)"
     slack_targets!::T3
-    "A callable function that computes K₀!(val, z; θ), the unrelaxed residual: F at ρ = 0, and for the Scholtes system with u = 0"
+    "A callable function that computes K₀!(val, z; θ), the unrelaxed residual: K_ρ at ρ = 0, and for the Scholtes system with u = 0"
     K₀!::T4
-    "KKT dimension (rows of F)"
+    "KKT dimension (rows of K_ρ)"
     kkt_dimension::Int
     "Length of z vector"
     variable_dimension::Int
@@ -88,11 +88,11 @@ struct GOOPKKTSystem{T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T14}
     innermost_stationarity_dual_dims::T11
     "Coordinates of z the solver keeps positive (the sign box): interior point slacks and inequality constraint duals"
     nonnegative_dims::T12
-    "F in symbolics"
-    F_symbolic::T13
+    "K_ρ in symbolics"
+    K_ρ_symbolic::T13
     "z in symbolics"
     z_symbolic::T13
-    "The expressions the interior point slacks stand for, in symbolics (rows expression − σ = 0 of F; complete systems; empty otherwise)"
+    "The expressions the interior point slacks stand for, in symbolics (rows expression − σ = 0 of K_ρ; complete systems; empty otherwise)"
     slack_expressions::T13
     "Every level's inequalities in symbolics (complete systems; empty otherwise)"
     G_symbolic::T13
@@ -317,7 +317,7 @@ function _compile_kkt_block(exprs, z, θ, ρ; codegen, fd_codegen_chunk_size, ba
 end
 
 """
-Compile the symbolic rows `F_symbolic(z; θ, ρ)` of a GOOP KKT system into a `GOOPKKTSystem`: the
+Compile the symbolic rows `K_ρ_symbolic(z; θ, ρ)` of a GOOP KKT system into a `GOOPKKTSystem`: the
 residual, its sparse Jacobian w.r.t. z and the slack targets (`slack_expressions`, complete systems
 only), through one compile path, `_compile_kkt_block` (FastDifferentiation by default, as every study
 uses).
@@ -325,7 +325,7 @@ uses).
 given, as the complete systems' container always did.
 """
 function BuildGOOPKKTSystem(
-    F_symbolic::Vector{T},
+    K_ρ_symbolic::Vector{T},
     z_symbolic::Vector{T},
     θ_symbolic::Vector{T},
     ρ_symbolic::T,
@@ -359,7 +359,7 @@ function BuildGOOPKKTSystem(
     exact = complementarity === :exact
     @timeit TO "KKT executable construction" begin
         f!, J!, J_buffer, (rows, cols) = _compile_kkt_block(
-            F_symbolic,
+            K_ρ_symbolic,
             z_symbolic,
             θ_symbolic,
             ρ_symbolic;
@@ -377,32 +377,32 @@ function BuildGOOPKKTSystem(
             fd_codegen_chunk_size,
             backend_options,
         )
-        F! = (out, z; θ, ρ) -> f!(out, z, θ, exact ? 0.0 : ρ)
-        ∇F_z! = SymbolicTracingUtils.SparseFunction(
+        K_ρ! = (out, z; θ, ρ) -> f!(out, z, θ, exact ? 0.0 : ρ)
+        ∇K_ρ! = SymbolicTracingUtils.SparseFunction(
             (J, z; θ, ρ) -> J!(J, z, θ, exact ? 0.0 : ρ),
             rows,
             cols,
             size(J_buffer),
         )
         slack_targets! = (out, z; θ, ρ) -> g!(out, z, θ, exact ? 0.0 : ρ)
-        # K₀ is F at ρ = 0. The Scholtes system writes σ ⊙ γ ≤ ρ𝟙 as σ ⊙ γ + u − ρ𝟙 = 0 with u ≥ 0, 
-        # so its K₀ is F at ρ = 0 with u = 0: the row is then σ ⊙ γ. The u's coordinates in z come from
-        # complementarity_pairs (Scholtes only; empty otherwise, and then K₀ is just F at ρ = 0):
+        # K₀ is K_ρ at ρ = 0. The Scholtes system writes σ ⊙ γ ≤ ρ𝟙 as σ ⊙ γ + u − ρ𝟙 = 0 with u ≥ 0, 
+        # so its K₀ is K_ρ at ρ = 0 with u = 0: the row is then σ ⊙ γ. The u's coordinates in z come from
+        # complementarity_pairs (Scholtes only; empty otherwise, and then K₀ is just K_ρ at ρ = 0):
         # `u_relaxation` is its u ≥ 0 in σ ⊙ γ + u - ρ = 0; set to be 0 for σ̂ ⊙ ϕ = 0).
         u_dims = [pair.u_relaxation for pair in complementarity_pairs if pair.u_relaxation != 0]
         K₀! = if isempty(u_dims)
-            (out, z; θ) -> F!(out, z; θ, ρ = 0.0)
+            (out, z; θ) -> K_ρ!(out, z; θ, ρ = 0.0)
         else
             z_u_zero = zeros(length(z_symbolic)) # z with u = 0
-            (out, z; θ) -> (z_u_zero .= z; z_u_zero[u_dims] .= 0.0; F!(out, z_u_zero; θ, ρ = 0.0))
+            (out, z; θ) -> (z_u_zero .= z; z_u_zero[u_dims] .= 0.0; K_ρ!(out, z_u_zero; θ, ρ = 0.0))
         end
 
         GOOPKKTSystem(
-            F!,
-            ∇F_z!,
+            K_ρ!,
+            ∇K_ρ!,
             slack_targets!,
             K₀!,
-            length(F_symbolic),
+            length(K_ρ_symbolic),
             length(z_symbolic),
             length(θ_symbolic),
             primal_dims,
@@ -414,7 +414,7 @@ function BuildGOOPKKTSystem(
             all_equality_stationarity_dual_dims,
             innermost_stationarity_dual_dims,
             nonnegative_dims,
-            F_symbolic,
+            K_ρ_symbolic,
             z_symbolic,
             slack_expressions,
             G_symbolic,

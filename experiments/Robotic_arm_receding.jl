@@ -133,7 +133,7 @@ function create_planner_from_context(
     t = Ref(0)
     z = Ref{Union{Nothing,Vector{Float64}}}(nothing)
     scale = sqrt(ctx.arm.m)
-    k₀(r) = r.residual / scale
+    k₀(r) = r.norm_K₀ / scale
     goal_dist(zz) = norm(Core_.pot_centre(sc, zz, sc.horizon) .- sc.pot_goal)
 
     function solved_z()

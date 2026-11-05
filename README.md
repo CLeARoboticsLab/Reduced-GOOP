@@ -126,8 +126,8 @@ a reduced formulation with selected higher-order derivative terms omitted.
 `goop_kkt_system.jl` defines `GOOPKKTSystem`, the container every solver in
 `solver.jl` reads. It stores:
 
-- in-place evaluators of the residual F(z; ρ), its sparse Jacobian with respect to
-  the decision vector z, the unrelaxed residual K₀ (F at ρ = 0), and the values the
+- in-place evaluators of the residual K_ρ(z) (`K_ρ!`), its sparse Jacobian with respect to
+  the decision vector z (`∇K_ρ!`), the unrelaxed residual K₀ (K_ρ at ρ = 0), and the values the
   auxiliary slacks stand for;
 - index sets for primal variables, preference slacks, interior-point slacks,
   inequality duals, the equality/stationarity dual subsets used by selective warm
@@ -147,11 +147,12 @@ with respect to the full decision vector.
 
 | Solver          | Description                                                                                                                                                                                                                                                                     |
 | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `PDIP`          | Algorithm 5.1: Newton's method on F(z; ρ) = 0 for each relaxation ρ, with the minimum-norm step −J⁺F (`:svd`, the default) or a sparse QR, KLU or LDLᵀ step, and a backtracking (or fraction-to-boundary) line search that keeps the sign box positive. Options: `PDIPOptions`. For the perturbed reduced (5.2) and complete (6.1) systems. |
+| `PDIP`          | Algorithm 5.1: Newton's method on K_ρ(z) = 0 for each relaxation ρ, with the minimum-norm step −J⁺K_ρ (`:svd`, the default) or a sparse QR, KLU or LDLᵀ step, and a backtracking (or fraction-to-boundary) line search that keeps the sign box positive. Options: `PDIPOptions`. For the perturbed reduced (5.2) and complete (6.1) systems. |
 | `ProjectedLM`   | The projected Levenberg–Marquardt method: the Levenberg–Marquardt step on the coordinates that are free, a scaled gradient step on those held at their floor (a two-metric projection), an Armijo line search along the projected arc, and an η schedule from the gain ratio. Options: `ProjectedLMOptions`; linear solvers `:normal` (default), `:klu`, `:ldl`. For the Scholtes system and the complete systems. |
 
 With `record_convergence = true`, `PDIP` and `ProjectedLM` also return per-iteration
-histories (‖F(z; ρ)‖, ‖K₀‖, step sizes, and for `ProjectedLM` η).
+histories (‖K_ρ(z)‖, ‖K₀‖, step sizes, and for `ProjectedLM` η). Both report `norm_K₀` and `norm_K_ρ` at
+the returned point.
 
 ### The Scholtes system and `ProjectedLM`
 
