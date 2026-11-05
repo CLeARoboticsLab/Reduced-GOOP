@@ -818,6 +818,7 @@ function solver_stop_reason(output, options; scale = 1.0)
     reason == :inner_tolerance_reached &&
         return "relaxed-system tolerance reached ($(r_name) < $(round(options.tol_inner / scale; sigdigits = 3)))"
     reason == :max_inner && return "iteration limit reached (max_inner=$(options.max_inner))"
+    reason == :max_inner_iters && return "iteration limit reached (max_inner_iters=$(options.max_inner_iters))"
     reason == :nonfinite_residual && return "solver failure: non-finite residual"
     reason == :invalid_step && return "solver failure: invalid Newton step"
     reason == :line_search_failed && return "line-search stall (no accepted step)"
