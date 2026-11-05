@@ -260,6 +260,31 @@ end
 	@test isempty(intersect(kkt.all_equality_stationarity_dual_dims, other_dims))
 end
 
+@testset "Quasi order of the interior-point quasi system" begin
+	# The quasi system truncates every Lagrangian term after `quasi_order` derivatives (default 2). A large
+	# order truncates nothing, so its rows evaluate to the reduced system's (whose identically zero rows the
+	# quasi system drops); order 1 keeps first-order information only, so no row depends on ψ.
+	case = build_benchmark_problem(; num_players = 1, levels = 3, kind = :nonlinear)
+	reduced = reduced_kkt_system(case.problem)
+	quasi(order) = ReducedGOOP.generate_slacked_quasi_kkt_system(case.problem; quasi_order = order)
+	@test_throws ArgumentError quasi(0)
+	@test isequal(quasi(2).F_symbolic, quasi_kkt_system(case.problem).F_symbolic)
+	full = quasi(10)
+	kept = findall(row -> !iszero(row), reduced.F_symbolic)
+	@test full.kkt_dimension == length(kept)
+	z = 0.5 .+ 0.1 .* sin.(1:(reduced.variable_dimension))
+	θ = zeros(reduced.parameter_dimension)
+	F, F_full = zeros(reduced.kkt_dimension), zeros(full.kkt_dimension)
+	reduced.F!(F, z; θ, ρ = 1e-3)
+	full.F!(F_full, z; θ, ρ = 1e-3)
+	@test F_full ≈ F[kept] rtol = 1e-12
+	first_order = quasi(1)
+	ψ = findall(v -> startswith(string(v), "ψ_"), first_order.z_symbolic)
+	J = first_order.∇F_z!.result_buffer
+	@test !isempty(ψ)
+	@test all(j -> isempty(ReducedGOOP.SparseArrays.nzrange(J, j)), ψ)
+end
+
 @testset "FastDifferentiation Codegen Parity" begin
 	# The :fast_differentiation codegen path must produce the same KKT residual
 	# and Jacobian as the native Symbolics code generator: differentiation stays

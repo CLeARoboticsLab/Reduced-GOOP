@@ -14,11 +14,12 @@ planning, where a player first satisfies safety or task constraints and only
 then optimize lower-priority behavior.
 
 `ReducedGOOP.jl` implements tractable nonlinear KKT reformulations of GOOP
-problems together with two solvers: a primal-dual interior-point method and a
-Scholtes-relaxation ρ homotopy with a projected Newton step. The experiment
-scripts reproduce the main computational examples from the paper, including the
-two-player intersection scenario and quadratic hierarchy benchmarks, plus a
-two-arm robotic pot-carrying game solved with the Scholtes path.
+problems together with two solvers: a primal-dual interior-point method (`PDIP`,
+Algorithm 5.1 of the paper) and a projected Levenberg–Marquardt method
+(`ProjectedLM`), which solves the reduced system in Scholtes form down a ρ
+homotopy. The experiment scripts reproduce the main computational examples from
+the paper, including the two-player intersection scenario and quadratic hierarchy
+benchmarks, plus a two-arm robotic pot-carrying game solved in Scholtes form.
 
 The Scholtes relaxation scheme (the explicit φ formulation, projected two-metric
 step and ρ homotopy, with the certificate and multistart layers) was designed and
@@ -61,9 +62,10 @@ include("experiments/Intersection.jl")
 Intersection.demo(random_initial_state = false)
 ```
 
-The active script constructs a two-player open-loop trajectory game, generates a
-GOOP KKT reformulation, solves it with the interior-point solver, and saves
-trajectory and solution data under `data/Intersection_open_loop/`.
+The active script constructs a two-player open-loop trajectory game, generates the
+reduced GOOP KKT system in Scholtes form, solves it down a ρ schedule with
+`ProjectedLM`, and saves trajectory and solution data under
+`data/Intersection_open_loop/`.
 
 ### Single-Player Trilevel Quadratic Program
 
@@ -81,7 +83,7 @@ dual solution independently with `NonlinearSolve`.
 
 | Path           | Purpose                                                                                          |
 | -------------- | ------------------------------------------------------------------------------------------------ |
-| `src/`         | Core GOOP problem representation, KKT reformulation generators, and interior-point solver.       |
+| `src/`         | Core GOOP problem representation, KKT reformulation generators, and the solvers.                 |
 | `experiments/` | Reproduction scripts, plotting utilities, and the experiment-specific Julia environment.         |
 | `test/`        | Regression tests for KKT formulations, code generation, KLU solves, and warm starts.             |
 | `legacy/`      | Older implementations, archived formulations, and historical experiments retained for reference. |
@@ -101,16 +103,16 @@ dual solution independently with `NonlinearSolve`.
 
 #### KKT-Based Formulations
 
-These functions construct nonlinear KKT systems. The reduced and complete generators
-return `GOOPKKTSystem` objects, solved by the interior-point methods in `solver.jl`
-(`PDIP`, Algorithm 5.1) or by the Scholtes solver, or, with `complementarity =
-:scholtes`, a `ScholtesKKTSystem` for the Scholtes solver (see below):
+These functions construct nonlinear KKT systems, each a `GOOPKKTSystem` for the
+solvers in `solver.jl`:
 
 | Function                                    | Description                                                                                                                                                                                                                                    |
 | ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `generate_slacked_reduced_kkt_system(...)`  | Builds a reduced, slacked KKT system recursively. It introduces preference slacks, interior-point slacks, equality duals, inequality duals, lower-level policy multipliers, and complementarity-relaxation terms.                              |
 | `generate_slacked_quasi_kkt_system(...)`    | Calls the reduced generator with `drop_higher_order_terms = true`. The code implements this by propagating `QuasiLagrangianTerm` objects and truncating higher-order derivative contributions.                                                 |
 | `generate_slacked_complete_kkt_system(...)` | Builds the complete KKT system, carrying inner-level stationarity, inequality rows and multipliers into the outer levels: `complementarity = :exact` (equations (2.12)–(2.17)) or `:perturbed` (equation (6.1), complementarity relaxed to ρ). |
+| `generate_slacked_scholtes_reduced_kkt_system(...)` | Builds the reduced system in Scholtes form: the same recursion as the reduced generator, with the relaxation σ ⊙ γ ≤ ρ𝟙 written as σ ⊙ γ + u − ρ𝟙 = 0 (u ≥ 0) and the lower levels' relaxed complementarity carried as an exact product σ̂ ⊙ ϕ = 0 (see below). |
+| `initialize_scholtes!(...)` | Starts the Scholtes system at a primal guess and a level ρ: a cold start (every inequality strictly satisfied) or a warm, continuation start. |
 
 From the source, the reduced formulation appears to encode lower-level stationarity
 and complementarity information more compactly through recursively propagated
@@ -120,35 +122,67 @@ a reduced formulation with selected higher-order derivative terms omitted.
 
 ### `src/goop_kkt_system.jl`
 
-`goop_kkt_system.jl` defines `GOOPKKTSystem`, the container used by the
-interior-point solver. It stores:
+`goop_kkt_system.jl` defines `GOOPKKTSystem`, the container every solver in
+`solver.jl` reads. It stores:
 
-- in-place residual and Jacobian evaluators for the KKT residual and its
-  derivative with respect to the decision vector;
+- in-place evaluators of the residual F(z; ρ), its sparse Jacobian with respect to
+  the decision vector z, the unrelaxed residual K₀ (F at ρ = 0), and the values the
+  auxiliary slacks stand for;
 - index sets for primal variables, preference slacks, interior-point slacks,
-  inequality duals, and the equality/stationarity dual subsets used by selective
-  warm starts;
-- KKT and variable dimensions;
-- the symbolic residual and symbolic variable vector used to build the system.
+  inequality duals, the equality/stationarity dual subsets used by selective warm
+  starts, and the sign box (the coordinates kept positive);
+- KKT and variable dimensions, and tags naming the system (`kind`,
+  `complementarity`);
+- the symbolic residual and symbolic variable vector used to build the system, and,
+  for the Scholtes system, its complementarity pairs.
 
 `BuildGOOPKKTSystem(...)` selects either the Symbolics or FastDifferentiation
-backend, builds an in-place residual function, constructs a sparse Jacobian with
-respect to the full decision vector, and records constant sparse entries for
-efficient repeated evaluation.
+backend, builds the in-place residual function, and constructs the sparse Jacobian
+with respect to the full decision vector.
 
 ### `src/solver.jl`
 
-`solver.jl` provides the `InteriorPoint` solver front end:
+`solver.jl` provides the solvers, each called as `solve(Solver(), kkt, θ; z₀, options)`:
 
 | Solver          | Description                                                                                                                                                                                                                                                                     |
 | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `InteriorPoint` | Solves a `GOOPKKTSystem` by Newton steps on the relaxed primal-dual residual. It initializes preference slacks, interior-point slacks, and inequality duals to positive values, supports backtracking and fraction-to-boundary line search, and can record KKT-error histories. |
+| `PDIP`          | Algorithm 5.1: Newton's method on F(z; ρ) = 0 for each relaxation ρ, with the minimum-norm step −J⁺F (`:svd`, the default) or a sparse QR, KLU or LDLᵀ step, and a backtracking (or fraction-to-boundary) line search that keeps the sign box positive. Options: `PDIPOptions`. For the perturbed reduced (5.2) and complete (6.1) systems. |
+| `ProjectedLM`   | The projected Levenberg–Marquardt method: the Levenberg–Marquardt step on the coordinates that are free, a scaled gradient step on those held at their floor (a two-metric projection), an Armijo line search along the projected arc, and an η schedule from the gain ratio. Options: `ProjectedLMOptions`; linear solvers `:normal` (default), `:klu`, `:ldl`. For the Scholtes system and the complete systems. |
+| `InteriorPoint` | The earlier interior-point solver, kept for comparison: Newton steps on the relaxed primal-dual residual with backtracking and fraction-to-boundary line search. Options: `InteriorPointOptions`. |
 
-Solver options are configured through `InteriorPointOptions`. Its sparse linear
-solvers are `:normal`, `:klu_sqrt_eta` (alias `:klu`; augmented diagonals ±√η) and
-`:klu_eta` (diagonals ±η, the Scholtes source's convention), with an SVD fallback.
+With `record_convergence = true`, `PDIP` and `ProjectedLM` also return per-iteration
+histories (‖F(z; ρ)‖, ‖K₀‖, step sizes, and for `ProjectedLM` η).
 
-### Scholtes relaxation (`src/scholtes_*.jl`)
+### The Scholtes system and `ProjectedLM`
+
+```julia
+using ReducedGOOP: generate_slacked_scholtes_reduced_kkt_system, initialize_scholtes!, solve,
+    ProjectedLM, ProjectedLMOptions
+kkt = generate_slacked_scholtes_reduced_kkt_system(goop)
+z₀ = initialize_scholtes!(zeros(kkt.variable_dimension), kkt, θ, x₀, ρ; warm = false) # g(x₀) > 0
+result = solve(ProjectedLM(), kkt, θ; z₀, options = ProjectedLMOptions(; ρ_schedule = [ρ]))
+result.x, result.status, result.residual   # primal answer, status, ‖K₀‖
+```
+
+A level marked `is_prioritized_constraint = true` introduces one
+`preference_slack` component per preference entry. The level minimizes
+`sum(preference_slack)` subject to `h + preference_slack ≥ 0` and
+`preference_slack ≥ 0`. Upper levels retain these same slack variables and both
+inequality blocks, with their own multipliers and the lower-level Scholtes KKT
+conditions. As in the reduced formulation, stationarity differentiates with
+respect to the player's original variables and that level's own preference slack;
+inherited preference slacks and lower-level multipliers are held fixed.
+`initialize_scholtes!` sets the slacks from the values they stand for;
+`result.x` contains the original primal variables and
+`result.z[kkt.preference_slack_dims]` the preference slacks. Pass the latter to
+`initialize_scholtes!(...; preference_slacks = ...)` to keep them during
+continuation.
+
+### The Scholtes engine (`src/scholtes_*.jl`)
+
+The first port of the Scholtes solver, `solve(Scholtes(), …)` on its own
+`ScholtesKKTSystem`. It is kept, with its own tests, while it remains; new code
+uses `ProjectedLM` on `generate_slacked_scholtes_reduced_kkt_system`.
 
 | File                                       | Contents                                                                                                                                                                                                                                                      |
 | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -159,36 +193,13 @@ solvers are `:normal`, `:klu_sqrt_eta` (alias `:klu`; augmented diagonals ±√�
 | `scholtes_certify.jl`                      | `stat_feas`, `solve_certified`: judge a fixed-ρ solve on the hypotheses of Scholtes' theorem (stationarity/feasibility, complementarity shortfall ≈ ρ, constraint margin).                                                                                    |
 | `scholtes_multistart.jl`                   | `solve_multi`, `random_starts`, `grid_starts`, `is_feasible`.                                                                                                                                                                                                 |
 
-```javascript
-using ReducedGOOP: generate_slacked_reduced_kkt_system, solve, Scholtes, ScholtesOptions
-kkt = generate_slacked_reduced_kkt_system(goop; complementarity = :scholtes)
-result = solve(Scholtes(), kkt, θ; z₀, options = ScholtesOptions(linear_solver = :normal))
-result.z, result.converged, result.residual   # primal answer, status, ‖K₀‖
-```
-
-The Scholtes path requires `projected_step = true` (the default); `false` throws.
-Factorization reuse (`reuse_factorization_iters > 0`) is interior-point only.
-
-In Scholtes mode, a level marked `is_prioritized_constraint = true` introduces
-one `preference_slack` component per preference entry. The level minimizes
-`sum(preference_slack)` subject to `h + preference_slack ≥ 0` and
-`preference_slack ≥ 0`. Upper levels retain these same slack variables and both
-inequality blocks, with their own multipliers and the lower-level Scholtes KKT
-conditions. As in the old reduced formulation, stationarity differentiates with
-respect to the player's original variables and that level's own preference slack;
-inherited preference slacks and lower-level multipliers are held fixed.
-The solver initializes the slacks internally; `result.z` contains the original
-primal variables and `result.preference_slacks` contains the preference slacks.
-Pass the latter to `scholtes_warm_start(...; preference_slacks = ...)` to keep
-them during continuation.
-
 ## Experiments
 
 | File                                   | Description                                                                                                                                                         |
 | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `experiments/Intersection.jl`          | Two-player open-loop intersection example with trajectory dynamics, prioritized preferences, a reduced Scholtes solve, and result plotting.                          |
+| `experiments/Intersection.jl`          | Two-player open-loop intersection example with trajectory dynamics, prioritized preferences, the reduced system in Scholtes form solved by `ProjectedLM`, and result plotting. |
 | `experiments/ExamplesQP.jl`            | Lightweight entry point for the quadratic-program example.                                                                                                          |
-| `experiments/robotic_arm_core.jl`      | Two-arm pot-carrying game (Scholtes scenario, x₀ as the parameter θ), the ρ sweep and plan metrics.                                                                 |
+| `experiments/robotic_arm_core.jl`      | Two-arm pot-carrying game (in Scholtes form, x₀ as the parameter θ), the ρ sweep and plan metrics.                                                                  |
 | `experiments/Robotic_arm_final.jl`     | The robotic arm, open loop or receding horizon: `Robotic_arm_final.demo(; receding_horizon = 1, plot_fig = true, …)`.                                               |
 | `experiments/Robotic_arm_receding.jl`  | Python/juliacall entry points (`build_mpc_context`, `create_planner_from_context`).                                                                                 |
 | `experiments/Robotic_arm_plotting.jl`  | Robotic-arm figures (Plots.jl): a PDF and an interactive HTML per initial guess and per solve, ported from ScholtesReducedGOOP.jl's `examples/robotic_arm_plot.jl`. |
@@ -196,9 +207,11 @@ them during continuation.
 
 ## Tests
 
-`test/runtests.jl` exercises the complete and reduced slacked KKT formulations
-with the interior-point solver, and includes `test/scholtes.jl`, the Scholtes
-solver's tests ported from ScholtesReducedGOOP.jl.
+`test/runtests.jl` exercises the reduced and quasi KKT formulations with the
+interior-point solver, and includes `test/solver.jl` (the two solvers, `PDIP` and
+`ProjectedLM`), `test/complete_kkt.jl` (the complete systems) and
+`test/scholtes.jl` (the Scholtes system, from ScholtesReducedGOOP.jl's tests, and
+the Scholtes engine's own tests).
 
 | Benchmark family              | What is tested                                                                                                                                                                       |
 | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -207,7 +220,8 @@ solver's tests ported from ScholtesReducedGOOP.jl.
 | Code-generation parity        | Agreement between Symbolics and FastDifferentiation residual/Jacobian evaluators.                                                                                                    |
 | KLU solver tests              | Augmented-system direction accuracy, factorization reuse, singular-retry behavior, and agreement with dense SVD.                                                                     |
 | Warm-start tests              | Full-vector solver warm starts.                                                                                                                                                      |
-| Scholtes (`test/scholtes.jl`) | KKT blocks, residual and sign box, every linear backend, the projected bound rule, ρ schedules, certificate, multistart, non-unique answers, and exact inequalities at the solution. |
+| Solvers (`test/solver.jl`)    | The Newton step of every linear solver, the η schedule, Algorithm 5.1 on the perturbed reduced and complete systems, termination reasons, option checks.                         |
+| Scholtes (`test/scholtes.jl`) | The Scholtes system's rows, prioritized preference slacks, the quasi system, starts, solves with every linear solver, and exact inequalities at the solution; the engine's certificate and multistart. |
 
 The tests verify convergence status, residual tolerances, known primal
 solutions, active/inactive constraint behavior, and linear-solver robustness.
@@ -230,9 +244,10 @@ choices or for future development.
 The high-level workflow is:
 
 1. Define a `ParametricGOOP` problem from player preferences and constraints.
-2. Generate a complete, reduced, or quasi KKT reformulation.
-3. Solve the reformulated system with the interior-point solver in `solver.jl`,
-   or, with `complementarity = :scholtes`, with `solve(Scholtes(), …)`.
+2. Generate a complete, reduced, or quasi KKT reformulation, or the reduced system in Scholtes form.
+3. Solve it with a solver in `solver.jl`: `solve(ProjectedLM(), …)` for the
+   Scholtes system and the complete systems, `solve(PDIP(), …)` for the perturbed
+   reduced and complete systems.
 4. Extract the primal strategies and analyze the resulting equilibrium.
 
 For new experiments, prefer the `experiments/` environment and the existing

@@ -6,8 +6,7 @@ as the generators return it: the reduced interior-point system (5.2)
 (`generate_slacked_reduced_kkt_system`), the complete systems (2.12)–(2.17) and (6.1)
 (`generate_slacked_complete_kkt_system`) and the reduced system in Scholtes form
 (`generate_slacked_scholtes_reduced_kkt_system`). θ are the parameters and ρ ≥ 0 relaxes the
-complementarity rows. (`generate_slacked_reduced_kkt_system(…; complementarity = :scholtes)` still
-returns the old `ScholtesKKTSystem` of src/scholtes_kkt.jl.)
+complementarity rows.
 
 The fields, by group:
   - compiled: the residual `F!(out, z; θ, ρ)`, its sparse Jacobian `∇F_z!(J, z; θ, ρ)`, for
@@ -429,8 +428,8 @@ function BuildGOOPKKTSystem(
 end
 
 """
-Compile a Scholtes reduced KKT system (`generate_slacked_reduced_kkt_system(goop; complementarity
-= :scholtes)`) and pack it into the container the Scholtes engine reads: a `ScholtesKKTSystem`
+Compile the Scholtes engine's reduced KKT system (`_generate_scholtes_reduced_kkt_system`) and pack
+it into the container the engine reads: a `ScholtesKKTSystem`
 with the rows F and the complementarity blocks a and b, whose first `original_nc` pairs are
 relaxed by the solver and the rest (the φ pairs) exact. `generate_slacked_scholtes_reduced_kkt_system`
 builds the same system as a `GOOPKKTSystem`, without a and b.

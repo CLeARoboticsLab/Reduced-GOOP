@@ -116,8 +116,8 @@ end
 # The source's default solver options (its default backend is `:klu`).
 const SRC_DEFAULTS = RG.ScholtesOptions(linear_solver = :klu_eta)
 
-skkt(p; quasi = false, quasi_order = 2) = RG.generate_slacked_reduced_kkt_system(
-    p.goop; complementarity = :scholtes, drop_higher_order_terms = quasi, quasi_order)
+skkt(p; quasi = false, quasi_order = 2) = RG._generate_scholtes_reduced_kkt_system(
+    p.goop; drop_higher_order_terms = quasi, quasi_order)
 
 const _LS = Dict(:klu => :klu_eta, :pinv => :svd)
 """
@@ -916,45 +916,4 @@ end
     end
 end
 
-end
-
-# The adapter's row-for-row check, while the adapter lives (the intersection study's complete checks use it).
-@testset "the perturbed reduced system (5.2), handed to Scholtes" begin
-    # _scholtes_engine_system hands the :interior_point system to Scholtes(): the same residual and
-    # Jacobian at the same ρ, with the slacks σ and duals γ (nonnegative_dims) nonnegative.
-    for (levels, players, kind) in ((2, 1, :quadratic), (3, 3, :nonlinear))
-        case = build_benchmark_problem(; num_players = players, levels, kind)
-        kkt = RG.generate_slacked_reduced_kkt_system(case.problem; complementarity = :interior_point)
-        k = RG._scholtes_engine_system(kkt)
-        θ = zeros(k.parameter_dimension)
-        @test isequal(kkt.z_symbolic, k.vars)
-        @test (k.n_nc, k.n, k.n_comp) == (kkt.kkt_dimension, kkt.variable_dimension, 0)
-        @test k.nonnegative_dims == [kkt.interior_point_slack_dims; kkt.inequality_constraint_dual_dims]
-        y = 0.5 .+ 0.1 .* sin.(1:k.n)
-        for ρ in (1e-3, 1e-9)
-            r, rk = zeros(k.n_nc), zeros(k.n_nc)
-            kkt.F!(r, y; θ, ρ)
-            k.F_nc!(rk, y, θ, ρ)
-            @test rk == r
-            J, Jk = copy(kkt.∇F_z!.result_buffer), copy(k.Jnc_buf)
-            kkt.∇F_z!(J, y; θ, ρ)
-            k.J_nc!(Jk, y, θ, ρ)
-            @test Jk == J
-        end
-        # Down a ρ chain from z = 0, one solve per stage, as experiments/MonteCarlo_RandomGOOP.jl does.
-        # Every stage runs to its inner tolerance (tol = 0): the primal error shrinks with ρ.
-        w, scale = nothing, sqrt(k.n_nc)
-        for ρ in (1.0, 1e-2, 1e-4, 1e-6, 1e-8, 1e-10)
-            options = RG.ScholtesOptions(; rho_schedule = [ρ], max_inner = 1000, tol = 0.0,
-                tol_inner = min(ρ, 1e-2) * scale, projected_step = true, proj_eps = 1e-8, linear_solver = :normal,
-                eta_schedule = true, eta_init = 1e-2, eta_min = 1e-8, eta_max = 1e4)
-            output = isnothing(w) ? RG.solve(RG.Scholtes(), k, θ; z₀ = zeros(length(case.expected)), options) :
-                     RG.solve(RG.Scholtes(), k, θ; w₀ = w, options)
-            w = output.w
-        end
-        # The 3-player nonlinear case levels off at ‖K₀‖/√m ≈ 1e-8 with a primal error of ≈ 4e-6;
-        # a wiring error (signs, ρ in place of ϵ) would miss by O(1).
-        @test norm(w[k.primal_dims] - case.expected) < 1e-5
-        @test minimum(w[k.nonnegative_dims]) >= 0
-    end
 end

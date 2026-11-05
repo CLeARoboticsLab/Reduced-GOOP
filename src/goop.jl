@@ -120,17 +120,15 @@ function _quasi_gradient_from_terms(
 end
 
 """
-Construct the Reduced KKT system corresponding to a ParametricGOOP.
-
-`complementarity = :interior_point` (default) builds the interior-point system
-(`σ ∘ γ = ρ`) and returns a `GOOPKKTSystem` for `PDIP` (or `InteriorPoint`). `complementarity =
-:scholtes` builds the Scholtes-form system (explicit φ ≥ 0, relaxed `s ∘ γ + u = ρ`)
-and returns a `ScholtesKKTSystem` for `Scholtes`; it is opt-in. See
-`_generate_scholtes_reduced_kkt_system`. Both generate code with FastDifferentiation unless
-`codegen` says otherwise, split into functions of `fd_codegen_chunk_size` expressions (default
-`FD_CODEGEN_CHUNK_SIZE`; pass `typemax(Int)` for one function per block). In both modes, a prioritized constraint h ≥ 0 at level k introduces
-explicit preference slacks s: level k minimizes `sum(s)` subject to `h + s ≥ 0` and
-`s ≥ 0`, and every upper level keeps these inequalities with fresh multipliers.
+Construct the Reduced KKT system corresponding to a ParametricGOOP: the interior-point system
+(5.2), with the relaxed complementarity `σ ∘ γ = ρ`, as a `GOOPKKTSystem` for `PDIP` (or
+`InteriorPoint`). Its Scholtes form is `generate_slacked_scholtes_reduced_kkt_system`. Code is
+generated with FastDifferentiation unless `codegen` says otherwise, split into functions of
+`fd_codegen_chunk_size` expressions (default `FD_CODEGEN_CHUNK_SIZE`; pass `typemax(Int)` for one
+function per block). A prioritized constraint h ≥ 0 at level k introduces explicit preference
+slacks s: level k minimizes `sum(s)` subject to `h + s ≥ 0` and `s ≥ 0`, and every upper level
+keeps these inequalities with fresh multipliers. With `drop_higher_order_terms = true` (quasi),
+every term of ∇Lₖ that would be differentiated more than `quasi_order` times is set to zero.
 """
 function generate_slacked_reduced_kkt_system(
     goop::ParametricGOOP;
@@ -138,24 +136,9 @@ function generate_slacked_reduced_kkt_system(
     backend_options = (;),
     codegen = nothing,
     fd_codegen_chunk_size = nothing,
-    complementarity::Symbol = :interior_point,
     quasi_order::Int = 2,
 )
-    complementarity in (:interior_point, :scholtes) || throw(
-        ArgumentError(
-            "complementarity must be :interior_point or :scholtes, got $complementarity",
-        ),
-    )
-    if complementarity === :scholtes
-        return _generate_scholtes_reduced_kkt_system(
-            goop;
-            drop_higher_order_terms,
-            backend_options,
-            codegen = something(codegen, :fast_differentiation),
-            fd_codegen_chunk_size = something(fd_codegen_chunk_size, FD_CODEGEN_CHUNK_SIZE),
-            quasi_order,
-        )
-    end
+    quasi_order >= 1 || throw(ArgumentError("quasi_order must be >= 1, got $quasi_order"))
     codegen = something(codegen, :fast_differentiation)
     fd_codegen_chunk_size = something(fd_codegen_chunk_size, FD_CODEGEN_CHUNK_SIZE)
     # Symbolic variables for all primals and parameters.
@@ -264,7 +247,7 @@ function generate_slacked_reduced_kkt_system(
                     _push_quasi_lagrangian_term!(lagrangian_terms, sum(preference_slack))
                     _push_quasi_lagrangian_term!(lagrangian_terms, f, λ)
                     _push_quasi_lagrangian_term!(lagrangian_terms, G, γ)
-                    _quasi_gradient_from_terms(lagrangian_terms, vars)
+                    _quasi_gradient_from_terms(lagrangian_terms, vars; truncation_order = quasi_order)
                 else
                     (@timeit TO "symbolic gradient construction" _fast_gradient(L, vars)),
                     QuasiLagrangianTerm[]
@@ -298,7 +281,11 @@ function generate_slacked_reduced_kkt_system(
                     _push_quasi_lagrangian_term!(lagrangian_terms, h)
                     _push_quasi_lagrangian_term!(lagrangian_terms, f, λ)
                     _push_quasi_lagrangian_term!(lagrangian_terms, g, γ)
-                    _quasi_gradient_from_terms(lagrangian_terms, x[Block(player)])
+                    _quasi_gradient_from_terms(
+                        lagrangian_terms,
+                        x[Block(player)];
+                        truncation_order = quasi_order,
+                    )
                 else
                     (@timeit TO "symbolic gradient construction" _fast_gradient(L, x[Block(player)])),
                     QuasiLagrangianTerm[]
@@ -378,7 +365,7 @@ function generate_slacked_reduced_kkt_system(
                     isempty(complementary_slackness) ? nothing : complementary_slackness,
                     ϕ,
                 )
-                _quasi_gradient_from_terms(lagrangian_terms, vars)
+                _quasi_gradient_from_terms(lagrangian_terms, vars; truncation_order = quasi_order)
             else
                 (@timeit TO "symbolic gradient construction" _fast_gradient(L, vars)),
                 QuasiLagrangianTerm[]
@@ -404,7 +391,7 @@ function generate_slacked_reduced_kkt_system(
                     isempty(complementary_slackness) ? nothing : complementary_slackness,
                     ϕ,
                 )
-                _quasi_gradient_from_terms(lagrangian_terms, vars)
+                _quasi_gradient_from_terms(lagrangian_terms, vars; truncation_order = quasi_order)
             else
                 (@timeit TO "symbolic gradient construction" _fast_gradient(L, vars)),
                 QuasiLagrangianTerm[]
@@ -490,20 +477,19 @@ function generate_slacked_reduced_kkt_system(
         innermost_stationarity_dual_dims,
         nonnegative_dims,
         kind = :reduced,
-        complementarity,
+        complementarity = :interior_point,
         backend_options,
         codegen,
         fd_codegen_chunk_size,
     )
 end
 
-"Construct the Reduced Quasi-KKT system corresponding to a ParametricGOOP."
+"Construct the Reduced Quasi-KKT system corresponding to a ParametricGOOP, truncated after `quasi_order` derivatives."
 function generate_slacked_quasi_kkt_system(
     goop::ParametricGOOP;
     backend_options = (;),
     codegen = nothing,
     fd_codegen_chunk_size = nothing,
-    complementarity::Symbol = :interior_point,
     quasi_order::Int = 2,
 )
     generate_slacked_reduced_kkt_system(
@@ -512,7 +498,6 @@ function generate_slacked_quasi_kkt_system(
         backend_options,
         codegen,
         fd_codegen_chunk_size,
-        complementarity,
         quasi_order,
     )
 end
@@ -1056,9 +1041,10 @@ function initialize_scholtes!(
 end
 
 """
-Construct the Reduced KKT system of a ParametricGOOP in Scholtes form (`complementarity =
-:scholtes` of `generate_slacked_reduced_kkt_system`), with the variables, names and order of the
-interior-point system less its slacks σ. The Lagrangians are those of the interior-point system,
+The Scholtes engine's own Reduced KKT system of a ParametricGOOP in Scholtes form (a
+`ScholtesKKTSystem` for `Scholtes`, kept for the engine's tests while the engine remains;
+`generate_slacked_scholtes_reduced_kkt_system` builds the Scholtes system as a `GOOPKKTSystem`), with
+the variables, names and order of the interior-point system less its slacks σ. The Lagrangians are those of the interior-point system,
 except that the term of the lower levels' complementarity is `-ϕᵀ(ρ𝟙 - [Gₘ ⊙ γₘ]ₘ)` with
 `ϕ ≥ 0`. The rows are the stationarity and equality rows F and the complementarity blocks a
 (every level's G, then every `ρ𝟙 - Gₘ ⊙ γₘ`) and b (their duals γ, then ϕ), whose level pairs the
@@ -1424,8 +1410,7 @@ g, hₘ + sₘ and sₘ written as equalities with nonnegative slacks σ (σₚ 
 (g − σₖ = 0), every product row is written with σₖ in place of g, and every product equals
 ρ. At ρ = 0 and σₖ = g its residual is the exact system's. Solve it down a ρ schedule.
 
-Returns a `GOOPKKTSystem` (`Scholtes()` solves it through `_scholtes_engine_system` until solver
-(2) reads it directly).
+Returns a `GOOPKKTSystem`, for `ProjectedLM`, or for `PDIP` with `:perturbed`.
 """
 function generate_slacked_complete_kkt_system(
     goop::ParametricGOOP;

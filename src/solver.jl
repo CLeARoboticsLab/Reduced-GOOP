@@ -1625,7 +1625,7 @@ itself, kept in `normal_equations` from one step to the next. Returns `(; fallba
 when the step fell back to the `:svd` step (`:sparseQR_Jᵀ` with J without full row rank, or a singular or
 failed factorization), else 0; `η` is the η the step used (`:normal` raises it when its factorization fails).
 """
-#TODO: Same treatment (as :normal) for :klu and :ldl: Fill K in place and reuse symbolic factorization 
+#TODO: Same treatment (as :normal) for :klu and :ldl: Fill K in place and reuse symbolic factorization (https://klu.juliasparse.org/dev/)
 function _newton_step!(δz, J, F, linear_solver, η, normal_equations = _normal_equations(J, linear_solver))
     m, n = size(J)
     if linear_solver === :svd
