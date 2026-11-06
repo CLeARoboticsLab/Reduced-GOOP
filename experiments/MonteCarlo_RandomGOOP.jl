@@ -5,7 +5,7 @@ stage), Fig 3 (local convergence) and Fig 4 (‖z_complete − z_reduced‖₂).
 so they describe the same problems.
 
 For every objective class, number of preference levels K and sampled instance, solve from z = 0, by
-Algorithm 5.1 (`solve(PDIP(), …)` with the exact pinv, linear_solver = :svd) down
+Algorithm 5.1 (`solve(PDIP(), …)` with `linear_solver`, :klu by default) down
 `rho_schedule`:
  1. the ρ-perturbed REDUCED KKT system (5.2), and
  2. for K in `complete_levels`, the ρ-perturbed COMPLETE KKT system (6.1), using nothing from the
@@ -197,8 +197,8 @@ instance_inputs(instance, settings) =
 """
 Default experiment settings, grouped by purpose; a setting that MonteCarlo_Intersection also has uses
 its name. Replace entries with `run(overrides = (; num_instances = 10))`. Saved verbatim in results.jls.
-The solver is the paper's and has no settings beyond these: Algorithm 5.1 with the exact pinv
-(stage_options).
+The solver is the paper's, Algorithm 5.1 (stage_options); beyond the stage tolerances its one setting is
+`linear_solver`.
 """
 default_settings() = (;
     # Monte Carlo
@@ -209,7 +209,7 @@ default_settings() = (;
     # Cosh code generation time grows fast with K: its systems at K = 5, 6 do not build in reasonable time.
     num_levels=(; quadratic=2:6, nonquadratic=2:4),
     # K whose complete system is built, per class (levels_for); other K solve only the reduced system.
-    # Quadratic K = 6 builds none: each Newton step there is a dense pinv of a 3248 × 3248 Jacobian
+    # Quadratic K = 6 builds none: with :svd each Newton step there is a dense pinv of a 3248 × 3248 Jacobian
     # (3–6 s), ≈ 5–9 h for the 100 instances.
     complete_levels=(; quadratic=2:5, nonquadratic=2:4),
     # Problem (module docstring)
@@ -229,6 +229,7 @@ default_settings() = (;
     rho_schedule = [1.0, 1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9, 1e-10, 1e-11, 1e-12], # both systems
     #! format: on
     max_inner_iters=1000,                        # t_max, Newton steps per ρ stage
+    linear_solver=:klu,                          # PDIPOptions.linear_solver: :klu (Levenberg–Marquardt, η = 1e-6) or :svd (the exact pinv)
     epsilon_0=1e-10,                             # ε₀, the success tolerance on the unperturbed ‖K₀‖₂
     epsilon_tight=1e-11,                         # ε_ρ at the stages in tight_rhos (Fig 3's); ε_ρ = ρ at the others
     tight_rhos=[1.0, 0.1],
@@ -495,7 +496,7 @@ function run(; overrides=(;))
         "N = $(settings.num_players), n = $(settings.primal_dimension). Output: $directory",
     )
     println(
-        "Algorithm 5.1 (:pdip, :svd): stage ρ to ‖K_ρ‖₂ < ρ ($(MCI.compact(settings.epsilon_tight)) at ρ ∈ $(settings.tight_rhos)); ",
+        "Algorithm 5.1 (PDIP, $(settings.linear_solver)): stage ρ to ‖K_ρ‖₂ < ρ ($(MCI.compact(settings.epsilon_tight)) at ρ ∈ $(settings.tight_rhos)); ",
         "the solve stops, accepted, once ‖K₀‖₂ < ε₀ = $(MCI.compact(settings.epsilon_0))",
     )
     # Untimed warm-up build, discarded: a session's first build also compiles the builders, which made the
@@ -752,7 +753,7 @@ function print_kkt_stage(;
 end
 
 """
-PDIPOptions of one ρ stage of Algorithm 5.1 (the exact pinv, linear_solver = :svd), in plain ‖·‖₂: the stage
+PDIPOptions of one ρ stage of Algorithm 5.1 (with settings.linear_solver), in plain ‖·‖₂: the stage
 stops at ‖K_ρ‖₂ < ε_ρ = ρ (epsilon_tight at the stages in `tight_rhos`), and the solver's ‖K₀‖₂ < epsilon_0
 test, before every Newton step, stops the whole solve. The histories make the stage's trace (stage_history).
 """
@@ -763,7 +764,7 @@ function stage_options(settings, ρ)
         max_inner_iters=settings.max_inner_iters,
         tol=settings.epsilon_0,
         tol_inner=tight ? settings.epsilon_tight : ρ,
-        linear_solver=:svd,
+        linear_solver=settings.linear_solver,
         record_convergence=true,
     )
 end
@@ -794,7 +795,7 @@ function solve_algorithm51(formulation, problem, θ, initial_guess, settings; co
     stages = Any[]
     best = nothing
     system = formulation.name === :interior_point ? "reduced (5.2)" : "complete :$(formulation.name)"
-    print_kkt_header("$context | $system | Algorithm 5.1 (PDIP, :svd)"; io)
+    print_kkt_header("$context | $system | Algorithm 5.1 (PDIP, $(settings.linear_solver))"; io)
     for ρ in settings.rho_schedule
         stage_initial = copy(y)
         options = stage_options(settings, ρ)
