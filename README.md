@@ -1,7 +1,7 @@
 # ReducedGOOP.jl
 
-[!\[CI\](https://github.com/CLeARoboticsLab/Reduced-GOOP/actions/workflows/test.yml/badge.svg)](https://github.com/CLeARoboticsLab/Reduced-GOOP/actions/workflows/test.yml)
-[!\[License\](https://img.shields.io/badge/license-BSD-new)](https://opensource.org/license/bsd-3-clause)
+[![CI](https://github.com/CLeARoboticsLab/Reduced-GOOP/actions/workflows/test.yml/badge.svg)](https://github.com/CLeARoboticsLab/Reduced-GOOP/actions/workflows/test.yml)
+[![License](https://img.shields.io/badge/license-BSD--3--Clause-blue)](https://opensource.org/license/bsd-3-clause)
 
 This repository contains the implementation accompanying the paper:
 
