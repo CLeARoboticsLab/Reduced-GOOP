@@ -206,12 +206,12 @@ default_settings() = (;
     rng_seed=123,                                # (class, K) samples from Xoshiro(rng_seed + 100·class index + K)
     objective_classes=(:quadratic, :nonquadratic), # names in objective_classes(settings)
     # K, the preference levels of every player, per class (levels_for; a range applies to every class).
-    # Cosh code generation time grows fast with K: its systems at K = 5, 6 do not build in reasonable time.
-    num_levels=(; quadratic=2:6, nonquadratic=2:4),
-    # K whose complete system is built, per class (levels_for); other K solve only the reduced system.
-    # Quadratic K = 6 builds none: with :svd each Newton step there is a dense pinv of a 3248 × 3248 Jacobian
-    # (3–6 s), ≈ 5–9 h for the 100 instances.
-    complete_levels=(; quadratic=2:5, nonquadratic=2:4),
+    # Cosh code generation time grows fast with K: the nonquadratic reduced system takes hours to build and
+    # compile at K = 5 and most of a day at K = 6, and may need more than 16 GB there.
+    num_levels=(; quadratic=2:6, nonquadratic=2:6),
+    # K whose complete system is built, per class (levels_for); other K solve only the reduced system. The
+    # nonquadratic complete system is left out at K = 5, 6, whose builds would take far longer still.
+    complete_levels=(; quadratic=2:6, nonquadratic=2:4),
     # Problem (module docstring)
     num_players=4,                               # N
     primal_dimension=10,                         # n, primal variables per player
