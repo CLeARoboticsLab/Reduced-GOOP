@@ -1,7 +1,7 @@
 #=
-	Common dynamics functions for experiments
+    Common dynamics functions for experiments
 
-	This file contains shared dynamics models used across experiments.
+    This file contains shared dynamics models used across experiments.
 =#
 
 function unflatten_trajectory(z, state_dimension, control_dimension)
@@ -14,7 +14,7 @@ function unflatten_trajectory(z, state_dimension, control_dimension)
 end
 
 """
-	unicycle_dynamics(z, t; Δt, state_dimension=4, control_dimension=2)
+    unicycle_dynamics(z, t; Δt, state_dimension=4, control_dimension=2)
 
 Kinematic unicycle dynamics constraint (nonlinear).
 State: x = [x, y, v, ψ] (position, speed, heading)
@@ -46,7 +46,7 @@ function unicycle_step(x, u; Δt)
 end
 
 """
-	bicycle_dynamics(z, t; Δt, L=1.0, state_dimension=4, control_dimension=2)
+    bicycle_dynamics(z, t; Δt, L=1.0, state_dimension=4, control_dimension=2)
 
 Kinematic bicycle dynamics constraint (nonlinear).
 State: x = [x, y, v, ψ] (position, speed, heading)
@@ -79,7 +79,7 @@ function bicycle_step(x, u; Δt, L = 1.0)
 end
 
 """
-	double_integrator_2d(z, t; Δt, state_dimension=4, control_dimension=2)
+    double_integrator_2d(z, t; Δt, state_dimension=4, control_dimension=2)
 
 2D double integrator dynamics constraint (linear).
 State: x = [x, y, vx, vy] (position, velocity)
@@ -127,7 +127,7 @@ function planar_double_integrator_step(x, u; Δt)
 end
 
 """
-	single_integrator_2d(z, t; Δt, state_dimension=2, control_dimension=2)
+    single_integrator_2d(z, t; Δt, state_dimension=2, control_dimension=2)
 
 2D single integrator dynamics constraint (linear).
 State: x = [x, y] (position)
@@ -147,7 +147,7 @@ function single_integrator_2d(z, t; Δt, state_dimension = 2, control_dimension 
 end
 
 """
-	single_integrator_3d(z, t; Δt, state_dimension=3, control_dimension=3)
+    single_integrator_3d(z, t; Δt, state_dimension=3, control_dimension=3)
 
 3D single integrator dynamics constraint (linear).
 State: x = [x, y, z] (position)

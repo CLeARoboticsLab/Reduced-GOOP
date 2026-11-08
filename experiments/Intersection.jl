@@ -85,7 +85,7 @@ function get_setup(
     end
 
     function squared_violation(h)
-        "h(x) ≥ 0	<=> (min(h(x), 0))^2 = 0"
+        "h(x) ≥ 0   <=> (min(h(x), 0))^2 = 0"
         return (min(h, 0))^2
     end
 
