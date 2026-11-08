@@ -18,7 +18,8 @@ With --local-convergence, <run_dir> is instead a RandomGOOP_local_convergence ru
 script writes into <run_dir>/figures/:
   local_convergence_<mode>.{png,pdf}   manuscript Fig 3: ‖K_ρ‖₂ of the runs from the starts around y*_ρ, at
                                        ρ = 1.0 and 0.1, one row per class, against the Newton step from the
-                                       start, with the quadratic reference; one figure per sampling mode
+                                       start (every run averaged at every step, a converged run held at its last residual), with the quadratic
+                                       reference from step 2; one figure per sampling mode
   fig2_sec6.pdf                        the copy of --mode's figure under the manuscript's file name
 
 Table 2 cells: sizes from the manuscript's formulas (Props. thm:quadratic-growth-reduced-kkt and
@@ -47,7 +48,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
-from matplotlib.ticker import MaxNLocator  # noqa: E402
+from matplotlib.ticker import MaxNLocator, MultipleLocator  # noqa: E402
 import numpy as np  # noqa: E402
 
 # Colors sampled from manuscript/trace.png and manuscript/exp4_kkt_equiv.pdf. Blue/crimson: OKLab ΔE×100
@@ -275,17 +276,9 @@ def write_table3(run, reduced, formulation, out_dir):
 
 # ── Fig 3: local convergence around a solution (RandomGOOP_local_convergence.jl) ──
 
-# A curve's floor is its first step within FLOOR_DECADES of its minimum; the quadratic reference starts two
-# steps before the floor of the mean curve.
-FLOOR_DECADES = 0.5
 # Legend label of the dashed reference; the caption gives its formula, ‖K_ρ(y + Δy_ρ)‖₂ = ‖K_ρ(y)‖₂², which
 # is too long for the legend row and would name only the reduced system.
 QUADRATIC_REFERENCE = "quadratic reference"
-
-
-def floor_iteration(curve):
-    """Index of the curve's first entry within FLOOR_DECADES of its minimum."""
-    return int(np.argmax(curve <= curve.min() + FLOOR_DECADES))
 
 
 # Figs 3 and 4 are drawn at their printed width, the manuscript's text width (svjour3 smallextended,
@@ -309,8 +302,8 @@ PRINT_STYLE = {
 
 # The panels: the reduced and the complete system at ρ = 1 and 0.1, one row per class.
 LOCAL_PANELS = (("reduced", 1.0), ("reduced", 0.1), ("complete", 1.0), ("complete", 0.1))
-# A step is drawn while at least this many runs (or all, if fewer) still have an iterate there.
-LOCAL_MIN_RUNS = 3
+# The step of the mean the quadratic reference starts from (your call, 2026-11-08: iteration 2 in every panel).
+REFERENCE_START = 2
 
 
 def local_curves(rows, mode, class_name, system, rho):
@@ -326,24 +319,25 @@ def local_curves(rows, mode, class_name, system, rho):
 
 
 def plot_local_panel(ax, curves, color, label):
-    # Mean ± std at each step from the start, over the runs that have an iterate there (a run stops once it
-    # converges), drawn while at least LOCAL_MIN_RUNS do: the steps form a prefix, since no run starts late.
+    # Mean ± std at each step from the start over ALL the runs: a run stops once it converges and is held at its
+    # last residual from then on, so the runs that finish early do not leave the average (which would otherwise
+    # rise or stall at the steps where they drop out).
     longest = max(len(c) for c in curves)
-    columns = [[c[s] for c in curves if s < len(c)] for s in range(longest)]
-    x = np.array([s for s, v in enumerate(columns) if len(v) >= min(len(curves), LOCAL_MIN_RUNS)])
-    mean = np.array([np.mean(columns[s]) for s in x])
-    std = np.array([np.std(columns[s]) for s in x])
+    x = np.arange(longest)
+    columns = [[c[min(s, len(c) - 1)] for c in curves] for s in x]
+    assert all(len(v) == len(curves) for v in columns)
+    mean = np.array([np.mean(v) for v in columns])
+    std = np.array([np.std(v) for v in columns])
     ax.fill_between(x, mean - std, mean + std, color=color, alpha=0.25, linewidth=0.4, edgecolor=color)
     ax.plot(x, mean, color=color, linewidth=1.1, marker="o", markersize=2.2, label=label)
-    # Quadratic-rate reference r_{k+1} = r_k²: from the mean two steps before the mean's floor
-    # (its first step within FLOOR_DECADES of its minimum), the order of magnitude doubles each step, drawn to
-    # the last step; added as an artist, so the shared y axis clips it.
-    start = max(floor_iteration(mean) - 2, 0)
-    if mean[start] < 0 and len(x) - start >= 2:
+    # Quadratic-rate reference r_{k+1} = r_k² from the mean at step REFERENCE_START: the order of magnitude doubles
+    # each step, drawn to the last step; added as an artist, so the shared y axis clips it.
+    start = REFERENCE_START
+    if start < len(x) - 1 and mean[start] < 0:
         reference = mean[start] * 2.0 ** np.arange(len(x) - start)
         ax.add_artist(Line2D(x[start:], reference, color="#555555", linestyle="--", linewidth=0.8, label=QUADRATIC_REFERENCE))
     ax.set_xlim(0, x[-1])
-    ax.xaxis.set_major_locator(MaxNLocator(nbins=4, integer=True))
+    ax.xaxis.set_major_locator(MultipleLocator(1))
     ax.grid(True, color="#b0b0b0", linewidth=0.4, alpha=0.6)
 
 
