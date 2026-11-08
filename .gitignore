@@ -41,3 +41,6 @@ CLAUDE.md
 
 # Python bytecode cache (experiments/RandomGOOP_plotting.py)
 __pycache__/
+
+# The manuscript: its own repo (Overleaf), not tracked here
+manuscript/
