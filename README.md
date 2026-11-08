@@ -193,19 +193,18 @@ continuation.
 
 ## Tests
 
-`test/runtests.jl` exercises the reduced and quasi KKT formulations with `PDIP`
-(Algorithm 5.1, the regularized `:klu` step), and includes `test/solver.jl` (the two solvers, `PDIP` and
-`ProjectedLM`), `test/complete_kkt.jl` (the complete systems) and
-`test/scholtes.jl` (the Scholtes system, from ScholtesReducedGOOP.jl's tests).
+`test/runtests.jl` holds the suite, one testset per behavior; `test/problems.jl` holds the test problems
+(known-solution benchmark families, the small problems of ScholtesReducedGOOP.jl's tests, a coupled game
+with a rank-deficient J, one-variable complete-system problems) and the helpers that build and solve them.
 
-| Benchmark family              | What is tested                                                                                                                                                                       |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Known-solution benchmarks     | Single-player and coupled three-player cases with quadratic/linear and nonlinear/nonlinear variants.                                                                                 |
-| Complete KKT smoke test       | Agreement between complete and reduced formulations on an unconstrained quadratic problem.                                                                                           |
-| Code-generation parity        | Agreement between Symbolics and FastDifferentiation residual/Jacobian evaluators.                                                                                                    |
-| Warm-start tests              | Full-vector `PDIP` warm starts.                                                                                                                                                            |
-| Solvers (`test/solver.jl`)    | The Newton step of every linear solver, the η schedule, Algorithm 5.1 on the perturbed reduced and complete systems, termination reasons, option checks.                         |
-| Scholtes (`test/scholtes.jl`) | The Scholtes system's rows, prioritized preference slacks, the quasi system, starts, solves with every linear solver, exact inequalities at the solution, and several points of a non-unique answer by `solve_multi`. |
+| Testset                    | What is tested                                                                                     |
+| -------------------------- | -------------------------------------------------------------------------------------------------- |
+| Reduced and quasi systems  | Known solutions by `PDIP` (one or three players, one to three levels), dual-coordinate metadata, the quasi order. |
+| Scholtes system            | Rows, unknowns and prioritized preference slacks, the quasi form, `initialize_scholtes!`, `ProjectedLM` solves and exact inequalities at the solution. |
+| Complete systems           | The manuscript's equations (2.12)–(2.17) and (6.1), K ≥ 2, the sign box, `ProjectedLM` on `:exact`, agreement with the reduced system. |
+| Solvers                    | The Newton step of every linear solver, the η schedule, stages, termination reasons, starts and option checks, warm starts. |
+| Code generation            | Symbolics and FastDifferentiation give the same residuals and Jacobians.                            |
+| Multistart                 | `solve_multi` on a non-unique answer and from `ball_starts`; strictly feasible random starts.      |
 
 The tests verify convergence status, residual tolerances, known primal
 solutions, active/inactive constraint behavior, and linear-solver robustness.
