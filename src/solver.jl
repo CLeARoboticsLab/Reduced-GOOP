@@ -60,8 +60,9 @@ end
 
 Algorithm 5.1 of manuscript/main.pdf: Newton's method on K_ρ(z) = 0 for each relaxation ρ, with the
 step J δz = −K_ρ (J = ∇K_ρ) and a line search that keeps `kkt.nonnegative_dims` positive: the slacks σ
-and the inequality duals γ, of the reduced or the complete system. The preference slacks s are not
-bounded directly: s ≥ 0 is a row of G (s − σ = 0).
+and the inequality duals γ, of the reduced or the `:perturbed` complete system. The preference slacks s
+are not bounded directly: s ≥ 0 is a row of G (s − σ = 0). The Scholtes and `:exact` complete systems are
+refused: their exact products have no interior.
 
 `z₀` is a full iterate (length `kkt.variable_dimension`, positive on `nonnegative_dims`), 
 a primal one (length of `kkt.primal_dims`; then s, σ and γ start at 1 and every other variable at 0), or
@@ -98,6 +99,7 @@ function solve(
     η > 0 || throw(ArgumentError("η must be positive, got $η"))
     isempty(ρ_schedule) && throw(ArgumentError("ρ_schedule is empty"))
     kkt.kind === :scholtes && throw(ArgumentError("PDIP cannot solve the Scholtes system: its exact products σ̂ ⊙ ϕ = 0 have no interior. Use ProjectedLM."))
+    kkt.complementarity === :exact && throw(ArgumentError("PDIP cannot solve the exact complete system: its products σ ⊙ γ = 0 have no interior. Use complementarity = :perturbed, or ProjectedLM."))
     0 < β < 1 && 0 < min_step < 1 ||
         throw(ArgumentError("β and min_step must lie in (0, 1), got $β and $min_step"))
 

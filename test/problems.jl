@@ -22,7 +22,7 @@ Benchmark Problem Families
 --------------------------
 
 Small problems whose solutions and active sets are known in closed form, solved by PDIP on the reduced and
-quasi systems (runtests.jl, "Reduced and quasi systems").
+quasi systems (runtests.jl, 3.1).
 
 Notation: x_i is player i's decision vector, and x_{i,j} is the j-th decision
 variable of player i. In code this is x[Block(i)][j].

@@ -193,18 +193,16 @@ continuation.
 
 ## Tests
 
-`test/runtests.jl` holds the suite, one testset per behavior; `test/problems.jl` holds the test problems
-(known-solution benchmark families, the small problems of ScholtesReducedGOOP.jl's tests, a coupled game
-with a rank-deficient J, one-variable complete-system problems) and the helpers that build and solve them.
+`test/runtests.jl` holds the suite in four parts; `test/problems.jl` holds the test problems (known-solution
+benchmark families, the small problems of ScholtesReducedGOOP.jl's tests, a coupled game with a rank-deficient
+J, one-variable complete-system problems) and the helpers that build and solve them.
 
-| Testset                    | What is tested                                                                                     |
-| -------------------------- | -------------------------------------------------------------------------------------------------- |
-| Reduced and quasi systems  | Known solutions by `PDIP` (one or three players, one to three levels), dual-coordinate metadata, the quasi order. |
-| Scholtes system            | Rows, unknowns and prioritized preference slacks, the quasi form, `initialize_scholtes!`, `ProjectedLM` solves and exact inequalities at the solution. |
-| Complete systems           | The manuscript's equations (2.12)–(2.17) and (6.1), K ≥ 2, the sign box, `ProjectedLM` on `:exact`, agreement with the reduced system. |
-| Solvers                    | The Newton step of every linear solver, the η schedule, stages, termination reasons, starts and option checks, warm starts. |
-| Code generation            | Symbolics and FastDifferentiation give the same residuals and Jacobians.                            |
-| Multistart                 | `solve_multi` on a non-unique answer and from `ball_starts`; strictly feasible random starts.      |
+| Part            | What is tested                                                                                          |
+| --------------- | ------------------------------------------------------------------------------------------------------- |
+| 1. Construction | Each generator builds the system the manuscript defines: rows, unknowns, index sets, Jacobians, the quasi truncation, the sign box, and Symbolics/FastDifferentiation code generation, without a solver. |
+| 2. Mechanics    | What `PDIP` and `ProjectedLM` do at each step: the Newton step of every linear solver, the line searches, the η schedule, stages and termination, reported residuals, accepted and refused starts and options, warm starts. |
+| 3. Solutions    | Each system, solved by its solver, reaches the right answer: reduced and quasi by `PDIP` (known solutions), reduced and `:perturbed` complete on a coupled game, Scholtes by `ProjectedLM`, complete by `ProjectedLM` and against the reduced system. |
+| 4. Multistart   | `solve_multi` on a non-unique answer and from `ball_starts`; strictly feasible random starts.          |
 
 The tests verify convergence status, residual tolerances, known primal
 solutions, active/inactive constraint behavior, and linear-solver robustness.
