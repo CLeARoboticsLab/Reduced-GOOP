@@ -2,11 +2,12 @@ module SolverTests
 
 # The two solvers of src/solver.jl, solve(PDIP(), …) (Algorithm 5.1) and solve(ProjectedLM(), …) (the
 # projected Levenberg–Marquardt method), and the pieces they share (_newton_step!, _gain_ratio,
-# _scheduled_η), on the reduced (5.2), complete (:exact, :perturbed) and Scholtes systems. The Scholtes
+# _scheduled_η), on the reduced (5.2), complete (:exact, :perturbed) and Scholtes systems, and
+# solve_multi from ball_starts (src/multistart.jl). The Scholtes
 # system's own tests, solved by ProjectedLM, are in test/scholtes.jl; the complete systems' in
 # test/complete_kkt.jl.
 
-using Test, ReducedGOOP, BlockArrays, LinearAlgebra, SparseArrays
+using Test, ReducedGOOP, BlockArrays, LinearAlgebra, Random, SparseArrays
 include(joinpath(@__DIR__, "benchmark_problems.jl"))
 const RG = ReducedGOOP
 const SOLVERS = ((RG.PDIP(), RG.PDIPOptions), (RG.ProjectedLM(), RG.ProjectedLMOptions))
@@ -300,6 +301,51 @@ end
             linear_solver, η = r.η, record_convergence = true)
         @test only(RG.solve(RG.ProjectedLM(), k, Float64[]; z₀ = r.z, options).η_history) == r.η
     end
+end
+
+@testset "solve_multi from ball_starts: a fixed-ρ study around a solution" begin
+    goop = coupled_problem(d -> cosh(d) - 1)
+    k = RG.generate_slacked_reduced_kkt_system(goop)
+    θ = zeros(k.parameter_dimension)
+    options = RG.PDIPOptions(; ρ_schedule = [0.1], max_inner_iters = 1000, tol = 0.0, tol_inner = 1e-11,
+        linear_solver = :klu, record_convergence = true)
+    # Held at one ρ, a solve never meets the ‖K₀‖ test, so it is accepted on its inner tolerance.
+    accept(r) = r.termination_reason === :inner_tolerance_reached
+    center = RG.solve(RG.PDIP(), k, θ; z₀ = zeros(4), options).z # the stage's solution y*_ρ
+    others = setdiff(1:(k.variable_dimension), k.primal_dims)
+    for mode in (:primal_only, :whole_iterate)
+        starts = RG.ball_starts(k, center, 10; radius = 0.5, mode, rng = Xoshiro(1))
+        @test length(starts) == 10
+        @test all(z -> norm(z - center) <= 0.5 + 1e-12, starts)
+        @test all(z -> minimum(z[k.nonnegative_dims]) > 0, starts)
+        mode === :primal_only && @test all(z -> z[others] == center[others], starts)
+        S = RG.solve_multi(RG.PDIP(), k, θ, starts; options, accept)
+        @test S.rejected == 0 && S.starts == starts
+        # The equilibrium is unique: every start lands on it, and the dedupe keeps one point.
+        @test length(S.points) == 1 && all(==(1), S.assignment)
+        @test norm(only(S.points) - center[k.primal_dims]) < 1e-8
+        # One ‖K_ρ‖ per stopping test: the start, then one per Newton step.
+        @test all(r -> length(r.norm_K_ρ_history) == r.newton_steps + 1, S.results)
+    end
+    # The same rng state gives two systems with as many primal coordinates the same primal offsets (recovered
+    # as start − center, so up to the round-off of adding them to different centers).
+    kc = RG.generate_slacked_complete_kkt_system(goop; complementarity = :perturbed)
+    center_c = RG.solve(RG.PDIP(), kc, θ; z₀ = zeros(4), options).z
+    offsets(k, c) = [z[k.primal_dims] - c[k.primal_dims] for z in RG.ball_starts(k, c, 3; rng = Xoshiro(2))]
+    @test all(map((a, b) -> isapprox(a, b; atol = 1e-14), offsets(k, center), offsets(kc, center_c)))
+    # Primal starts (PDIP fills the rest), the default acceptance (`status`), and a rejection.
+    pdip = RG.PDIPOptions(; linear_solver = :klu)
+    S = RG.solve_multi(RG.PDIP(), k, θ, [zeros(4), fill(0.2, 4)]; options = pdip)
+    @test S.rejected == 0 && length(S.points) == 1
+    @test RG.solve_multi(RG.PDIP(), k, θ, [zeros(4)]; options = pdip, accept = r -> false).rejected == 1
+    # A full start off the sign box is rejected; a start of neither length is an error.
+    @test RG.solve_multi(RG.PDIP(), k, θ, [zeros(k.variable_dimension)]; options = pdip).rejected == 1
+    @test_throws ArgumentError RG.solve_multi(RG.PDIP(), k, θ, [zeros(3)]; options = pdip)
+    @test_throws ArgumentError RG.ball_starts(k, center, 1; mode = :box)
+    @test_throws ArgumentError RG.ball_starts(k, center[1:3], 1)
+    @test_throws ArgumentError RG.ball_starts(k, center, 1; radius = 0.0)
+    # Far beyond the sign box no draw keeps it positive.
+    @test_throws ArgumentError RG.ball_starts(k, center, 1; radius = 1e6, mode = :whole_iterate, max_tries = 10)
 end
 
 end

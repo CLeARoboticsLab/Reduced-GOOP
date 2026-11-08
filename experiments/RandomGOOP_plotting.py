@@ -1,21 +1,25 @@
 """
 Figures and tables for the manuscript's §6 from one MonteCarlo_RandomGOOP run directory.
 
-Reads the CSV files that MonteCarlo_RandomGOOP.export_csv writes (settings, sizes, setup, solves, stages,
-traces) and writes into <run_dir>/figures/, with <pair> = interior_point_perturbed (the reduced (5.2) and
+Reads the CSV files that MonteCarlo_RandomGOOP.export_csv writes (settings, sizes, setup, solves, stages)
+and writes into <run_dir>/figures/, with <pair> = interior_point_perturbed (the reduced (5.2) and
 the complete :perturbed system):
   timing_per_rho_<pair>.{png,pdf}      manuscript Fig 2: Newton steps (top row) and solve seconds (bottom
                                        row) per ρ stage, mean ± std after the 2.5 % trimming, one column per class
-  fig2_<pair>.{png,pdf}                manuscript Fig 3: convergence traces at ρ = 1.0 and 0.1, one row per
-                                       class, each solve aligned at its last iterate, over its last five
-                                       Newton steps, with the quadratic reference from two steps before
   fig3_<pair>.{png,pdf}                manuscript Fig 4: histograms of log10 ‖z_complete − z_reduced‖₂,
   fig3_<pair>_<class>.pdf              one panel per class; and one file per class
   table2_<pair>.tex, table2.tex        Table 2 (tab:kkt-compare-levels) in the manuscript's layout
   table3_setup_<pair>.tex, table3.tex  Table 3 (tab:setup-time)
-  timing_per_rho_sec6.pdf, fig2_sec6.pdf, fig3_sec6.pdf
-                                       copies of Figs 2–4 under the manuscript's file names (MANUSCRIPT_FIGURES)
+  timing_per_rho_sec6.pdf, fig3_sec6.pdf
+                                       copies of Figs 2 and 4 under the manuscript's file names (MANUSCRIPT_FIGURES)
   timing_table.tex, timing_table.md    build, compile and solve time of each system, per class and K
+
+With --local-convergence, <run_dir> is instead a RandomGOOP_local_convergence run (its traces.csv), and the
+script writes into <run_dir>/figures/:
+  local_convergence_<mode>.{png,pdf}   manuscript Fig 3: ‖K_ρ‖₂ of the runs from the starts around y*_ρ, at
+                                       ρ = 1.0 and 0.1, one row per class, against the Newton step from the
+                                       start, with the quadratic reference; one figure per sampling mode
+  fig2_sec6.pdf                        the copy of --mode's figure under the manuscript's file name
 
 Table 2 cells: sizes from the manuscript's formulas (Props. thm:quadratic-growth-reduced-kkt and
 thm:exponential-growth-complete-kkt); solve time as mean ± standard deviation of the accepted solves after
@@ -23,9 +27,12 @@ trimming the top and bottom 2.5 %. A K the class does not run is blank; a system
 (complete_levels) is "--", and one with no accepted solve "Failed"; a cell with fewer than all solves
 accepted gets a dagger, and the counts are listed in a comment below the table.
 
-Usage (MonteCarlo_RandomGOOP.run calls this at the end, through plot_results):
+Usage (MonteCarlo_RandomGOOP.run and RandomGOOP_local_convergence.run call this at the end, through
+plot_results):
     uv run --no-project --isolated --with matplotlib --with numpy python -I experiments/RandomGOOP_plotting.py \
-        <run_dir> [--fig-levels quadratic=4,nonquadratic=3] [--all-solves]
+        <run_dir> [--fig-levels quadratic=4,nonquadratic=3]
+    uv run --no-project --isolated --with matplotlib --with numpy python -I experiments/RandomGOOP_plotting.py \
+        --local-convergence <run_dir> [--mode whole_iterate]
 """
 
 import argparse
@@ -56,8 +63,10 @@ SHORT = {"reduced_interior_point": "interior_point"}
 # The manuscript's tables and figures: R = the paper's (5.2), C = the ρ-perturbed complete system (6.1).
 MAIN_PAIR = ("reduced_interior_point", "perturbed")
 # The manuscript's file names for MAIN_PAIR's figures (manuscript/6_experiments.tex): Fig 2 is the per-ρ
-# figure; Figs 3 and 4 keep the file names of their earlier numbers.
-MANUSCRIPT_FIGURES = {"timing_per_rho": "timing_per_rho_sec6.pdf", "fig2": "fig2_sec6.pdf", "fig3": "fig3_sec6.pdf"}
+# figure; Fig 4 keeps the file name of its earlier number. Fig 3 (fig2_sec6.pdf, its earlier number too)
+# comes from a local-convergence run (--local-convergence, LOCAL_FIGURE).
+MANUSCRIPT_FIGURES = {"timing_per_rho": "timing_per_rho_sec6.pdf", "fig3": "fig3_sec6.pdf"}
+LOCAL_FIGURE = "fig2_sec6.pdf"
 
 plt.rcParams.update(
     {
@@ -101,7 +110,6 @@ def read_run(run_dir):
         "setup": read_rows(run_dir / "setup.csv"),
         "solves": read_rows(run_dir / "solves.csv"),
         "stages": read_rows(run_dir / "stages.csv"),
-        "traces": read_rows(run_dir / "traces.csv"),
     }
 
 
@@ -265,49 +273,24 @@ def write_table3(run, reduced, formulation, out_dir):
     return path
 
 
-# ── Fig 2: convergence traces ────────────────────────────────────────────────
+# ── Fig 3: local convergence around a solution (RandomGOOP_local_convergence.jl) ──
 
-
-def trace_curves(run, class_name, K, system, rho, accepted_only):
-    """log10 ‖K_ρ‖₂ per Newton iteration at stage ρ, one array per solve."""
-    accepted = {
-        int(r["trial"])
-        for r in run["solves"]
-        if r["class"] == class_name and int(r["K"]) == K and system_key(r) == system and r["accepted"] == "true"
-    }
-    by_trial = defaultdict(list)
-    for r in run["traces"]:
-        if r["class"] != class_name or int(r["K"]) != K or system_key(r) != system:
-            continue
-        if not math.isclose(number(r["rho"]), rho, rel_tol=1e-9, abs_tol=1e-15):
-            continue
-        if accepted_only and int(r["trial"]) not in accepted:
-            continue
-        by_trial[int(r["trial"])].append((int(r["iteration"]), number(r["norm_K_ρ"] if "norm_K_ρ" in r else r["raw"])))
-    curves = [np.log10(np.maximum([v for _, v in sorted(points)], 1e-300)) for points in by_trial.values() if points]
-    return curves or None
-
-
-# Fig 2 aligns each trace at the iteration where it first comes within FLOOR_DECADES of its minimum (its
-# floor), so the local convergence of every solve lines up; x runs over ALIGNED_ITERATIONS from there. The
-# last five Newton steps: every stage in Fig 2's panels takes at least five, so each point averages every
-# solve (your call, 2026-11-01).
+# A curve's floor is its first step within FLOOR_DECADES of its minimum; the quadratic reference starts two
+# steps before the floor of the mean curve.
 FLOOR_DECADES = 0.5
-ALIGNED_ITERATIONS = np.arange(-5, 3)
 # Legend label of the dashed reference; the caption gives its formula, ‖K_ρ(y + Δy_ρ)‖₂ = ‖K_ρ(y)‖₂², which
 # is too long for the legend row and would name only the reduced system.
 QUADRATIC_REFERENCE = "quadratic reference"
 
 
 def floor_iteration(curve):
-    """Index of the trace's first iterate within FLOOR_DECADES of its minimum."""
+    """Index of the curve's first entry within FLOOR_DECADES of its minimum."""
     return int(np.argmax(curve <= curve.min() + FLOOR_DECADES))
 
 
-# Fig 2 and Fig 3 are drawn at their printed width, the manuscript's text width (svjour3 smallextended,
-# 119 mm), so their text prints at 6.5–7.5 pt (your calls, 2026-10-29; Fig 2: option A, the same 2 × 4
-# layout). A Fig 2 panel is about 1 in wide, hence one y-label per row, column titles in place of
-# x-labels, and one legend.
+# Figs 3 and 4 are drawn at their printed width, the manuscript's text width (svjour3 smallextended,
+# 119 mm), so their text prints at 6.5–7.5 pt (your calls, 2026-10-29: Fig 3 in a 2 × 4 layout). A Fig 3
+# panel is about 1 in wide, hence one y-label per row, column titles in place of x-labels, and one legend.
 PRINT_WIDTH = 4.55  # inches; the tight bounding box adds ≈ 0.12 in, so the PDF is ≈ 4.68 in wide
 PRINT_STYLE = {
     "font.size": 7.5,
@@ -324,75 +307,92 @@ PRINT_STYLE = {
 }
 
 
-def plot_trace_panel(ax, curves, color, label):
-    # Mean ± std, at each offset from the floor iteration, over the solves that have an iterate there;
-    # offsets where fewer than a tenth of the solves (and fewer than 3, or all if fewer) do are dropped.
-    columns = [[c[floor_iteration(c) + o] for c in curves if 0 <= floor_iteration(c) + o < len(c)] for o in ALIGNED_ITERATIONS]
-    keep = [len(v) >= min(len(curves), max(3, len(curves) // 10)) for v in columns]
-    x = ALIGNED_ITERATIONS[keep]
-    mean = np.array([np.mean(v) for v, k in zip(columns, keep) if k])
-    std = np.array([np.std(v) for v, k in zip(columns, keep) if k])
+# The panels: the reduced and the complete system at ρ = 1 and 0.1, one row per class.
+LOCAL_PANELS = (("reduced", 1.0), ("reduced", 0.1), ("complete", 1.0), ("complete", 0.1))
+# A step is drawn while at least this many runs (or all, if fewer) still have an iterate there.
+LOCAL_MIN_RUNS = 3
+
+
+def local_curves(rows, mode, class_name, system, rho):
+    """log10 ‖K_ρ‖₂ at every Newton step from the start, one array per accepted run."""
+    by_start = defaultdict(list)
+    for r in rows:
+        if r["mode"] != mode or r["class"] != class_name or r["system"] != system:
+            continue
+        if not math.isclose(number(r["rho"]), rho, rel_tol=1e-9):
+            continue
+        by_start[int(r["start"])].append((int(r["step"]), number(r["norm_K_ρ"])))
+    return [np.log10(np.maximum([v for _, v in sorted(points)], 1e-300)) for points in by_start.values()]
+
+
+def plot_local_panel(ax, curves, color, label):
+    # Mean ± std at each step from the start, over the runs that have an iterate there (a run stops once it
+    # converges), drawn while at least LOCAL_MIN_RUNS do: the steps form a prefix, since no run starts late.
+    longest = max(len(c) for c in curves)
+    columns = [[c[s] for c in curves if s < len(c)] for s in range(longest)]
+    x = np.array([s for s, v in enumerate(columns) if len(v) >= min(len(curves), LOCAL_MIN_RUNS)])
+    mean = np.array([np.mean(columns[s]) for s in x])
+    std = np.array([np.std(columns[s]) for s in x])
     ax.fill_between(x, mean - std, mean + std, color=color, alpha=0.25, linewidth=0.4, edgecolor=color)
     ax.plot(x, mean, color=color, linewidth=1.1, marker="o", markersize=2.2, label=label)
-    # Quadratic-rate reference r_{j+1} = r_j²: from the mean at offset -2, the order of magnitude doubles each iteration
-    # (log10 r_{k+1} = 2 log10 r_k), drawn to the last offset in every panel. Added as an artist, it leaves the data
-    # limits, and so the shared y axis, alone: where it falls below the panel's floor (quadratic K = 4, reduced
-    # ρ = 0.1: -16.8 at 0), the axis clips it.
-    start = int(np.argmax(x >= -2))
-    if mean[start] < 0:
-        steps = x[start:]
-        reference = mean[start] * 2.0 ** np.arange(len(steps))
-        if len(steps) >= 2:
-            ax.add_artist(Line2D(steps, reference, color="#555555", linestyle="--", linewidth=0.8, label=QUADRATIC_REFERENCE))
-    # Every panel starts at the window's first offset, also where no solve has an iterate that early.
-    ax.set_xlim(ALIGNED_ITERATIONS[0], x[-1])
+    # Quadratic-rate reference r_{k+1} = r_k²: from the mean two steps before the mean's floor
+    # (its first step within FLOOR_DECADES of its minimum), the order of magnitude doubles each step, drawn to
+    # the last step; added as an artist, so the shared y axis clips it.
+    start = max(floor_iteration(mean) - 2, 0)
+    if mean[start] < 0 and len(x) - start >= 2:
+        reference = mean[start] * 2.0 ** np.arange(len(x) - start)
+        ax.add_artist(Line2D(x[start:], reference, color="#555555", linestyle="--", linewidth=0.8, label=QUADRATIC_REFERENCE))
+    ax.set_xlim(0, x[-1])
     ax.xaxis.set_major_locator(MaxNLocator(nbins=4, integer=True))
     ax.grid(True, color="#b0b0b0", linewidth=0.4, alpha=0.6)
 
 
-def write_fig2(run, reduced, formulation, fig_levels, accepted_only, out_dir):
-    panels = [(reduced, 1.0), (reduced, 0.1), (formulation, 1.0), (formulation, 0.1)]
-    classes = [c for c in CLASS_ORDER if fig_levels.get(c) in levels_run(run, c)]
-    if not classes:
-        print(f"Fig 2 ({SHORT[reduced]}, {formulation}): no class was run at the levels {fig_levels}; skipped")
-        return []
-    with plt.rc_context(PRINT_STYLE):
-        fig, axes = plt.subplots(
-            len(classes), len(panels), figsize=(PRINT_WIDTH, 0.6 + 1.15 * len(classes)), sharey=True, squeeze=False, layout="constrained"
-        )
-        for row, class_name in enumerate(classes):
-            K = fig_levels[class_name]
-            for col, (system, rho) in enumerate(panels):
-                ax = axes[row][col]
-                is_reduced = system.startswith("reduced")
-                if row == 0:
-                    ax.set_title(f"{'Reduced' if is_reduced else 'Complete'}, ρ = {rho:g}")
-                curves = trace_curves(run, class_name, K, system, rho, accepted_only)
-                if curves is None:
-                    ax.text(0.5, 0.5, f"no {system} data at ρ = {rho:g}", ha="center", va="center", transform=ax.transAxes)
-                    continue
-                plot_trace_panel(ax, curves, REDUCED_COLOR if is_reduced else COMPLETE_COLOR, "Reduced KKT" if is_reduced else "Complete KKT")
-            # The same names as Fig 3's panel titles and §6's text ("quadratic class at K = 4"). One label serves
-            # the reduced and the complete columns, so it stays generic; the caption names each residual,
-            # ‖K_ρ(y)‖₂ resp. ‖K̄_ρ(ȳ)‖₂ (your call, 2026-11-02).
-            axes[row][0].set_ylabel(f"{'Quadratic' if class_name == 'quadratic' else 'Nonquadratic'}, K = {K}\n" + r"$\log_{10}$ residual")
-        axes[0][0].yaxis.set_major_locator(MaxNLocator(nbins=4, integer=True))
-        fig.supxlabel("iterations from convergence", fontsize=7.5)
-        # One legend for the figure, in the order reduced, complete, reference.
-        handles = {}
-        for ax in axes.flat:
-            for handle, label in zip(*ax.get_legend_handles_labels()):
-                handles.setdefault(label, handle)
-        order = [label for label in ("Reduced KKT", "Complete KKT", QUADRATIC_REFERENCE) if label in handles]
-        fig.legend([handles[label] for label in order], order, loc="outside upper center", ncol=len(order), frameon=False)
-        paths = [out_dir / f"fig2_{SHORT[reduced]}_{formulation}.{ext}" for ext in ("png", "pdf")]
-        for path in paths:
-            fig.savefig(path, bbox_inches="tight")
-        plt.close(fig)
-    return paths
+def write_local_convergence(run_dir, manuscript_mode):
+    """One figure per sampling mode in the run's traces.csv; `manuscript_mode`'s is also copied as LOCAL_FIGURE."""
+    run_dir = pathlib.Path(run_dir)
+    rows = read_rows(run_dir / "traces.csv")
+    out_dir = run_dir / "figures"
+    out_dir.mkdir(exist_ok=True)
+    levels = {r["class"]: int(r["K"]) for r in rows}
+    classes = [c for c in CLASS_ORDER if c in levels]
+    written = []
+    for mode in sorted({r["mode"] for r in rows}):
+        with plt.rc_context(PRINT_STYLE):
+            fig, axes = plt.subplots(
+                len(classes), len(LOCAL_PANELS), figsize=(PRINT_WIDTH, 0.6 + 1.15 * len(classes)), sharey=True, squeeze=False, layout="constrained"
+            )
+            for row, class_name in enumerate(classes):
+                for col, (system, rho) in enumerate(LOCAL_PANELS):
+                    ax = axes[row][col]
+                    is_reduced = system == "reduced"
+                    if row == 0:
+                        ax.set_title(f"{'Reduced' if is_reduced else 'Complete'}, ρ = {rho:g}")
+                    curves = local_curves(rows, mode, class_name, system, rho)
+                    if not curves:
+                        ax.text(0.5, 0.5, f"no {system} runs at ρ = {rho:g}", ha="center", va="center", transform=ax.transAxes)
+                        continue
+                    plot_local_panel(ax, curves, REDUCED_COLOR if is_reduced else COMPLETE_COLOR, "Reduced KKT" if is_reduced else "Complete KKT")
+                K = levels[class_name]
+                axes[row][0].set_ylabel(f"{'Quadratic' if class_name == 'quadratic' else 'Nonquadratic'}, K = {K}\n" + r"$\log_{10}$ residual")
+            axes[0][0].yaxis.set_major_locator(MaxNLocator(nbins=4, integer=True))
+            fig.supxlabel("Newton steps from the start", fontsize=7.5)
+            handles = {}
+            for ax in axes.flat:
+                for handle, label in zip(*ax.get_legend_handles_labels()):
+                    handles.setdefault(label, handle)
+            order = [label for label in ("Reduced KKT", "Complete KKT", QUADRATIC_REFERENCE) if label in handles]
+            fig.legend([handles[label] for label in order], order, loc="outside upper center", ncol=len(order), frameon=False)
+            paths = [out_dir / f"local_convergence_{mode}.{ext}" for ext in ("png", "pdf")]
+            for path in paths:
+                fig.savefig(path, bbox_inches="tight")
+            plt.close(fig)
+        written += paths
+        if mode == manuscript_mode:
+            written.append(shutil.copyfile(out_dir / f"local_convergence_{mode}.pdf", out_dir / LOCAL_FIGURE))
+    return written
 
 
-# ── Fig 3: distance histograms ───────────────────────────────────────────────
+# ── Fig 4: distance histograms (fig3_*, the file names of its earlier number) ──
 
 
 def distances(run, class_name, K, formulation):
@@ -568,8 +568,8 @@ def rho_label(rho):
 
 
 def write_timing_per_rho(run, reduced, formulation, fig_levels, out_dir):
-    # Drawn at the printed width like Fig 2: Newton steps (top row) and seconds (bottom row), one column per
-    # class, each row on one y axis; mean ± std curves in Fig 2's style (your calls, 2026-11-01).
+    # Drawn at the printed width like Fig 3: Newton steps (top row) and seconds (bottom row), one column per
+    # class, each row on one y axis; mean ± std curves in Fig 3's style (your calls, 2026-11-01).
     classes = [c for c in CLASS_ORDER if fig_levels.get(c) in levels_run(run, c)]
     if not classes:
         return []
@@ -633,9 +633,14 @@ def parse_levels(text):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("run_dir")
-    parser.add_argument("--fig-levels", default="quadratic=4,nonquadratic=3", help="K of Fig 2, Fig 3 and the per-ρ plot, per class")
-    parser.add_argument("--all-solves", action="store_true", help="Fig 2: include rejected solves (default: accepted only)")
+    parser.add_argument("--fig-levels", default="quadratic=4,nonquadratic=3", help="K of Fig 2 (per ρ stage) and Fig 4, per class")
+    parser.add_argument("--local-convergence", action="store_true", help="run_dir is a RandomGOOP_local_convergence run")
+    parser.add_argument("--mode", default="whole_iterate", help="--local-convergence: the sampling mode copied as the manuscript's Fig 3")
     args = parser.parse_args()
+    if args.local_convergence:
+        for path in write_local_convergence(args.run_dir, args.mode):
+            print(path)
+        return
     run = read_run(args.run_dir)
     fig_levels = parse_levels(args.fig_levels)
     out_dir = run["dir"] / "figures"
@@ -646,7 +651,6 @@ def main():
         for formulation in [f for f in FORMULATIONS if f in present]:
             written.append(write_table2(run, reduced, formulation, out_dir))
             written.append(write_table3(run, reduced, formulation, out_dir))
-            written += write_fig2(run, reduced, formulation, fig_levels, not args.all_solves, out_dir)
             written += write_fig3(run, reduced, formulation, fig_levels, out_dir)
             written += write_timing_per_rho(run, reduced, formulation, fig_levels, out_dir)
             if (reduced, formulation) == MAIN_PAIR:

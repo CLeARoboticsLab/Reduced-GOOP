@@ -3,11 +3,12 @@
 # adapted to `ParametricGOOP` by `sproblem` (one block per player, no parameters).
 #
 # Part 1, "The Scholtes system": the system of `generate_slacked_scholtes_reduced_kkt_system`,
-# started by `initialize_scholtes!` and solved by `solve(ProjectedLM(), …)`. These are the
-# source's tests of the system and of its solves; the solvers' own tests are in test/solver.jl.
+# started by `initialize_scholtes!` and solved by `solve(ProjectedLM(), …)`, also from many
+# starts (`solve_multi`). These are the source's tests of the system and of its solves; the
+# solvers' own tests are in test/solver.jl.
 # Part 2, "The Scholtes engine": the source's tests of the engine's own features (its
-# Jacobian memo, certificate, multistart, non-monotone line search, refinement, in-place
-# Gram refresh and option checks), as ported; they go with the engine (src/scholtes_*.jl).
+# Jacobian memo, non-monotone line search, refinement, in-place Gram refresh and option
+# checks), as ported; they go with the engine (src/scholtes_*.jl).
 #
 # From the engine's port, not translated (φ = true only, _port_logs/DECISIONS.md D19): the
 # effective-Γ (`phi = false`) testset, the `:freeze` / `:ideal` bound rules, the
@@ -716,6 +717,31 @@ end
         θ0, [0.1, 0.2], 1e-3)
 end
 
+@testset "non-unique answers: solve_multi recovers several points of the set" begin
+    # prob_D's answer is the segment z₁ + z₂ = 1 in the box: primal starts on a grid (each started by
+    # initialize_scholtes!) land at different points of it.
+    k = scholtes_kkt(prob_D)
+    starts = RG.grid_starts(prob_D.goop, θ0, -1.5:0.75:1.5, -1.5:0.75:1.5)
+    @test length(starts) >= 20
+    S = RG.solve_multi(RG.ProjectedLM(), k, θ0, starts)
+    @test S.rejected == 0
+    @test length(S.points) > 1
+    @test maximum(seg_dist(r.x) for r in S.results) < 1e-5
+    ts = [seg_t(p) for p in S.points]
+    @test maximum(ts) - minimum(ts) > 0.5
+    @test all(minimum(r.z[k.nonnegative_dims]) > 0 for r in S.results)
+    @test length(S.assignment) == length(S.results)
+    @test maximum(S.assignment) == length(S.points)
+end
+
+@testset "random starts are strictly feasible" begin
+    Random.seed!(3)
+    for z in RG.random_starts(prob_D.goop, θ0, 25; radius = 1.5, center = prob_D.z0)
+        @test sfeasible(prob_D, z).worst > 0
+    end
+    @test_throws ArgumentError RG.random_starts(prob_A.goop, θ0, 5; center = [-10.0], radius = 0.1)
+end
+
 end
 
 @testset "The Scholtes engine (ported from ScholtesReducedGOOP.jl; goes with src/scholtes_*.jl)" begin
@@ -774,30 +800,6 @@ end
     @test_throws ArgumentError RG.geometric_schedule(0.0)
     @test_throws ArgumentError ssolve(prob_A, [1.0]; rho_min = 0.0)
     @test_throws ArgumentError ssolve(prob_A, [1.0]; linear_solver = :lu)
-end
-
-@testset "non-unique answers: Scholtes recovers multiple points" begin
-    Random.seed!(11)
-    k = skkt(prob_D)
-    starts = RG.grid_starts(prob_D.goop, θ0, -1.5:0.75:1.5, -1.5:0.75:1.5)
-    @test length(starts) >= 20
-    S = RG.solve_multi(k, θ0, starts; options = SRC_DEFAULTS)
-    @test S.rejected == 0
-    @test length(S.points) > 1
-    @test maximum(seg_dist(r.z) for r in S.results) < 1e-5
-    ts = [seg_t(p) for p in S.points]
-    @test maximum(ts) - minimum(ts) > 0.5
-    @test all(r.sign_min > 0 for r in S.results)
-    @test length(S.assignment) == length(S.results)
-    @test maximum(S.assignment) == length(S.points)
-end
-
-@testset "random starts are strictly feasible" begin
-    Random.seed!(3)
-    for z in RG.random_starts(prob_D.goop, θ0, 25; radius = 1.5, center = prob_D.z0)
-        @test sfeasible(prob_D, z).worst > 0
-    end
-    @test_throws ArgumentError RG.random_starts(prob_A.goop, θ0, 5; center = [-10.0], radius = 0.1)
 end
 
 @testset "refinement brings :normal onto the saddle-point step" begin

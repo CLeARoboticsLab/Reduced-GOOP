@@ -16,10 +16,11 @@ const TO = TimerOutput()
 include("goop_kkt_system.jl")
 include("goop.jl")
 include("solver.jl")
+include("multistart.jl")
 
 # The Scholtes engine (`Scholtes()`), ported from ScholtesReducedGOOP.jl by Jingqi Li: the KKT
-# blocks, the residual and sign box, the linear algebra, the projected bound rule, the ρ-homotopy
-# solver, and the multistart layer. Kept with its own tests while it remains; the
+# blocks, the residual and sign box, the linear algebra, the projected bound rule and the ρ-homotopy
+# solver. Kept with its own tests while it remains; the
 # Scholtes system is built by `generate_slacked_scholtes_reduced_kkt_system` and solved by `ProjectedLM`.
 include("scholtes_kkt.jl")
 include("scholtes_residual.jl")
@@ -27,7 +28,6 @@ include("scholtes_linsolve.jl")
 include("scholtes_step.jl")
 include("scholtes_solver.jl")
 include("scholtes_complete_kkt.jl")
-include("scholtes_multistart.jl")
 
 include("precompile.jl")
 

@@ -154,6 +154,14 @@ With `record_convergence = true`, `PDIP` and `ProjectedLM` also return per-itera
 histories (‖K_ρ(z)‖, ‖K₀‖, step sizes, and for `ProjectedLM` η). Both report `norm_K₀` and `norm_K_ρ` at
 the returned point.
 
+### `src/multistart.jl`
+
+`solve_multi(solver, kkt, θ, starts; options, accept, dedupe_tol)` solves one system from many starts with
+`PDIP` or `ProjectedLM` and merges the primal points that coincide: the different points of a GOOP's
+answer when it is a set, or a local convergence study around one solution. The starts come from
+`ball_starts` (uniform in a ball around a full iterate, in the primal coordinates only or in all of them),
+`random_starts` (strictly feasible primal points in a box) or `grid_starts`.
+
 ### The Scholtes system and `ProjectedLM`
 
 ```julia
@@ -191,7 +199,6 @@ uses `ProjectedLM` on `generate_slacked_scholtes_reduced_kkt_system`.
 | `scholtes_residual.jl`                     | The relaxed residual `R(w; ρ)` (`s ⊙ γ + u = ρ𝟙`, exact `σ ⊙ φ = 0`), the true residual ‖K₀‖ and the sign box.                                                                                                                                               |
 | `scholtes_linsolve.jl`, `scholtes_step.jl` | The regularized least-squares Newton step `δ = −Jᵀ(η²I + JJᵀ)⁻¹r` (`:normal`, `:klu_eta`, `:klu_sqrt_eta`, `:svd`) and the projected two-metric bound rule.                                                                                                   |
 | `scholtes_solver.jl`                       | `Scholtes`, `ScholtesOptions`, `solve`, `geometric_schedule`.                                                                                                                                                                          |
-| `scholtes_multistart.jl`                   | `solve_multi`, `random_starts`, `grid_starts`.                                                                                                                                                                                                 |
 
 ## Experiments
 
@@ -220,7 +227,7 @@ the Scholtes engine's own tests).
 | Code-generation parity        | Agreement between Symbolics and FastDifferentiation residual/Jacobian evaluators.                                                                                                    |
 | Warm-start tests              | Full-vector `PDIP` warm starts.                                                                                                                                                            |
 | Solvers (`test/solver.jl`)    | The Newton step of every linear solver, the η schedule, Algorithm 5.1 on the perturbed reduced and complete systems, termination reasons, option checks.                         |
-| Scholtes (`test/scholtes.jl`) | The Scholtes system's rows, prioritized preference slacks, the quasi system, starts, solves with every linear solver, and exact inequalities at the solution; the engine's certificate and multistart. |
+| Scholtes (`test/scholtes.jl`) | The Scholtes system's rows, prioritized preference slacks, the quasi system, starts, solves with every linear solver, exact inequalities at the solution, and several points of a non-unique answer by `solve_multi`; the engine's own features. |
 
 The tests verify convergence status, residual tolerances, known primal
 solutions, active/inactive constraint behavior, and linear-solver robustness.

@@ -1,8 +1,9 @@
 """
 Monte Carlo comparison of the reduced and complete KKT systems on random GOOPs, for the manuscript's §6:
 Table 2 (system sizes and solve times), Table 3 (setup times), Fig 2 (Newton steps and solve time per ρ
-stage), Fig 3 (local convergence) and Fig 4 (‖z_complete − z_reduced‖₂). All of them come from one run,
-so they describe the same problems.
+stage) and Fig 4 (‖z_complete − z_reduced‖₂). All of them come from one run, so they describe the same
+problems. Fig 3 (local convergence) comes from RandomGOOP_local_convergence.jl, on one instance per class of
+this study.
 
 For every objective class, number of preference levels K and sampled instance, solve from z = 0, by
 Algorithm 5.1 (`solve(PDIP(), …)` with `linear_solver`, :klu by default) down
@@ -10,10 +11,9 @@ Algorithm 5.1 (`solve(PDIP(), …)` with `linear_solver`, :klu by default) down
  1. the ρ-perturbed REDUCED KKT system (5.2), and
  2. for K in `complete_levels`, the ρ-perturbed COMPLETE KKT system (6.1), using nothing from the
     reduced solve, and report ‖z_complete − z_reduced‖₂.
-A stage at ρ stops once ‖K_ρ‖₂ < ε_ρ = ρ (`epsilon_tight` at the stages in `tight_rhos`), at a
-line-search failure (α < 1e-14) or after `max_inner_iters` Newton steps. The whole solve stops, accepted,
-as soon as ‖K₀‖₂ < `epsilon_0`, checked before every Newton step; a solve that never gets there is
-rejected, judged at its best stage.
+A stage at ρ stops once ‖K_ρ‖₂ < ε_ρ = ρ, at a line-search failure (α < 1e-14) or after `max_inner_iters`
+Newton steps. The whole solve stops, accepted, as soon as ‖K₀‖₂ < `epsilon_0`, checked before every Newton
+step; a solve that never gets there is rejected, judged at its best stage.
 
 Problem. N players with n primal variables each; z ∈ R^{Nn} aggregates all players' variables, and every
 function below depends on all of z, so the players are coupled. Player i's levels, outermost first:
@@ -229,10 +229,9 @@ default_settings() = (;
     rho_schedule = [1.0, 1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9, 1e-10, 1e-11, 1e-12], # both systems
     #! format: on
     max_inner_iters=1000,                        # t_max, Newton steps per ρ stage
-    linear_solver=:klu,                          # PDIPOptions.linear_solver: :klu (Levenberg–Marquardt, η = 1e-6) or :svd (the exact pinv)
+    gc_before_solve=true,                        # a full garbage collection before each solve, outside its timing (solve_algorithm51)
+    linear_solver=:klu,                         # PDIPOptions.linear_solver: :klu (Levenberg–Marquardt, η = 1e-6) or :svd (the exact pinv)
     epsilon_0=1e-10,                             # ε₀, the success tolerance on the unperturbed ‖K₀‖₂
-    epsilon_tight=1e-11,                         # ε_ρ at the stages in tight_rhos (Fig 3's); ε_ρ = ρ at the others
-    tight_rhos=[1.0, 0.1],
     # Fig 4 compares the reduced and complete iterates at the end of this stage, so both are at the same ρ
     # (the name keeps the figure's earlier number, as does the CSV column distance_fig3).
     fig3_rho=1e-11,
@@ -275,7 +274,7 @@ function validated_settings(overrides)
         error("invalid num_instances or num_levels")
     0 <= settings.coupling <= 1 || error("coupling must lie in [0, 1]")
     settings.target_floor >= 0 || error("target_floor must be nonnegative")
-    settings.epsilon_0 > 0 && settings.epsilon_tight > 0 || error("tolerances must be positive")
+    settings.epsilon_0 > 0 || error("epsilon_0 must be positive")
     any(r -> isapprox(r, settings.fig3_rho; rtol=1e-9), settings.rho_schedule) ||
         error("fig3_rho must be a stage of rho_schedule")
     # Two rows fill the innermost image: two half-planes or disks in R², a slab or two intervals in R.
@@ -496,7 +495,7 @@ function run(; overrides=(;))
         "N = $(settings.num_players), n = $(settings.primal_dimension). Output: $directory",
     )
     println(
-        "Algorithm 5.1 (PDIP, $(settings.linear_solver)): stage ρ to ‖K_ρ‖₂ < ρ ($(MCI.compact(settings.epsilon_tight)) at ρ ∈ $(settings.tight_rhos)); ",
+        "Algorithm 5.1 (PDIP, $(settings.linear_solver)): stage ρ to ‖K_ρ‖₂ < ρ; ",
         "the solve stops, accepted, once ‖K₀‖₂ < ε₀ = $(MCI.compact(settings.epsilon_0))",
     )
     # Untimed warm-up build, discarded: a session's first build also compiles the builders, which made the
@@ -754,16 +753,15 @@ end
 
 """
 PDIPOptions of one ρ stage of Algorithm 5.1 (with settings.linear_solver), in plain ‖·‖₂: the stage
-stops at ‖K_ρ‖₂ < ε_ρ = ρ (epsilon_tight at the stages in `tight_rhos`), and the solver's ‖K₀‖₂ < epsilon_0
-test, before every Newton step, stops the whole solve. The histories make the stage's trace (stage_history).
+stops at ‖K_ρ‖₂ < ε_ρ = ρ, and the solver's ‖K₀‖₂ < epsilon_0 test, before every Newton step, stops the
+whole solve. The histories make the stage's trace (stage_history), which results.jls keeps.
 """
 function stage_options(settings, ρ)
-    tight = any(r -> isapprox(r, ρ; rtol=1e-9), settings.tight_rhos)
     ReducedGOOP.PDIPOptions(;
         ρ_schedule=[Float64(ρ)],
         max_inner_iters=settings.max_inner_iters,
         tol=settings.epsilon_0,
-        tol_inner=tight ? settings.epsilon_tight : ρ,
+        tol_inner=ρ,
         linear_solver=settings.linear_solver,
         record_convergence=true,
     )
@@ -785,10 +783,13 @@ Algorithm 5.1 on one system, `formulation` (the reduced (5.2) or the complete :p
 start down `rho_schedule` (stage_options). Each stage starts at the previous one's last iterate. The solve
 is judged at its best stage, the one with the lowest ‖K₀‖₂: accepted iff ‖K₀‖₂ <= epsilon_0 there. After
 the solver's ‖K₀‖₂ < epsilon_0 stop, every later stage returns at its first stopping test, with no Newton
-step.
+step. With `gc_before_solve`, a full garbage collection runs first, outside the stages' timing: a solve takes
+10 ms to a few seconds, and a collection that the previous solves' garbage triggers inside it would be
+timed as part of it.
 """
 function solve_algorithm51(formulation, problem, θ, initial_guess, settings; context, io=stdout)
     (; kkt) = formulation
+    settings.gc_before_solve && GC.gc()
     y = cold_initialization(formulation, initial_guess, θ, settings)
     # The full residual at the stage's ρ and at ρ = 0 (K₀), for the table and the best-stage choice.
     r, r0 = zeros(kkt.kkt_dimension), zeros(kkt.kkt_dimension)
@@ -975,10 +976,8 @@ The run's CSV files, read by experiments/RandomGOOP_plotting.py:
                 between the two iterates at the end of the stage ρ = fig3_rho (distance_fig3)
   stages.csv    one row per ρ stage of every solve: Newton steps, solve time (no
                 compilation), compile time, status, and ‖K_ρ‖₂, ‖K₀‖₂ at the stage's last iterate
-  traces.csv    one row per iterate of every ρ stage, from its start to its last iterate: ‖K_ρ‖₂, ‖K₀‖₂
   settings.csv  the scalar settings (dimensions for the size formulas, tolerances, coupling)
-`newton_steps` counts the Newton steps taken (a step the line search rejects is not one); a stage's trace has
-`newton_steps` + 1 rows.
+`newton_steps` counts the Newton steps taken (a step the line search rejects is not one).
 """
 function export_csv(directory)
     (; settings, metadata, results) = deserialize(joinpath(directory, "results.jls"))
@@ -1004,15 +1003,12 @@ function export_csv(directory)
         ("class", "K", "system", "formulation", "build_seconds", "first_solve_seconds", "compile_seconds"),
         setup,
     )
-    solves, stage_rows, traces = Any[], Any[], Any[]
+    solves, stage_rows = Any[], Any[]
     function add_solve!(key, result; distance="", distance_fig3="")
         push!(solves, (key..., result.accepted, result.seconds, result.newton_steps, result.validation.rms_K₀, distance, distance_fig3))
         for (stage, s) in enumerate(result.stages)
             last_norm_K_ρ, last_norm_K₀ = isempty(s.history) ? (NaN, NaN) : (last(s.history).norm_K_ρ, last(s.history).norm_K₀)
             push!(stage_rows, (key..., stage, s.ρ, s.newton_steps, s.seconds, s.compile_seconds, s.status, last_norm_K_ρ, last_norm_K₀))
-            for (iteration, h) in enumerate(s.history)
-                push!(traces, (key..., stage, s.ρ, iteration, h.norm_K_ρ, h.norm_K₀))
-            end
         end
     end
     for r in results
@@ -1031,11 +1027,6 @@ function export_csv(directory)
         joinpath(directory, "solves.csv"),
         ("class", "K", "trial", "system", "formulation", "accepted", "seconds", "newton_steps", "norm_K₀", "distance", "distance_fig3"),
         solves,
-    )
-    write_csv(
-        joinpath(directory, "traces.csv"),
-        ("class", "K", "trial", "system", "formulation", "stage", "rho", "iteration", "norm_K_ρ", "norm_K₀"),
-        traces,
     )
     directory
 end
