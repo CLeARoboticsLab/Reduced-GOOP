@@ -175,19 +175,6 @@ inherited preference slacks and lower-level multipliers are held fixed.
 `initialize_scholtes!(...; preference_slacks = ...)` to keep them during
 continuation.
 
-### The Scholtes engine (`src/scholtes_*.jl`)
-
-The first port of the Scholtes solver, `solve(Scholtes(), …)` on its own
-`ScholtesKKTSystem`. It is kept, with its own tests, while it remains; new code
-uses `ProjectedLM` on `generate_slacked_scholtes_reduced_kkt_system`.
-
-| File                                       | Contents                                                                                                                                                                                                                                                      |
-| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `scholtes_kkt.jl`                          | `ScholtesKKTSystem`: stationarity and equalities `F_nc`, level inequalities `a` (including prioritized preference slacks, then φ slacks ρ𝟙 − G ⊙ γ), and their duals `b`. Only the explicit formulation (φ = true) is supported. |
-| `scholtes_residual.jl`                     | The relaxed residual `R(w; ρ)` (`s ⊙ γ + u = ρ𝟙`, exact `σ ⊙ φ = 0`), the true residual ‖K₀‖ and the sign box.                                                                                                                                               |
-| `scholtes_linsolve.jl`, `scholtes_step.jl` | The regularized least-squares Newton step `δ = −Jᵀ(η²I + JJᵀ)⁻¹r` (`:normal`, `:klu_eta`, `:klu_sqrt_eta`, `:svd`) and the projected two-metric bound rule.                                                                                                   |
-| `scholtes_solver.jl`                       | `Scholtes`, `ScholtesOptions`, `solve`, `geometric_schedule`.                                                                                                                                                                          |
-
 ## Experiments
 
 | File                                   | Description                                                                                                                                                         |
@@ -209,8 +196,7 @@ uses `ProjectedLM` on `generate_slacked_scholtes_reduced_kkt_system`.
 `test/runtests.jl` exercises the reduced and quasi KKT formulations with `PDIP`
 (Algorithm 5.1, the regularized `:klu` step), and includes `test/solver.jl` (the two solvers, `PDIP` and
 `ProjectedLM`), `test/complete_kkt.jl` (the complete systems) and
-`test/scholtes.jl` (the Scholtes system, from ScholtesReducedGOOP.jl's tests, and
-the Scholtes engine's own tests).
+`test/scholtes.jl` (the Scholtes system, from ScholtesReducedGOOP.jl's tests).
 
 | Benchmark family              | What is tested                                                                                                                                                                       |
 | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -219,7 +205,7 @@ the Scholtes engine's own tests).
 | Code-generation parity        | Agreement between Symbolics and FastDifferentiation residual/Jacobian evaluators.                                                                                                    |
 | Warm-start tests              | Full-vector `PDIP` warm starts.                                                                                                                                                            |
 | Solvers (`test/solver.jl`)    | The Newton step of every linear solver, the η schedule, Algorithm 5.1 on the perturbed reduced and complete systems, termination reasons, option checks.                         |
-| Scholtes (`test/scholtes.jl`) | The Scholtes system's rows, prioritized preference slacks, the quasi system, starts, solves with every linear solver, exact inequalities at the solution, and several points of a non-unique answer by `solve_multi`; the engine's own features. |
+| Scholtes (`test/scholtes.jl`) | The Scholtes system's rows, prioritized preference slacks, the quasi system, starts, solves with every linear solver, exact inequalities at the solution, and several points of a non-unique answer by `solve_multi`. |
 
 The tests verify convergence status, residual tolerances, known primal
 solutions, active/inactive constraint behavior, and linear-solver robustness.

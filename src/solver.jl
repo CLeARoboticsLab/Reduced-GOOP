@@ -3,8 +3,6 @@
 # `solve(Solver(), kkt, θ; z₀, options)` and return a NamedTuple, and both take their Newton step from
 # `_newton_step!` (section 3).
 
-using LinearAlgebra
-
 abstract type SolverType end
 
 # ──────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -644,7 +642,7 @@ function _newton_step!(δz, J, K_ρ, linear_solver, η, normal_equations = _norm
     elseif linear_solver === :normal
         # :normal: −Jᵀ(JJᵀ + η²I)⁻¹K_ρ by a sparse Cholesky (CHOLMOD) of JJᵀ + η²I. A failed factorization
         # (η² below the round-off of JJᵀ when J is rank-deficient) retries with 100 η, up to 5 times, and
-        # then takes the :svd step, as the Scholtes engine does.
+        # then takes the :svd step, as ScholtesReducedGOOP.jl does.
         JJᵀ = _gram!(normal_equations, J)
         η₀ = η
         for _ in 0:5

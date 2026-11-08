@@ -2,20 +2,15 @@
 # (Jingqi Li). The problems are the source's, written against a flat primal `z` and
 # adapted to `ParametricGOOP` by `sproblem` (one block per player, no parameters).
 #
-# Part 1, "The Scholtes system": the system of `generate_slacked_scholtes_reduced_kkt_system`,
-# started by `initialize_scholtes!` and solved by `solve(ProjectedLM(), …)`, also from many
-# starts (`solve_multi`). These are the source's tests of the system and of its solves; the
-# solvers' own tests are in test/solver.jl.
-# Part 2, "The Scholtes engine": the source's tests of the engine's own features (its
-# Jacobian memo, non-monotone line search, refinement, in-place Gram refresh and option
-# checks), as ported; they go with the engine (src/scholtes_*.jl).
+# The system of `generate_slacked_scholtes_reduced_kkt_system`, started by `initialize_scholtes!` and
+# solved by `solve(ProjectedLM(), …)`, also from many starts (`solve_multi`): the source's tests of the
+# system and of its solves; the solvers' own tests are in test/solver.jl. The source's tests of its own
+# solver's features (Jacobian memo, non-monotone line search, refinement, in-place Gram refresh) are not
+# kept, since that solver is not.
 #
-# From the engine's port, not translated (φ = true only, _port_logs/DECISIONS.md D19): the
-# effective-Γ (`phi = false`) testset, the `:freeze` / `:ideal` bound rules, the
-# `scholtes = false` closure, the `:ldl` backend, `SolverWorkspace`, and the fixed-primal
-# check that needs the source's analysis environment. Backend names in part 2: the source's
-# `:klu` is `:klu_eta` (same saddle matrix), `:pinv` is `:svd`; `:klu_sqrt_eta` is added
-# where the source loops over backends.
+# Not translated (φ = true only): the effective-Γ (`phi = false`) testset, the `:freeze` / `:ideal` bound
+# rules, the `scholtes = false` closure, `SolverWorkspace`, and the fixed-primal check that needs the
+# source's analysis environment.
 
 using LinearAlgebra
 using Random
@@ -48,7 +43,7 @@ function sproblem(; ni, objectives, equality = nothing, inequality = nothing, z0
 end
 sfeasible(p, z) = RG.is_feasible(p.goop, z, θ0)
 
-# --- part 1: the Scholtes system, started by initialize_scholtes!, solved by ProjectedLM ------
+# --- the Scholtes system, started by initialize_scholtes!, solved by ProjectedLM ---------------
 scholtes_kkt(p; quasi = false, quasi_order = 2) = RG.generate_slacked_scholtes_reduced_kkt_system(
     p.goop; drop_higher_order_terms = quasi, quasi_order)
 
@@ -80,14 +75,14 @@ function jacobian(k, z, ρ)
     J
 end
 
-"The slack targets at z, one per complementarity pair: G for σ, then ρ𝟙 − Gₘ ⊙ γₘ for σ̂ (the engine's block a)."
+"The slack targets at z, one per complementarity pair: G for σ, then ρ𝟙 − Gₘ ⊙ γₘ for σ̂ (the source's block a)."
 function targets(k, z, ρ)
     a = zeros(length(k.slack_expressions))
     k.slack_targets!(a, z; θ = θ0, ρ)
     a
 end
 
-"Every complementarity pair's multiplier, γ then ϕ (the engine's block b)."
+"Every complementarity pair's multiplier, γ then ϕ (the source's block b)."
 multipliers(k, z) = z[[pair.multiplier for pair in k.complementarity_pairs]]
 
 "The relaxed pairs (σ ⊙ γ + u = ρ𝟙) and the exact ones (σ̂ ⊙ ϕ = 0), by position in `complementarity_pairs`."
@@ -112,33 +107,6 @@ function slack_row_filter(k)
     slacks = Set(Symbolics.unwrap.(k.z_symbolic[[pair.slack for pair in k.complementarity_pairs]]))
     row -> any(in(slacks), Symbolics.get_variables(row))
 end
-
-# --- part 2: the engine's helpers, as ported -------------------------------------------------
-# The source's default solver options (its default backend is `:klu`).
-const SRC_DEFAULTS = RG.ScholtesOptions(linear_solver = :klu_eta)
-
-skkt(p; quasi = false, quasi_order = 2) = RG._generate_scholtes_reduced_kkt_system(
-    p.goop; drop_higher_order_terms = quasi, quasi_order)
-
-const _LS = Dict(:klu => :klu_eta, :pinv => :svd)
-"""
-`solve_goop(c, n, z0; kwargs...)` in the source's spelling, on the port. The source's
-default backend is `:klu`, so an unspecified `linear_solver` is `:klu_eta` here (the
-port's own default, `:normal`, is the source's robotic-arm setting, not its test default).
-"""
-function ssolve(k, z0; w0 = nothing, trace = nothing, step_trace = nothing, kw...)
-    kw = Dict{Symbol,Any}(kw)
-    haskey(kw, :linear_solver) || (kw[:linear_solver] = :klu_eta)
-    haskey(kw, :linear_solver) && (kw[:linear_solver] = get(_LS, kw[:linear_solver], kw[:linear_solver]))
-    haskey(kw, :rho_schedule) && (kw[:rho_schedule] = collect(float.(kw[:rho_schedule])))
-    RG.solve(RG.Scholtes(), k, θ0; z₀ = z0, w₀ = w0, trace, step_trace,
-             options = RG.ScholtesOptions(; kw...))
-end
-ssolve(p::NamedTuple, z0 = p.z0; kw...) = ssolve(skkt(p), z0; kw...)
-F_nc(k, y) = (RG._set_theta!(k, θ0); RG._F_nc(k, y))
-a_of(k, y) = (RG._set_theta!(k, θ0); RG._a(k, y))
-b_of(k, y) = (RG._set_theta!(k, θ0); RG._b(k, y))
-step_ctx(k, ls; kw...) = RG._build_scholtes_step_ctx(RG._scholtes_step_solver(get(_LS, ls, ls)), k; kw...)
 
 # --- the source's test problems ------------------------------------------------------------
 prob_A = sproblem(ni = [1], objectives = [[z -> z[1]^2]], inequality = [z -> [z[1] + 2.0]], z0 = [1.0])
@@ -740,213 +708,6 @@ end
         @test sfeasible(prob_D, z).worst > 0
     end
     @test_throws ArgumentError RG.random_starts(prob_A.goop, θ0, 5; center = [-10.0], radius = 0.1)
-end
-
-end
-
-@testset "The Scholtes engine (ported from ScholtesReducedGOOP.jl; goes with src/scholtes_*.jl)" begin
-
-@testset "compiled functions agree in and out of place" begin
-    k = skkt(prob_C)
-    RG._set_theta!(k, θ0); RG._set_rho!(k, 0.3)
-    y = randn(k.n)
-    v = zeros(k.n_nc); RG._F_nc!(k, v, y); @test v ≈ F_nc(k, y)
-    va = zeros(k.n_comp); RG._a!(k, va, y); @test va ≈ a_of(k, y)
-    vb = zeros(k.n_comp); RG._b!(k, vb, y); @test vb ≈ b_of(k, y)
-    k.J_b!(k.Jb_buf, y, k.θ, k.ρ[])
-    @test all(==(1.0), nonzeros(k.Jb_buf))
-    @test k.Jb_buf * y ≈ b_of(k, y)
-end
-
-@testset "the Jacobian memo answers for the y it was filled at, and no other" begin
-    k = skkt(prob_D); RG._set_theta!(k, θ0); RG._set_rho!(k, 0.3)
-    y1, y2 = randn(k.n), randn(k.n)
-    fresh = skkt(prob_D); RG._set_theta!(fresh, θ0); RG._set_rho!(fresh, 0.3)
-    ref(y) = (fresh.Jvalid[] = false; RG._fill_jacobians!(fresh, y); copy(nonzeros(fresh.Jnc_buf)))
-    RG._fill_jacobians!(k, y1); @test nonzeros(k.Jnc_buf) == ref(y1)
-    RG._fill_jacobians!(k, y1); @test nonzeros(k.Jnc_buf) == ref(y1)
-    RG._fill_jacobians!(k, y2); @test nonzeros(k.Jnc_buf) == ref(y2)
-    RG._fill_jacobians!(k, y1); @test nonzeros(k.Jnc_buf) == ref(y1)
-    w = copy(y1); v = view(w, 1:k.n)
-    RG._fill_jacobians!(k, v)
-    w .= y2
-    RG._fill_jacobians!(k, v); @test nonzeros(k.Jnc_buf) == ref(y2)
-    RG._fill_jacobians!(k, y1)
-    RG._gamma_columns(k)
-    @test !k.Jvalid[]
-end
-
-@testset "non-monotone line search" begin
-    k = skkt(prob_C)
-    r1 = ssolve(k, prob_C.z0; nonmonotone = 1)
-    lv = ssolve(k, prob_C.z0; nonmonotone = 1, rho_schedule = [1e-2])
-    @test all(lv.history[i + 1] <= lv.history[i] for i in 1:(length(lv.history) - 1))
-    for M in (2, 5)
-        r = ssolve(k, prob_C.z0; nonmonotone = M)
-        @test r.converged
-        @test r.sign_min > 0
-        @test r.z ≈ r1.z atol = 1e-6
-    end
-    r0 = ssolve(k, prob_C.z0; nonmonotone = 3)
-    @test r0.converged && r0.sign_min > 0
-    @test_throws ArgumentError ssolve(k, prob_C.z0; nonmonotone = 0)
-end
-
-@testset "schedules" begin
-    @test RG.geometric_schedule(1.0; stop = 1e-2, per_decade = 1) ≈ [1.0, 1e-1, 1e-2]
-    @test length(RG.geometric_schedule(1.0; stop = 1e-2, per_decade = 4)) == 9
-    @test RG.geometric_schedule(1e-3; stop = 1e-2) == [1e-3]
-    @test_throws ArgumentError RG.geometric_schedule(1.0; stop = 0.0)
-    @test_throws ArgumentError RG.geometric_schedule(0.0)
-    @test_throws ArgumentError ssolve(prob_A, [1.0]; rho_min = 0.0)
-    @test_throws ArgumentError ssolve(prob_A, [1.0]; linear_solver = :lu)
-end
-
-@testset "refinement brings :normal onto the saddle-point step" begin
-    k = skkt(prob_C)
-    r = ssolve(k, prob_C.z0; rho_schedule = [1.0], max_inner = 3)
-    w = copy(r.w)
-    res = RG.ScholtesResiduals(k)
-    Rv, bv = zeros(res.m), zeros(k.n_comp)
-    rv = RG._resid!(res, Rv, bv, w, 1e-3)
-    @test norm(rv) > 1e-3
-    step_for(ls, nref) = begin
-        ctx, _ = step_ctx(k, ls; refine = nref)
-        copy(RG._bounded_step!(RG._ProjectedRule(ctx.nw), ctx, w, bv, rv))
-    end
-    ref = step_for(:klu_eta, 0)
-    @test norm(ref) > 0
-    raw = norm(step_for(:normal, 0) - ref) / norm(ref)
-    fine = norm(step_for(:normal, 4) - ref) / norm(ref)
-    @test fine <= raw * (1 + 1e-9) + 1e-15
-    raw > 1e-10 && @test fine < raw / 10
-end
-
-@testset "the Jacobian memo can never serve stale values" begin
-    @test RG._same_y([1.0, 2.0], [1.0, 2.0])
-    @test !RG._same_y([NaN, 2.0], [NaN, 2.0])
-    @test !RG._same_y([1.0], [1.0, 2.0])
-    pnl = sproblem(ni = [2], objectives = [[z -> sin(z[1]) * z[2]^3, z -> cos(z[1] * z[2]) + z[1]^4]],
-                   inequality = [z -> [z[1] + 2.0, z[2] + 2.0]], z0 = [0.1, 0.1])
-    k = skkt(pnl); RG._set_theta!(k, θ0); RG._set_rho!(k, 0.3)
-    grab(y) = copy(RG._fill_jacobians!(k, y)[1])
-    y1, y2 = fill(0.3, k.n), fill(0.7, k.n)
-    j1, j2 = grab(y1), grab(y2)
-    @test !all(j1 .== j2)
-    @test all(grab(y1) .== j1)
-    buf = copy(y1); grab(buf); buf .= y2
-    @test all(grab(buf) .== j2)
-    grab(y1); RG._gamma_columns(k)
-    @test all(grab(y1) .== j1)
-    for ls in (:klu_eta, :klu_sqrt_eta, :normal)
-        a = ssolve(skkt(prob_C), prob_C.z0; linear_solver = ls)
-        km = skkt(prob_C)
-        b = ssolve(km, prob_C.z0; linear_solver = ls)
-        @test a.z == b.z && a.iters == b.iters
-    end
-end
-
-@testset "the :normal in-place Gram refresh equals a fresh product" begin
-    # (the source tests its `:ldl` CHOLMOD refresh here; `:ldl` is not ported, and
-    # `:normal`'s in-place triu(J Jᵀ) refill is the equivalent memcpy contract)
-    k = skkt(prob_E); RG._set_theta!(k, θ0); RG._set_rho!(k, 0.3)
-    cache = RG._build_augmented_normal(k; scholtes = true)
-    Random.seed!(11)
-    for _ in 1:4
-        y = randn(k.n)
-        sv = abs.(randn(k.n_comp)) .+ 0.5
-        bv = abs.(randn(k.n_comp)) .+ 0.5
-        RG._update_normal!(cache, k, y, sv, bv, RG._Unmasked())
-        S = RG._normal_gram!(cache)
-        S = RG._normal_gram!(cache)       # the second call is the in-place refill
-        U = triu(cache.J * transpose(cache.J))
-        if S isa SparseArrays.CHOLMOD.Sparse
-            raw = unsafe_load(pointer(S))
-            @test raw.stype == 1
-            @test unsafe_wrap(Array, Ptr{Float64}(raw.x), raw.nzmax) == nonzeros(U)
-        else
-            @test Matrix(S) == Matrix(Symmetric(cache.J * transpose(cache.J)))
-        end
-    end
-end
-
-@testset "the augmented KLU step of :klu_eta and :klu_sqrt_eta" begin
-	problem = build_benchmark_problem(; num_players = 3, levels = 2, kind = :quadratic)
-	kkt = RG.generate_slacked_reduced_kkt_system(problem.problem)
-	θ = zeros(sum(problem.problem.parameter_dims))
-
-	@testset "Direction equivalence with the SVD Tikhonov step" begin
-		# The augmented quasi-definite system [[I J]; [Jᵀ -ηI]] must reproduce the
-		# dense-SVD step δz = -V diag(S/(S²+η)) Uᵀ F exactly (tsvd_threshold = 0,
-		# no Marquardt scaling).
-		n = kkt.variable_dimension
-		m = kkt.kkt_dimension
-		z = 0.3 .* sin.(1:n)
-		ρ = 0.1
-
-		F = zeros(m)
-		kkt.K_ρ!(F, z; θ, ρ)
-		J = kkt.∇K_ρ!.result_buffer
-		kkt.∇K_ρ!(J, z; θ, ρ)
-
-		# High-η cases lock in the √η-balanced augmented scaling: the naive
-		# [I J; Jᵀ -ηI] form loses the tiny ~1/η step to cancellation there.
-		for η in (1e-6, 1e-2, 1e2, 1e6)
-			cache = RG._build_augmented_kkt_cache(J, m, n)
-			RG._update_augmented_kkt!(cache, J, η)
-			δz_klu = zeros(n)
-			RG._solve_augmented!(δz_klu, cache, F)
-
-			Jsvd = RG.LinearAlgebra.svd(Matrix(J))
-			δz_svd = -Jsvd.V * ((Jsvd.S ./ (Jsvd.S .^ 2 .+ η)) .* (Jsvd.U' * F))
-
-			@test isapprox(δz_klu, δz_svd; rtol = 1e-8)
-		end
-	end
-
-	@testset "Singular numeric refactorization rebuilds its cache" begin
-		# Reproduce the cache state that matters here: a successful numeric
-		# factorization followed by a singular in-place `klu!` update. The
-		# retry must discard that failed numeric object, rebuild at escalated η,
-		# and avoid the dense-SVD fallback.
-		J = RG.SparseArrays.sparse([1], [1], [1.0], 1, 1)
-		cache = RG._build_augmented_kkt_cache(J, 1, 1)
-		RG._update_augmented_kkt!(cache, J, 1e-6)
-		δz = zeros(1)
-		F = ones(1)
-		RG._solve_augmented!(δz, cache, F)
-
-		# Make the next numeric update singular while retaining the same sparse
-		# pattern. The retry's η update restores a nonsingular diagonal system.
-		RG.SparseArrays.nonzeros(J) .= 0.0
-		RG.SparseArrays.nonzeros(cache.K) .= 0.0
-		singular_retries = Ref(0)
-		svd_fallbacks = Ref(0)
-		η_used = RG._klu_step_with_fallback!(
-			δz,
-			cache,
-			J,
-			F,
-			1e-6,
-			1e2,
-			false;
-			singular_retry_counter = singular_retries,
-			svd_fallback_counter = svd_fallbacks,
-		)
-
-		@test singular_retries[] == 1
-		@test svd_fallbacks[] == 0
-		@test η_used ≈ 1e-4
-		@test all(isfinite, δz)
-	end
-end
-
-@testset "the new knobs validate their arguments" begin
-    for kw in ((; nonmonotone = 0), (; linear_solver = :nope), (; rho_min = 0.0),
-               (; refine = -1), (; rho_schedule = Float64[]), (; projected_step = false),
-               (; reuse_factorization_iters = 1))
-        @test_throws ArgumentError ssolve(prob_A; kw...)
-    end
 end
 
 end
