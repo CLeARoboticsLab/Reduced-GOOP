@@ -215,6 +215,9 @@ Run the tests from the repository root with:
 julia --project=. -e 'import Pkg; Pkg.test()'
 ```
 
+`Pkg.test()` builds the test environment from `test/Project.toml` itself; `julia --project=test` does not work
+without a `test/Manifest.toml`, which the repository deliberately does not keep.
+
 ## Legacy Code
 
 The `legacy/` directory contains older implementations, experimental code,
