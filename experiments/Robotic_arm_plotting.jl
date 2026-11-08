@@ -702,7 +702,7 @@ end
 # `history`, whose last entry IS the number the test saw; see the note in
 # `robotic_arm.jl` on why the trace cannot supply it.
 #
-# PLOTTED PER EQUATION, `||R||_2/sqrt(m)`, as `trajectory_game_plot.jl` does.
+# PLOTTED PER EQUATION, `‖K_ρ‖₂/sqrt(m)`, as `trajectory_game_plot.jl` does.
 # A 2-norm sums over all `m = n_nc + 2nc` residual rows, so its height rides on
 # the problem size and two horizons cannot be compared; dividing by `sqrt(m)`
 # removes that. It also makes the reference line read TRUE: `solve_rho_sweep`
@@ -771,7 +771,7 @@ end
 The publication figure for one solved primal `z`, written as a vector PDF:
 the scene's panels, plus four more for the solve itself when `resid` or `tr`
 is supplied. `resid` is the result's `history`, drawn per equation as
-`||R||_2/sqrt(m)`; `tr` holds the per-iteration series of
+`‖K_ρ‖₂/sqrt(m)`; `tr` holds the per-iteration series of
 `convergence_traces` (‖K₀‖, η and α). `stop` is a short
 phrase naming the break that ended the run, drawn in panel (d)'s title beside
 the `tol_inner` line it was tested against; pass `nothing` to leave the panel

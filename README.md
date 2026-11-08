@@ -1,6 +1,6 @@
 # ReducedGOOP.jl
 
-[!\[CI\](https://github.com/CLeARoboticsLab/QuasiGOOP.jl/actions/workflows/test.yml/badge.svg)](https://github.com/CLeARoboticsLab/QuasiGOOP.jl/actions/workflows/test.yml)
+[!\[CI\](https://github.com/CLeARoboticsLab/Reduced-GOOP/actions/workflows/test.yml/badge.svg)](https://github.com/CLeARoboticsLab/Reduced-GOOP/actions/workflows/test.yml)
 [!\[License\](https://img.shields.io/badge/license-BSD-new)](https://opensource.org/license/bsd-3-clause)
 
 This repository contains the implementation accompanying the paper:
@@ -67,17 +67,6 @@ reduced GOOP KKT system in Scholtes form, solves it down a ρ schedule with
 `ProjectedLM`, and saves trajectory and solution data under
 `data/Intersection_open_loop/`.
 
-### Single-Player Trilevel Quadratic Program
-
-The following runs the quadratic-program example driver:
-
-```javascript
-include("experiments/ExamplesQP.jl")
-```
-
-`ExamplesQP.jl` loads `experiments/trilevel_QP.jl`, which solves a bounded
-single-player quadratic hierarchy with the interior-point method and checks its
-dual solution independently with `NonlinearSolve`.
 
 ## Repository Structure
 
@@ -113,13 +102,12 @@ solvers in `solver.jl`:
 | `generate_slacked_quasi_kkt_system(...)`    | Calls the reduced generator with `drop_higher_order_terms = true`. The code implements this by propagating `QuasiLagrangianTerm` objects and truncating higher-order derivative contributions.                                                 |
 | `generate_slacked_complete_kkt_system(...)` | Builds the complete KKT system, carrying inner-level stationarity, inequality rows and multipliers into the outer levels: `complementarity = :exact` (equations (2.12)–(2.17)) or `:perturbed` (equation (6.1), complementarity relaxed to ρ). |
 | `generate_slacked_scholtes_reduced_kkt_system(...)` | Builds the reduced system in Scholtes form: the same recursion as the reduced generator, with the relaxation σ ⊙ γ ≤ ρ𝟙 written as σ ⊙ γ + u − ρ𝟙 = 0 (u ≥ 0) and the lower levels' relaxed complementarity carried as an exact product σ̂ ⊙ ϕ = 0 (see below). |
-| `initialize_scholtes!(...)` | Starts the Scholtes system at a primal guess and a level ρ: a cold start (every inequality strictly satisfied) or a warm, continuation start. |
+| `initialize_scholtes!(...)` | Starts the Scholtes system at a primal guess and a stage ρ: a cold start (every inequality strictly satisfied) or a warm, continuation start. |
 
-From the source, the reduced formulation appears to encode lower-level stationarity
-and complementarity information more compactly through recursively propagated
-policy conditions and multipliers. The complete formulation keeps a more explicit
-representation of inner KKT variables and constraints. The quasi formulation is
-a reduced formulation with selected higher-order derivative terms omitted.
+The reduced formulation carries the lower levels' stationarity upward as policy
+constraints with their own multipliers; the complete formulation keeps every lower
+level's KKT conditions and multipliers explicitly; the quasi formulation is the
+reduced one without the terms differentiated more than `quasi_order` times.
 
 ### `src/goop_kkt_system.jl`
 
@@ -170,7 +158,7 @@ using ReducedGOOP: generate_slacked_scholtes_reduced_kkt_system, initialize_scho
 kkt = generate_slacked_scholtes_reduced_kkt_system(goop)
 z₀ = initialize_scholtes!(zeros(kkt.variable_dimension), kkt, θ, x₀, ρ; warm = false) # g(x₀) > 0
 result = solve(ProjectedLM(), kkt, θ; z₀, options = ProjectedLMOptions(; ρ_schedule = [ρ]))
-result.x, result.status, result.residual   # primal answer, status, ‖K₀‖
+result.x, result.status, result.norm_K₀   # primal answer, status, ‖K₀‖
 ```
 
 A level marked `is_prioritized_constraint = true` introduces one
@@ -205,12 +193,16 @@ uses `ProjectedLM` on `generate_slacked_scholtes_reduced_kkt_system`.
 | File                                   | Description                                                                                                                                                         |
 | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `experiments/Intersection.jl`          | Two-player open-loop intersection example with trajectory dynamics, prioritized preferences, the reduced system in Scholtes form solved by `ProjectedLM`, and result plotting. |
-| `experiments/ExamplesQP.jl`            | Lightweight entry point for the quadratic-program example.                                                                                                          |
 | `experiments/robotic_arm_core.jl`      | Two-arm pot-carrying game (in Scholtes form, x₀ as the parameter θ), the ρ sweep and plan metrics.                                                                  |
 | `experiments/Robotic_arm_final.jl`     | The robotic arm, open loop or receding horizon: `Robotic_arm_final.demo(; receding_horizon = 1, plot_fig = true, …)`.                                               |
 | `experiments/Robotic_arm_receding.jl`  | Python/juliacall entry points (`build_mpc_context`, `create_planner_from_context`).                                                                                 |
 | `experiments/Robotic_arm_plotting.jl`  | Robotic-arm figures (Plots.jl): a PDF and an interactive HTML per initial guess and per solve, ported from ScholtesReducedGOOP.jl's `examples/robotic_arm_plot.jl`. |
 | `experiments/Intersection_plotting.jl` | Figures of the intersection scenario.                                                                                                                               |
+| `experiments/dynamics.jl`              | Dynamics constraints (unicycle, bicycle, planar double integrator, single integrators) and `unflatten_trajectory`. |
+| `experiments/MonteCarlo_Intersection.jl`| Monte Carlo study of the intersection scenario: reduced solves, complete-system checks of their solutions, figures. |
+| `experiments/MonteCarlo_RandomGOOP.jl` | The §6 random GOOP study: reduced and complete systems by `PDIP`, Tables 2–3 and Figs 2 and 4. |
+| `experiments/RandomGOOP_local_convergence.jl`| Fig 3: `PDIP` at a fixed ρ from starts around a solution (`solve_multi`, `ball_starts`). |
+| `experiments/RandomGOOP_plotting.py`   | The figures and tables of both RandomGOOP drivers. |
 
 ## Tests
 

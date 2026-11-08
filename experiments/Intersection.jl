@@ -14,8 +14,8 @@
 # Hard collision separation is 1.3 m at knots 2:T; controls are not bounded.
 # Warm rho chain: blue-first guess, then previous primals, preference slacks, lambda/psi.
 # Gamma/phi, solver slacks, relaxation variables, and eta restart at each rho.
-# Defaults: rho=1e-4,...,1e-8, max_inner_iters=500, tol=1e-4, solver=:normal.
-# KKT convergence: ||K₀||/sqrt(m)<tol; inner convergence: ||R||/sqrt(m)<rho.
+# Defaults: rho=1e-3,...,1e-8, max_inner_iters=500, tol=1e-5, linear_solver=:normal.
+# KKT convergence: ||K₀||/sqrt(m)<tol; inner convergence: ||K_ρ||/sqrt(m)<rho.
 # [solver exit] table reports residuals, goal errors, separation, and stop reasons.
 # Output: data/Intersection_open_loop/{debug|runs}/<run_id>/plots/.
 # One combined PDF per rho includes the trajectory, diagnostics, and warm start.
@@ -89,6 +89,9 @@ function get_setup(
         return (min(h, 0))^2
     end
 
+    # The penalty of a prioritized constraint h ≥ 0 in the two optional baselines without a hierarchy
+    # (use_scalarized_baseline, use_social_equilibrium_baseline): (ϵ − h)^(level + 2) where h < ϵ, else 0,
+    # differentiable where the branches meet, as the solver needs. The GOOP uses preference slacks instead.
     function smooth_piecewise_preference_objective(preference, level; ϵ = 0.0)
         ifelse(preference ≥ ϵ, 0.0, (ϵ - preference)^(level + 2))
     end

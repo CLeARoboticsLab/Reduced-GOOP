@@ -23,7 +23,7 @@ The fields, by group:
     its complementarity rows (`:interior_point`, `:exact`, `:perturbed` or `:scholtes`);
   - for the Scholtes system only: `complementarity_pairs` and `preference_slack_rows`, which its
     start (`initialize_scholtes!`) and K₀ read.
-The evaluation state (θ, ρ, a Jacobian memo) belongs to the solver, not to the container.
+The evaluation state (θ, ρ) belongs to the solver, not to the container.
 
 # The reduced system (`generate_slacked_reduced_kkt_system`)
 
@@ -52,17 +52,17 @@ and recovers x from the primal block. φ enters only through the stationarity ro
 more than `quasi_order` times (default 2) is set to zero.
 
 For the Scholtes form of the same hierarchy (exact φ rows, ρ homotopy) see
-`ScholtesKKTSystem` in src/scholtes_kkt.jl.
+`generate_slacked_scholtes_reduced_kkt_system`.
 """
 
 struct GOOPKKTSystem{T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T14}
-    "A callable function that computes K_ρ!(val, z; θ, ρ) in-place for 'val'"
+    "A callable function that computes K_ρ!(out, z; θ, ρ) in-place for 'out'"
     K_ρ!::T1
-    "A `SparseFunction` that computes ∇K_ρ!(val, z; θ, ρ) in-place for 'val'; it carries the Jacobian's buffer (`result_buffer`) and pattern (`rows`, `cols`)"
+    "A `SparseFunction` that computes ∇K_ρ!(J, z; θ, ρ) in-place for 'J'; it carries the Jacobian's buffer (`result_buffer`) and pattern (`rows`, `cols`)"
     ∇K_ρ!::T2
-    "A callable function that computes slack_targets!(val, z; θ, ρ), the slack expressions, in-place for 'val' (complete and Scholtes systems; a no-op otherwise)"
+    "A callable function that computes slack_targets!(out, z; θ, ρ), the slack expressions, in-place for 'out' (complete and Scholtes systems; a no-op otherwise)"
     slack_targets!::T3
-    "A callable function that computes K₀!(val, z; θ), the unrelaxed residual: K_ρ at ρ = 0, and for the Scholtes system with u = 0"
+    "A callable function that computes K₀!(out, z; θ), the unrelaxed residual: K_ρ at ρ = 0, and for the Scholtes system with u = 0"
     K₀!::T4
     "KKT dimension (rows of K_ρ)"
     kkt_dimension::Int
@@ -84,9 +84,9 @@ struct GOOPKKTSystem{T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T14}
     stationarity_dual_dims::T9
     "Coordinates of z associated to equality or stationarity duals"
     all_equality_stationarity_dual_dims::T10
-    "Coordinates of stationarity duals associated with innermost preferences"
+    "Coordinates of stationarity duals associated with innermost preferences (reduced system only; empty otherwise)"
     innermost_stationarity_dual_dims::T11
-    "Coordinates of z the solver keeps positive (the sign box): interior point slacks and inequality constraint duals"
+    "Coordinates of z the solver keeps positive (the sign box): interior point slacks and inequality constraint duals, and for the Scholtes system ϕ, σ̂ and u"
     nonnegative_dims::T12
     "K_ρ in symbolics"
     K_ρ_symbolic::T13
@@ -166,7 +166,7 @@ the generated code by orders of magnitude and avoids the pathological LLVM
 compile times of the Symbolics/RuntimeGeneratedFunctions path on large systems.
 
 Returns an in-place function `f!(result, z, θ, scalars...)`, one runtime value per symbolic
-scalar parameter: the relaxation, and the regularization η where a construction still has one.
+scalar parameter (every caller passes one, the relaxation ρ).
 """
 function _build_fd_codegen_function(
     exprs::AbstractVector{<:Symbolics.Num},
@@ -279,8 +279,7 @@ end
 """
 Default `fd_codegen_chunk_size` of every generator. The FastDifferentiation
 code generator otherwise emits each block as one function, whose compile time grows faster
-than linearly with its size (robotic arm: first solve 44 s unchunked, about 18 s at 32).
-`nothing` restores a single function per block.
+than linearly with its size. `nothing` restores a single function per block.
 """
 const FD_CODEGEN_CHUNK_SIZE = 32
 
@@ -385,10 +384,10 @@ function BuildGOOPKKTSystem(
             size(J_buffer),
         )
         slack_targets! = (out, z; θ, ρ) -> g!(out, z, θ, exact ? 0.0 : ρ)
-        # K₀ is K_ρ at ρ = 0. The Scholtes system writes σ ⊙ γ ≤ ρ𝟙 as σ ⊙ γ + u − ρ𝟙 = 0 with u ≥ 0, 
+        # K₀ is K_ρ at ρ = 0. The Scholtes system writes σ ⊙ γ ≤ ρ𝟙 as σ ⊙ γ + u − ρ𝟙 = 0 with u ≥ 0,
         # so its K₀ is K_ρ at ρ = 0 with u = 0: the row is then σ ⊙ γ. The u's coordinates in z come from
-        # complementarity_pairs (Scholtes only; empty otherwise, and then K₀ is just K_ρ at ρ = 0):
-        # `u_relaxation` is its u ≥ 0 in σ ⊙ γ + u - ρ = 0; set to be 0 for σ̂ ⊙ ϕ = 0).
+        # complementarity_pairs (Scholtes only; empty otherwise, and then K₀ is just K_ρ at ρ = 0): a
+        # pair's `u_relaxation` is its u in σ ⊙ γ + u − ρ = 0, and 0 for an exact pair σ̂ ⊙ ϕ = 0.
         u_dims = [pair.u_relaxation for pair in complementarity_pairs if pair.u_relaxation != 0]
         K₀! = if isempty(u_dims)
             (out, z; θ) -> K_ρ!(out, z; θ, ρ = 0.0)

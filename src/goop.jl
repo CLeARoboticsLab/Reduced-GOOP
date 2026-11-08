@@ -138,7 +138,7 @@ end
 
 """
 Construct the Reduced KKT system corresponding to a ParametricGOOP: the interior-point system
-(5.2), with the relaxed complementarity `σ ∘ γ = ρ`, as a `GOOPKKTSystem` for `PDIP`. Its Scholtes
+(5.2), with the relaxed complementarity `σ ⊙ γ = ρ`, as a `GOOPKKTSystem` for `PDIP`. Its Scholtes
 form is `generate_slacked_scholtes_reduced_kkt_system`. Code is
 generated with FastDifferentiation unless `codegen` says otherwise, split into functions of
 `fd_codegen_chunk_size` expressions (default `FD_CODEGEN_CHUNK_SIZE`; pass `typemax(Int)` for one
@@ -151,13 +151,13 @@ function generate_slacked_reduced_kkt_system(
     goop::ParametricGOOP;
     drop_higher_order_terms = false,
     backend_options = (;),
-    codegen = nothing,
-    fd_codegen_chunk_size = nothing,
+    codegen = :fast_differentiation,
+    fd_codegen_chunk_size = FD_CODEGEN_CHUNK_SIZE,
     quasi_order::Int = 2,
 )
     quasi_order >= 1 || throw(ArgumentError("quasi_order must be >= 1, got $quasi_order"))
-    codegen = something(codegen, :fast_differentiation)
-    fd_codegen_chunk_size = something(fd_codegen_chunk_size, FD_CODEGEN_CHUNK_SIZE)
+    codegen in (:native, :fast_differentiation) ||
+        throw(ArgumentError("Unknown codegen option: $codegen. Use :native or :fast_differentiation."))
     # Symbolic variables for all primals and parameters.
     backend = SymbolicTracingUtils.SymbolicsBackend()
     @timeit TO "symbolic variable construction" begin
@@ -505,8 +505,8 @@ end
 function generate_slacked_quasi_kkt_system(
     goop::ParametricGOOP;
     backend_options = (;),
-    codegen = nothing,
-    fd_codegen_chunk_size = nothing,
+    codegen = :fast_differentiation,
+    fd_codegen_chunk_size = FD_CODEGEN_CHUNK_SIZE,
     quasi_order::Int = 2,
 )
     generate_slacked_reduced_kkt_system(
@@ -533,7 +533,7 @@ order, with the Scholtes relaxation in place of the interior-point one. Level k'
 
 over z = [x; s; σ; λ; γ; ψ; ϕ; σ̂; u], where Lₖ = cₖ − ψₖᵀπₖ₊₁ − λₖᵀf − γₖᵀGₖ − ϕₖᵀ(ρ𝟙 − [Gₘ ⊙ γₘ]ₘ) is
 the interior-point system's Lagrangian but for its last term, whose multipliers ϕ ≥ 0 here. The
-sign box (`nonnegative_dims`) is σ, γ, ϕ, σ̂ and u; K₀ is F at ρ = 0 and u = 0. Start it from
+sign box (`nonnegative_dims`) is σ, γ, ϕ, σ̂ and u; K₀ is K_ρ at ρ = 0 and u = 0. Start it from
 `initialize_scholtes!`, which reads `slack_expressions` (G for σ, ρ𝟙 − Gₘ ⊙ γₘ for σ̂),
 `complementarity_pairs` and `preference_slack_rows`. With `drop_higher_order_terms = true`
 (quasi), every term of ∇Lₖ that would be differentiated more than `quasi_order` times is set to
@@ -548,6 +548,8 @@ function generate_slacked_scholtes_reduced_kkt_system(
     quasi_order::Int = 2,
 )
     quasi_order >= 1 || throw(ArgumentError("quasi_order must be >= 1, got $quasi_order"))
+    codegen in (:native, :fast_differentiation) ||
+        throw(ArgumentError("Unknown codegen option: $codegen. Use :native or :fast_differentiation."))
     # Symbolic variables for all primals and parameters.
     backend = SymbolicTracingUtils.SymbolicsBackend()
     @timeit TO "symbolic variable construction" begin
@@ -998,7 +1000,7 @@ end
                          preference_slacks = nothing, warm = true) -> z
 
 A start for the Scholtes system (`generate_slacked_scholtes_reduced_kkt_system`) at the primal `x`
-and the level ρ, written into `z`: the Scholtes engine's starts, value for value. With `warm` (a
+and the stage ρ, written into `z`: the Scholtes engine's starts, value for value. With `warm` (a
 continuation start):
 
     s     the preference slacks: max(seed, margin, margin − h), margin = max(s_floor, 0.1ρ);
@@ -1458,7 +1460,7 @@ function generate_slacked_complete_kkt_system(
         ArgumentError("complementarity must be :exact or :perturbed, got $complementarity"),
     )
     codegen in (:native, :fast_differentiation) ||
-        throw(ArgumentError("unknown codegen option: $codegen"))
+        throw(ArgumentError("Unknown codegen option: $codegen. Use :native or :fast_differentiation."))
     for (player, preferences) in enumerate(goop.preferences)
         length(preferences) >= 2 || throw(
             ArgumentError(
@@ -1470,14 +1472,17 @@ function generate_slacked_complete_kkt_system(
 
     # Symbolic variables for all primals and parameters.
     backend = SymbolicTracingUtils.SymbolicsBackend()
-    x =
-        SymbolicTracingUtils.make_variables(backend, :x, sum(goop.primal_dims)) |>
-        to_blockvector(goop.primal_dims)
-    θ =
-        SymbolicTracingUtils.make_variables(backend, :θ, sum(goop.parameter_dims)) |>
-        to_blockvector(goop.parameter_dims)
-    ρ = only(SymbolicTracingUtils.make_variables(backend, :ρ, 1))
-    symbolic_type = eltype(x)
+    @timeit TO "symbolic variable construction" begin
+        x =
+            SymbolicTracingUtils.make_variables(backend, :x, sum(goop.primal_dims)) |>
+            to_blockvector(goop.primal_dims)
+        θ =
+            SymbolicTracingUtils.make_variables(backend, :θ, sum(goop.parameter_dims)) |>
+            to_blockvector(goop.parameter_dims)
+        ρ = only(SymbolicTracingUtils.make_variables(backend, :ρ, 1))
+
+        symbolic_type = eltype(x)
+    end
 
     # Keep track of all the preference (s) and interior point (σ) slacks we create, and of the
     # expressions the slacks σ stand for.
@@ -1714,8 +1719,8 @@ end
 
 # Helper functions
 # Note: the reduced and complete generators differentiate with `_fast_gradient`, not with
-# `SymbolicTracingUtils.gradient`, because it is faster on large systems: both give the same
-# expressions (checked string for string, and the compiled residuals and Jacobians bitwise).
+# `SymbolicTracingUtils.gradient`, because it is faster on large systems; both give the same
+# expressions.
 
 """
 `Symbolics.gradient(O, x)`, expression for expression, without walking all of `O` once per
@@ -1763,15 +1768,6 @@ function _provably_distinct_leaf(v)
     SymbolicUtils.issym(v) && return !SymbolicUtils.is_array_shape(SymbolicUtils.shape(v))
     SymbolicUtils.iscall(v) && SymbolicUtils.operation(v) === getindex || return false
     return all(i -> i isa Integer || SymbolicUtils.isconst(i), @view SymbolicUtils.arguments(v)[2:end])
-end
-
-function unflatten_trajectory(z, state_dimension, control_dimension)
-    Z = reshape(z, state_dimension + control_dimension, :)
-    X = @view Z[1:state_dimension, :]
-    U = @view Z[(state_dimension + 1):end, :]
-    xs = eachcol(X) .|> collect
-    us = eachcol(U) .|> collect
-    (; xs, us)
 end
 
 function to_blockvector(block_dimensions)

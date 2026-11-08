@@ -15,10 +15,9 @@ add Revise, Infiltrator, ProgressMeter, JLD2, Dates, BenchmarkTools, JuliaFormat
 activate experiments/; resolve; instantiate;
 # run
 using Revise; using Infiltrator;
-includet("experiments/Robotic_arm_receding.jl");
-# run the demo and save the results
-Robotic_arm_receding.demo(;num_mpc_steps=50);
+includet("experiments/Robotic_arm_final.jl");
+# run the demo: 50 closed-loop (receding-horizon) steps
+Robotic_arm_final.demo(receding_horizon = 50);
 ```
 
-When the corresponding options are enabled,
-results will be saved to ``data/robotic_arm_receding_horizon/runs/``.
+The demo draws its figures (`plot_fig = true` by default) and writes no data files.

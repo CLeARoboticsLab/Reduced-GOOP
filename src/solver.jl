@@ -21,17 +21,17 @@ struct PDIP <: SolverType end
 """
 Options for `solve(PDIP(), …)`.
 
-  - `ρ_schedule`: the relaxation of each level. With `linesearch = :backtracking` the levels are
-    solved in turn. With `:fraction_to_boundary`, ρ starts at `first(ρ_schedule)` and, as in the old
-    interior-point solver, is multiplied by `1 - exp(-tightening_rate)` after a solved level and by
-    `1 + exp(-loosening_rate)` after an unsolved one (capped at 1), for at most `max_outer_iters` levels.
-  - `max_inner_iters`: Newton steps per level (Algorithm 5.1's t_max).
+  - `ρ_schedule`: the relaxation of each stage. With `linesearch = :backtracking` the stages are
+    solved in turn. With `:fraction_to_boundary`, ρ starts at `first(ρ_schedule)` and is multiplied
+    by `1 - exp(-tightening_rate)` after a solved stage and by `1 + exp(-loosening_rate)` after an
+    unsolved one (capped at 1), for at most `max_outer_iters` stages.
+  - `max_inner_iters`: Newton steps per stage (Algorithm 5.1's t_max).
   - `tol`: bar on ‖K₀(z)‖ (K₀ = K_ρ at ρ = 0), checked before every Newton step; below it the solve stops.
-    `tol_inner`: bar on ‖K_ρ(z)‖; below it the level is solved.
+    `tol_inner`: bar on ‖K_ρ(z)‖; below it the stage is solved.
   - `linesearch`: `:backtracking` (Algorithm 5.1: α ← β α while ‖K_ρ(z + α δz)‖ ≥ ‖K_ρ(z)‖ or a
     coordinate in `nonnegative_dims` would not stay positive, so that an accepted step decreases ‖K_ρ‖
-    strictly; the step fails below `min_step`) or `:fraction_to_boundary` (the old
-    solver's τ-rule: γ moves by α_γ, every other variable by α_σ, with no decrease test).
+    strictly; the step fails below `min_step`) or `:fraction_to_boundary` (the fraction-to-the-boundary
+    rule with τ: γ moves by α_γ, every other variable by α_σ, with no decrease test).
   - `linear_solver`: `:svd` (default), `:sparseQR_J`, `:sparseQR_Jᵀ`, `:klu` or `:ldl`; see
     `_newton_step!`.
   - `η > 0`: the Levenberg–Marquardt parameter of `:klu` and `:ldl`, whose step is
@@ -72,10 +72,10 @@ a primal one (length of `kkt.primal_dims`; then s, σ and γ start at 1 and ever
 Returns `(; status, termination_reason, z, x, ρ, norm_K₀, norm_K_ρ, newton_steps,
 svd_fallbacks)`, and with `record_convergence` also `ρ_history`, `norm_K_ρ_history`,
 `norm_K₀_history` (one entry per stopping test: the iterate before each Newton step and, unless the
-level ended at `max_inner_iters`, the one it stopped at) and `step_size_history` (one per Newton step).
-`newton_steps` counts the Newton steps taken over every level; a step the line search rejects is not one.
+stage ended at `max_inner_iters`, the one it stopped at) and `step_size_history` (one per Newton step).
+`newton_steps` counts the Newton steps taken over every stage; a step the line search rejects is not one.
 `norm_K₀` is ‖K₀(z)‖ (K₀ = K_ρ at ρ = 0) at the returned `z`, `status` is `:solved` iff it is
-below `tol`, and `norm_K_ρ` is ‖K_ρ(z)‖ at the last level.
+below `tol`, and `norm_K_ρ` is ‖K_ρ(z)‖ at the last stage.
 """
 function solve(
     ::PDIP,
@@ -130,7 +130,7 @@ function solve(
     J = kkt.∇K_ρ!.result_buffer
     K_ρ = zeros(kkt.kkt_dimension) # K_ρ(z)
     K_ρ_trial = zeros(kkt.kkt_dimension) # K_ρ(z + α δz)
-    K₀ = zeros(kkt.kkt_dimension) # K₀(z): K_ρ(z) at ρ = 0 (for the Scholtes system with u = 0), for ‖K₀‖
+    K₀ = zeros(kkt.kkt_dimension) # K₀(z): K_ρ(z) at ρ = 0, for ‖K₀‖
     δz = zeros(kkt.variable_dimension)
     z_trial = similar(z)
     nonnegative_trial = @view z_trial[kkt.nonnegative_dims] # @view to avoid copy of selected entries
@@ -145,14 +145,14 @@ function solve(
     termination_reason = :max_inner_iters
     converged = false
     ρ = first(ρ_schedule)
-    level = 1
+    stage = 1
     while true
         kkt.K_ρ!(K_ρ, z; θ, ρ)
         norm_K_ρ = norm(K_ρ)
-        level_solved = false
+        stage_solved = false
         termination_reason = :max_inner_iters
         for _ in 1:max_inner_iters
-            # Stopping tests: ‖K₀‖ < tol ends the solve, ‖K_ρ(z)‖ < tol_inner ends this level.
+            # Stopping tests: ‖K₀‖ < tol ends the solve, ‖K_ρ(z)‖ < tol_inner ends this stage.
             kkt.K₀!(K₀, z; θ)
             norm_K₀ = norm(K₀)
             if record_convergence
@@ -169,7 +169,7 @@ function solve(
                 break
             end
             if norm_K_ρ < tol_inner
-                level_solved = true
+                stage_solved = true
                 termination_reason = :inner_tolerance_reached
                 break
             end
@@ -223,15 +223,15 @@ function solve(
         )
         converged && break
 
-        # The next level.
+        # The next stage.
         if linesearch === :backtracking
-            level == length(ρ_schedule) && break
-            level += 1
-            ρ = ρ_schedule[level]
+            stage == length(ρ_schedule) && break
+            stage += 1
+            ρ = ρ_schedule[stage]
         else
-            level == max_outer_iters && break
-            level += 1
-            ρ *= level_solved ? 1 - exp(-tightening_rate) : 1 + exp(-loosening_rate)
+            stage == max_outer_iters && break
+            stage += 1
+            ρ *= stage_solved ? 1 - exp(-tightening_rate) : 1 + exp(-loosening_rate)
             ρ = min(ρ, 1.0)
         end
     end
@@ -256,8 +256,9 @@ function solve(
     (; result..., ρ_history, norm_K_ρ_history, norm_K₀_history, step_size_history)
 end
 
-"""Helper function to compute the step size `α` which solves:
-                   α* = max(α ∈ [0, 1] : v + α δ ≥ (1 - τ) v).
+"""
+The step size of the fraction-to-the-boundary rule: the first α = `max_stepsize` · `decay`ᵏ with
+v + α δ ≥ (1 − τ) v, an approximation of max(α ∈ [0, 1] : v + α δ ≥ (1 − τ) v); NaN once α falls below `tol`.
 """
 function _fraction_to_the_boundary(
     v,
@@ -293,10 +294,10 @@ struct ProjectedLM <: SolverType end
 """
 Options for `solve(ProjectedLM(), …)`. The fields it shares with `PDIPOptions` mean the same.
 
-  - `ρ_schedule`: the relaxation of each stage; the levels are solved in turn.
+  - `ρ_schedule`: the relaxation of each stage; the stages are solved in turn.
   - `max_inner_iters`: Newton steps per stage.
   - `tol`: bar on ‖K₀(z)‖ (K₀ = K_ρ at ρ = 0), checked before every Newton step; below it the solve stops.
-    `tol_inner`: bar on ‖K_ρ(z)‖; below it the level is solved.
+    `tol_inner`: bar on ‖K_ρ(z)‖; below it the stage is solved.
   - `linear_solver`: `:normal` (default), `:klu` or `:ldl`; see `_newton_step!`.
   - `η`: the first Levenberg–Marquardt parameter; the step on the free coordinates is
     −J_Fᵀ(J_F J_Fᵀ + η²I)⁻¹K_ρ. After each line search η is updated from the gain ratio (the actual over
@@ -395,7 +396,7 @@ function solve(
         end
     end
     all(>(0), view(z, kkt.nonnegative_dims)) ||
-        throw(ArgumentError("z₀ must be positive on nonnegative_dims (σ and γ)."))
+        throw(ArgumentError("z₀ must be positive on nonnegative_dims (σ and γ, and for the Scholtes system ϕ, σ̂ and u)."))
 
     # Set up common memory.
     J = kkt.∇K_ρ!.result_buffer
@@ -421,13 +422,13 @@ function solve(
     termination_reason = :max_inner_iters
     converged = false
     ρ = first(ρ_schedule)
-    level = 1
+    stage = 1
     while true
         kkt.K_ρ!(K_ρ, z; θ, ρ)
         norm_K_ρ = norm(K_ρ)
         termination_reason = :max_inner_iters
         for _ in 1:max_inner_iters
-            # Stopping tests: ‖K₀‖ < tol ends the solve, ‖K_ρ(z)‖ < tol_inner ends this level.
+            # Stopping tests: ‖K₀‖ < tol ends the solve, ‖K_ρ(z)‖ < tol_inner ends this stage.
             kkt.K₀!(K₀, z; θ)
             norm_K₀ = norm(K₀)
             if record_convergence
@@ -459,8 +460,8 @@ function solve(
             ε = min(proj_eps, sqrt(projected_gradient²))
             copyto!(SparseArrays.nonzeros(J_F), SparseArrays.nonzeros(J))
             for (k, i) in enumerate(kkt.nonnegative_dims)
-                held[k] = z[i] - floors[k] <= ε && g[i] > 0 # held
-                held[k] && (view(SparseArrays.nonzeros(J_F), SparseArrays.nzrange(J_F, i)) .*= 0.0) # free
+                held[k] = z[i] - floors[k] <= ε && g[i] > 0
+                held[k] && (view(SparseArrays.nonzeros(J_F), SparseArrays.nzrange(J_F, i)) .*= 0.0) # held: its column leaves J_F
             end
 
             # Newton step on the free coordinates: J_F δz = −K_ρ, regularized by η² (Levenberg–Marquardt).
@@ -536,10 +537,10 @@ function solve(
         )
         converged && break
 
-        # The next level.
-        level == length(ρ_schedule) && break
-        level += 1
-        ρ = ρ_schedule[level]
+        # The next stage.
+        stage == length(ρ_schedule) && break
+        stage += 1
+        ρ = ρ_schedule[stage]
     end
 
     # Evaluate the stopping criterion at the returned iterate.
