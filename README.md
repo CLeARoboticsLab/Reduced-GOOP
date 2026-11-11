@@ -187,8 +187,8 @@ continuation.
 | `experiments/Intersection_plotting.jl` | Figures of the intersection scenario.                                                                                                                               |
 | `experiments/dynamics.jl`              | Dynamics constraints (unicycle, bicycle, planar double integrator, single integrators) and `unflatten_trajectory`. |
 | `experiments/MonteCarlo_Intersection.jl`| Monte Carlo study of the intersection scenario: reduced solves, complete-system checks of their solutions, figures. |
-| `experiments/MonteCarlo_RandomGOOP.jl` | The §6 random GOOP study: reduced and complete systems by `PDIP`, Tables 2–3 and Figs 2 and 4. |
-| `experiments/RandomGOOP_local_convergence.jl`| Fig 3: `PDIP` at a fixed ρ from starts around a solution (`solve_multi`, `ball_starts`). |
+| `experiments/MonteCarlo_RandomGOOP.jl` | The §6 random GOOP study: the reduced system (Scholtes by `ProjectedLM`, or (5.2) by `PDIP`) and the complete system (by `ProjectedLM` or `PDIP`), Tables 2–3 and Figs 2 and 4. |
+| `experiments/RandomGOOP_local_convergence.jl`| Fig 3: each system's solver (by default `ProjectedLM`) at a fixed ρ from starts around a solution (`solve_multi`, `ball_starts`). |
 | `experiments/RandomGOOP_plotting.py`   | The figures and tables of both RandomGOOP drivers. |
 
 ## Tests
