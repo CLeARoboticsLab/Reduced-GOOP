@@ -262,20 +262,20 @@ end
 
 """
 Default experiment settings, grouped by purpose; a setting that Intersection.demo also has uses
-demo's name. Replace entries with `run(overrides = (; num_instances = 50))`. Saved verbatim in
-results.jls.
+demo's name. Replace entries with `run(overrides = (; num_instances = 50))`. 
+Saved in results.jls.
 """
 default_settings() = (;
     # Monte Carlo
-    num_instances=2,                             # accepted initial states per objective variant
+    num_instances=100,                             # accepted initial states per objective variant
     rng_seed=123,                                # Xoshiro seed for sampling
-    objective_variants=(:cosh,),                 # names in objective_variants(settings); (:quadratic, :cosh)
+    objective_variants=(:quadratic, :cosh),                 # names in objective_variants(settings); (:quadratic, :cosh)
     complete_formulations=(:exact,),             # names in `builders` (run)
     comparison_modes=(:fixed_primal,),           # names in `modes` (run)               ; (:fixed_primal, :warmstart)
     # Scenario (Intersection.jl). Units m, s; state [px, py, vx, vy], or [px, py, v, ψ] for the unicycle;
     # P1 drives along x, P2 along y.
     dynamics_model=:planar_double_integrator,    # or :unicycle, which replaces the unicycle_defaults() entries
-    planning_horizon=10,                          # state knots; horizon (planning_horizon - 1) * time_step = 3 s
+    planning_horizon=10,                          # state knots; horizon (planning_horizon - 1) * time_step = 2.7 s
     time_step=0.3,
     base_initial_state1=[-6.0, -1.0, 1.5, 0.0],  # unperturbed initial states; sampling perturbs them
     base_initial_state2=[1.0, -5.0, 0.0, 2.0],
@@ -326,8 +326,9 @@ default_settings() = (;
 """
 Defaults that dynamics_model = :unicycle replaces, since it reads a state as [px, py, v, ψ]: P2 starts at
 2 m/s heading along its lane (+y), as the double integrator's vy = 2, and only its speed is perturbed.
-P1's defaults read the same in both models: 1.5 m/s heading along +x. Everything else is shared,
-control_bounds included: they bound the unicycle's accelerations [a, v·ω] in m/s².
+P1's defaults read the same in both models: 1.5 m/s heading along +x. The unicycle also has its own
+η settings, eta_0 and retry_eta. Every other setting is shared, control_bounds included: for the
+unicycle they bound its accelerations [a, v·ω] in m/s².
 """
 unicycle_defaults() = (; 
     base_initial_state2=[1.0, -5.0, 2.0, π/2], 
@@ -340,13 +341,15 @@ unicycle_defaults() = (;
 
 """
 Default settings (with unicycle_defaults() for :unicycle) merged with `overrides`, then checked: an
-unknown name, an unknown dynamics model or an empty schedule is an error.
+unknown name, an unknown dynamics model or an empty schedule is an error. The unicycle defaults
+apply whenever the resulting dynamics_model is :unicycle, whether default_settings() or `overrides`
+sets it; `overrides` still win over them.
 """
 function validated_settings(overrides)
     defaults = default_settings()
     unknown = setdiff(keys(overrides), keys(defaults))
     isempty(unknown) || error("Unknown setting(s) in overrides: $(join(unknown, ", "))")
-    is_unicycle(overrides) && (defaults = merge(defaults, unicycle_defaults()))
+    is_unicycle(merge(defaults, overrides)) && (defaults = merge(defaults, unicycle_defaults()))
     settings = merge(defaults, overrides)
     settings.dynamics_model in (:planar_double_integrator, :unicycle) ||
         error("dynamics_model must be :planar_double_integrator or :unicycle")
@@ -599,7 +602,8 @@ end
 Run the experiment described in the module docstring: sample the instances, then for each objective
 variant build its systems, warm up, and solve every trial's reduced system and complete checks.
 Writes results.jls (after every check) and report.pdf to a new directory under `output_dir`, and
-returns the run's directory, settings, instances, results and metadata.
+prints pass counts and achieved-residual statistics at the end. Returns the run's directory,
+settings, instances, results, metadata and residual_statistics, also saved in results.jls.
 """
 function run(; overrides=(;))
     settings = validated_settings(overrides)
@@ -652,7 +656,7 @@ function run(; overrides=(;))
     plot_results(directory)
     println("Saved results.jls and report.pdf: $directory")
     print_final_summary(results, settings)
-    (; directory, settings, instances, results, metadata)
+    (; directory, settings, instances, results, metadata, residual_statistics=residual_statistics(results, settings))
 end
 # End of Monte Carlo Intersection experiments
 
@@ -1420,6 +1424,7 @@ function save_results(directory, settings, instances, sampling, metadata, result
         sampling,
         metadata,
         results,
+        residual_statistics=residual_statistics(results, settings),
         julia=string(VERSION),
         blas_threads=BLAS.get_num_threads(),
     )
@@ -1476,10 +1481,54 @@ function pass_count_lines(results, settings)
     lines
 end
 
-"Final console summary: the pass counts, as on the report's summary page."
+"""
+Arithmetic mean and sample standard deviation of the kept iterates' achieved ‖K₀‖/√m, per
+objective variant: reduced solves and each complete formulation's :fixed_primal checks.
+Only accepted solves contribute to the mean and standard deviation. `successes` counts accepted
+solves; `attempted` counts all solves, including rejected results and exceptions. Skipped checks
+are not attempted. The mean is NaN with no successes; the sample standard deviation is NaN
+with fewer than two successes.
+"""
+function residual_statistics(results, settings)
+    function summarize(solves)
+        values = [s.validation.rms_K₀ for s in solves if s.accepted]
+        (;
+            successes=length(values),
+            attempted=length(solves),
+            mean=isempty(values) ? NaN : mean(values),
+            std=length(values)<2 ? NaN : std(values),
+        )
+    end
+    statistics = NamedTuple[]
+    for variant in settings.objective_variants
+        rows = filter(r -> r.variant === variant, results)
+        reduced = [r.reduced for r in rows]
+        push!(statistics, (; variant, system=:reduced, formulation=nothing, mode=nothing, summarize(reduced)...))
+        :fixed_primal in settings.comparison_modes || continue
+        for formulation in settings.complete_formulations
+            complete = [
+                c.result for r in rows for c in r.checks if
+                c.formulation === formulation && c.mode === :fixed_primal && haskey(c, :result)
+            ]
+            push!(statistics, (; variant, system=:complete, formulation, mode=:fixed_primal, summarize(complete)...))
+        end
+    end
+    statistics
+end
+
+"Final console summary: pass counts and the achieved-residual means and sample standard deviations."
 function print_final_summary(results, settings; io=stdout)
     println(io, "\n[final summary] Pass counts")
     foreach(line -> println(io, line), pass_count_lines(results, settings))
+    println(io, "\n[final summary] Achieved residuals ‖K₀‖/√m")
+    @printf(io, "%-10s %-36s %18s %12s %12s\n", "objective", "system", "success/attempted", "mean", "sample std")
+    number(x) = isfinite(x) ? @sprintf("%.3e", x) : "N/A"
+    for s in residual_statistics(results, settings)
+        name = s.system === :reduced ? "reduced" : "complete :$(s.formulation), :$(s.mode)"
+        @printf(io, "%-10s %-36s %18s %12s %12s\n", s.variant, name, "$(s.successes)/$(s.attempted)", number(s.mean), number(s.std))
+    end
+    println(io, "Mean and sample std use successful (accepted) solves only; skipped checks are not attempts.")
+    println(io, "N/A: no successes (mean), or fewer than two successes (sample std).")
     flush(io)
     nothing
 end
@@ -2013,7 +2062,7 @@ function summary_page(data, directory)
         "Every solve uses ProjectedLM (the reduced system in Scholtes form); each ρ stage's inner loop stops once its scaled relaxed residual drops below min(ρ, $(settings.inner_ρ_tol)), at max_inner_iters, or on a line-search stall, unless the scaled residual reaches its tolerance first. :fixed_primal recovery solves the complete system with the physical trajectory as a parameter, so only the remaining columns move; nonnegative coordinates stay inside the sign box. Exact complete equations have no ρ schedule. All complete rows remain after fixing physical columns.",
     )
     paragraph!(
-        "Residual curves show the scaled relaxed and unrelaxed residuals on logarithmic axes, concatenated across stages, against solver-trace samples (solver iterates). Reduced curves include all sampled trials; complete curves include all attempted checks, using each check's kept (best) try. Histograms use accepted pairs only. Curves use available samples only: no padding after a run ends, and a gap where a sample is not finite. On the aggregate page, lines are geometric means and bands are mean +/- one sample standard deviation in log10 residual, drawn at indices with at least two contributors. Stage endpoints and raw histories are in results.jls. Each trial page shows that trial's own curves (the relaxed-residual plot marks where each reduced ρ stage starts), its reduced and :warmstart complete trajectories next to their vehicle separation, and their $(is_unicycle(settings) ? "speed, heading, acceleration and yaw-rate" : "velocity and acceleration") profiles overlaid (solid: reduced; dashed: complete), including failed returned iterates with explicit status labels.",
+        "Residual curves show the scaled relaxed and unrelaxed residuals on logarithmic axes, concatenated across stages, against solver-trace samples (solver iterates). Reduced curves include all sampled trials; complete curves include all attempted checks, using each check's kept (best) try. Histograms use accepted pairs only. Curves use available samples only: no padding after a run ends, and a gap where a sample is not finite. On the aggregate page, lines are geometric means and bands are mean +/- one sample standard deviation in log10 residual, drawn at indices with at least two contributors. Stage endpoints and raw histories are in results.jls. Each trial page shows that trial's own curves (the relaxed-residual plot marks where each reduced ρ stage starts), its reduced and :warmstart complete trajectories next to their vehicle separation, and their $(is_unicycle(settings) ? "speed, heading, acceleration a and sideways acceleration v·ω" : "velocity and acceleration") profiles overlaid (solid: reduced; dashed: complete), including failed returned iterates with explicit status labels.",
     )
     paragraph!(
         "A solve is accepted iff its scaled residual is at most $(settings.tol) (reduced) or $(settings.complete_tol) (complete); the solver's exit status is not required. A ρ chain runs all its stages and is judged at the stage with the lowest scaled residual, and a complete check keeps its best try (retries restart with the next η); that iterate is the one kept, compared and plotted. Fixed trajectories retain the reduced solution's finite physical residual; these rows are not removed. The full residual includes stationarity, equality, complementarity, and auxiliary-slack equations. The scaled relaxed residual, largest residual entry, multiplier signs and original physical feasibility are recorded as diagnostics only. Failures do not prove incompatibility.",
