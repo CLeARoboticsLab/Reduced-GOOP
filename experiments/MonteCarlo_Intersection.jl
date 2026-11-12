@@ -612,7 +612,10 @@ function run(; overrides=(;))
     directory = run_directory(settings.output_dir)
     instances, sampling = sample_instances(Xoshiro(settings.rng_seed), settings)
     results, metadata = Any[], Any[]
-    save() = save_results(directory, settings, instances, sampling, metadata, results)
+    save() = save_results(
+        directory, settings, instances, sampling, metadata, results;
+        extras=(; residual_statistics=residual_statistics(results, settings)),
+    )
     # Save before checking the sample count, so the rejection records survive a sampling failure.
     save()
     length(instances) == settings.num_instances || error(
@@ -1416,15 +1419,18 @@ function trajectory_metrics(reduced, complete, settings)
     )
 end
 
-"Write results.jls via a temporary file and a rename, so an interrupted save never leaves a truncated file."
-function save_results(directory, settings, instances, sampling, metadata, results)
+"""
+Write results.jls via a temporary file and a rename, so an interrupted save never leaves a truncated file.
+`extras` adds a study's own fields to the saved payload; MonteCarlo_RandomGOOP.jl shares this function.
+"""
+function save_results(directory, settings, instances, sampling, metadata, results; extras=(;))
     payload = (;
         settings,
         instances,
         sampling,
         metadata,
         results,
-        residual_statistics=residual_statistics(results, settings),
+        extras...,
         julia=string(VERSION),
         blas_threads=BLAS.get_num_threads(),
     )
