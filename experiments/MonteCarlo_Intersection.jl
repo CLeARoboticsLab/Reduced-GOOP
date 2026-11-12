@@ -1685,69 +1685,76 @@ function plot_acceptance_histogram!(position, legend_position, rows, settings, m
 end
 
 """
-Report page for one trial: initial states and verdicts, this trial's residual histories, the
-reduced and :warmstart complete trajectories next to their vehicle separation, then velocity and
-acceleration profiles overlaid (solid: reduced; dashed: complete). A :fixed_primal check keeps the
-reduced trajectory, so it gets a verdict line and residual curves but no trajectory of its own.
+Report page for one trial: initial states and verdicts, this trial's residual histories, then
+one aligned row of reduced and :warmstart complete trajectories, vehicle separation and speed.
+Other state and acceleration profiles follow below (solid: reduced; dashed: complete). A
+:fixed_primal check keeps the reduced trajectory, so it gets a verdict line and residual curves
+but no trajectory of its own. `trajectory_only=true` draws just the aligned row for export.
 """
-function trial_page(data, row)
+function trial_page(data, row; trajectory_only=false)
     (; settings) = data
     metadata = only(filter(m -> m.variant === row.variant, data.metadata))
-    figure = Intersection.serif_figure(size=(1600, 1600), fontsize=18, figure_padding=30)
-    CM.Label(figure[1, 1], "Trial $(row.trial) | $(row.variant)"; fontsize=26)
-    s1, s2 = data.instances[row.trial].states
+    figure = Intersection.serif_figure(
+        size=trajectory_only ? (1600, 500) : (1600, 1600),
+        fontsize=trajectory_only ? 24 : 18,
+        figure_padding=30,
+    )
     # The one wording, used once per check, for a check that never ran.
     skipped = "skipped (reduced solve rejected)"
-    verdicts = [
-        "P1 initial state $(state_label(settings)): $(round.(s1; digits=3))",
-        "P2 initial state $(state_label(settings)): $(round.(s2; digits=3))",
-        reduced_verdict(row.reduced, settings),
-    ]
-    for check in row.checks
-        formulation, mode = (; name=check.formulation), (; name=check.mode)
-        push!(
-            verdicts,
-            haskey(check, :result) ?
-            complete_verdict(formulation, mode, check.result, check.metrics, check.category, settings) :
-            "→ :$(check.formulation), :$(check.mode) mode $skipped",
-        )
-    end
-    CM.Label(figure[2, 1], join(verdicts, "\n"); font=MONO_FONT, fontsize=14, halign=:left, justification=:left)
+    if !trajectory_only
+        CM.Label(figure[1, 1], "Trial $(row.trial) | $(row.variant)"; fontsize=26)
+        s1, s2 = data.instances[row.trial].states
+        verdicts = [
+            "P1 initial state $(state_label(settings)): $(round.(s1; digits=3))",
+            "P2 initial state $(state_label(settings)): $(round.(s2; digits=3))",
+            reduced_verdict(row.reduced, settings),
+        ]
+        for check in row.checks
+            formulation, mode = (; name=check.formulation), (; name=check.mode)
+            push!(
+                verdicts,
+                haskey(check, :result) ?
+                complete_verdict(formulation, mode, check.result, check.metrics, check.category, settings) :
+                "→ :$(check.formulation), :$(check.mode) mode $skipped",
+            )
+        end
+        CM.Label(figure[2, 1], join(verdicts, "\n"); font=MONO_FONT, fontsize=14, halign=:left, justification=:left)
 
-    residuals = CM.GridLayout(figure[3, 1])
-    for (column, field, title, ylabel) in (
-        (1, :norm_K₀, "True KKT residual", "‖K₀‖/√m"),
-        (2, :norm_K_ρ, "Relaxed residual", "‖K_ρ‖/√m"),
-    )
-        axis = CM.Axis(
-            residuals[1, column];
-            xlabel="Trace sample (stages concatenated)",
-            ylabel,
-            yscale=log10,
-            title,
+        residuals = CM.GridLayout(figure[3, 1])
+        for (column, field, title, ylabel) in (
+            (1, :norm_K₀, "True KKT residual", "‖K₀‖/√m"),
+            (2, :norm_K_ρ, "Relaxed residual", "‖K_ρ‖/√m"),
         )
-        plot_residuals!(axis, [row], metadata, field, settings)
-        # Both plots have the same entries, so one legend under the pair serves both.
-        column == 1 && legend_under!(residuals[2, 1:2], axis)
-        field === :norm_K_ρ || continue
-        # Relaxed residual only: mark where each reduced ρ stage starts, and its ρ. R jumps up there
-        # because each stage re-initializes γ/φ, s and u. The x limits are frozen so the labels can
-        # sit at a fixed height, in relative coordinates, on the log-scaled y axis.
-        starts = cumsum([1; [length(s.history) for s in row.reduced.stages[1:(end-1)]]]) .- 0.5
-        CM.reset_limits!(axis)
-        (; origin, widths) = axis.finallimits[]
-        CM.xlims!(axis, origin[1], origin[1]+widths[1])
-        CM.vlines!(axis, starts; color=(:darkorange, 0.5), linestyle=:dash, linewidth=1)
-        CM.text!(
-            axis,
-            [CM.Point2f((x-origin[1])/widths[1], 0.03) for x in starts];
-            text=["ρ = $(compact(s.ρ))" for s in row.reduced.stages],
-            space=:relative,
-            rotation=π/2,
-            align=(:left, :top),
-            fontsize=13,
-            color=:chocolate,
-        )
+            axis = CM.Axis(
+                residuals[1, column];
+                xlabel="Trace sample (stages concatenated)",
+                ylabel,
+                yscale=log10,
+                title,
+            )
+            plot_residuals!(axis, [row], metadata, field, settings)
+            # Both plots have the same entries, so one legend under the pair serves both.
+            column == 1 && legend_under!(residuals[2, 1:2], axis)
+            field === :norm_K_ρ || continue
+            # Relaxed residual only: mark where each reduced ρ stage starts, and its ρ. R jumps up there
+            # because each stage re-initializes γ/φ, s and u. The x limits are frozen so the labels can
+            # sit at a fixed height, in relative coordinates, on the log-scaled y axis.
+            starts = cumsum([1; [length(s.history) for s in row.reduced.stages[1:(end-1)]]]) .- 0.5
+            CM.reset_limits!(axis)
+            (; origin, widths) = axis.finallimits[]
+            CM.xlims!(axis, origin[1], origin[1]+widths[1])
+            CM.vlines!(axis, starts; color=(:darkorange, 0.5), linestyle=:dash, linewidth=1)
+            CM.text!(
+                axis,
+                [CM.Point2f((x-origin[1])/widths[1], 0.03) for x in starts];
+                text=["ρ = $(compact(s.ρ))" for s in row.reduced.stages],
+                space=:relative,
+                rotation=π/2,
+                align=(:left, :top),
+                fontsize=13,
+                color=:chocolate,
+            )
+        end
     end
 
     # Trajectories: the reduced solution, then each formulation's :warmstart result. Subtitles give
@@ -1798,18 +1805,35 @@ function trial_page(data, row)
         )
     end
 
-    maps = CM.GridLayout(figure[4, 1])
+    maps = CM.GridLayout(figure[trajectory_only ? 1 : 4, 1])
+    axis_fonts = (;
+        xlabelsize=trajectory_only ? 32 : 24,
+        ylabelsize=trajectory_only ? 32 : 24,
+        xticklabelsize=trajectory_only ? 28 : 22,
+        yticklabelsize=trajectory_only ? 28 : 22,
+    )
     separation = CM.Axis(
         maps[1, length(trajectories)+1];
         title="Vehicle separation",
         xlabel="time [s]",
         ylabel="distance [m]",
+        axis_fonts...,
     )
-    profiles = CM.GridLayout(figure[5, 1])
+    speed = CM.Axis(
+        maps[1, length(trajectories)+2];
+        title="Speed",
+        xlabel="time [s]",
+        ylabel="v [m/s]",
+        axis_fonts...,
+    )
+    CM.hlines!(speed, [-settings.max_speed, settings.max_speed]; color=:black, linestyle=:dot)
+    CM.linkxaxes!(separation, speed)
+    profiles = trajectory_only ? nothing : CM.GridLayout(figure[5, 1])
     unicycle = is_unicycle(settings)
     model = intersection_dynamics(settings).model # the control panels plot its bounded accelerations
-    panels = [
-        CM.Axis(profiles[1, column]; title, xlabel="time [s]", ylabel) for
+    panels = trajectory_only ? [] : [
+        unicycle && column == 1 ? speed :
+        CM.Axis(profiles[1, unicycle ? column-1 : column]; title, xlabel="time [s]", ylabel) for
         (column, (title, ylabel)) in enumerate((
             unicycle ? ("Speed v", "v [m/s]") : ("Velocity vx", "vx [m/s]"),
             unicycle ? ("Heading ψ", "ψ [rad]") : ("Velocity vy", "vy [m/s]"),
@@ -1817,34 +1841,33 @@ function trial_page(data, row)
             unicycle ? ("Sideways acceleration v·ω", "v·ω [m/s^2]") : ("Acceleration ay", "ay [m/s^2]"),
         ))
     ]
-    for component in 1:2
-        if unicycle && component == 1
-            # The along-lane speed cap, the same for both players (the preference caps v·cos(ψ - lane heading)).
-            CM.hlines!(panels[1], [-settings.max_speed, settings.max_speed]; color=:black, linestyle=:dot)
-        elseif unicycle
-            # Each player's hard heading limit around its lane.
-            for player in 1:NUM_PLAYERS
-                bounds = Intersection.unicycle_heading_bounds(player)
-                CM.hlines!(
-                    panels[2],
-                    [bounds.lower, bounds.upper];
-                    color=Intersection.player_plot_color(player),
-                    linestyle=:dot,
-                )
+    if !trajectory_only
+        for component in 1:2
+            if unicycle && component == 2
+                # Each player's hard heading limit around its lane.
+                for player in 1:NUM_PLAYERS
+                    bounds = Intersection.unicycle_heading_bounds(player)
+                    CM.hlines!(
+                        panels[2],
+                        [bounds.lower, bounds.upper];
+                        color=Intersection.player_plot_color(player),
+                        linestyle=:dot,
+                    )
+                end
+            elseif !unicycle
+                for player in 1:NUM_PLAYERS
+                    bounds = Intersection.player_speed_bounds(player; settings.min_speed, settings.max_speed)
+                    CM.hlines!(
+                        panels[component],
+                        [bounds.lower[component], bounds.upper[component]];
+                        color=Intersection.player_plot_color(player),
+                        linestyle=:dot,
+                    )
+                end
             end
-        else
-            for player in 1:NUM_PLAYERS
-                bounds = Intersection.player_speed_bounds(player; settings.min_speed, settings.max_speed)
-                CM.hlines!(
-                    panels[component],
-                    [bounds.lower[component], bounds.upper[component]];
-                    color=Intersection.player_plot_color(player),
-                    linestyle=:dot,
-                )
-            end
+            limits = filter(isfinite, [settings.control_bounds.lb[component], settings.control_bounds.ub[component]])
+            isempty(limits) || CM.hlines!(panels[2+component], limits; color=:black, linestyle=:dot)
         end
-        limits = filter(isfinite, [settings.control_bounds.lb[component], settings.control_bounds.ub[component]])
-        isempty(limits) || CM.hlines!(panels[2+component], limits; color=:black, linestyle=:dot)
     end
     for (column, trajectory) in enumerate(trajectories)
         (; name, physical, status, k₀, linestyle) = trajectory
@@ -1852,11 +1875,12 @@ function trial_page(data, row)
         # acceptance uses, so an accepted flag would repeat it (the verdict lines still state it).
         ax = CM.Axis(
             maps[1, column];
-            title="$name | $status",
-            subtitle=k₀,
+            title=trajectory_only ? (length(trajectories) == 1 ? "Trajectory" : name) : "$name | $status",
+            subtitle=trajectory_only ? "" : k₀,
             aspect=CM.DataAspect(),
             xlabel="x [m]",
             ylabel="y [m]",
+            axis_fonts...,
             xgridvisible=false,
             ygridvisible=false,
         )
@@ -1879,15 +1903,21 @@ function trial_page(data, row)
             CM.scatter!(ax, [xs[1][1]], [xs[1][2]]; color, marker=:circle, markersize=16)
             goal = (settings.goal_position1, settings.goal_position2)[player]
             CM.scatter!(ax, [goal[1]], [goal[2]]; color, marker=:star5, markersize=22)
+            times = (0:(length(xs)-1)) .* settings.time_step
+            speeds = unicycle ? [x[3] for x in xs] : [hypot(x[3], x[4]) for x in xs]
+            CM.lines!(speed, times, speeds; color, linestyle, linewidth=2)
+            trajectory_only && continue
             for component in 1:2
-                CM.lines!(
-                    panels[component],
-                    (0:(length(xs)-1)) .* settings.time_step,
-                    [x[component+2] for x in xs];
-                    color,
-                    linestyle,
-                    linewidth=2,
-                )
+                if !unicycle || component != 1
+                    CM.lines!(
+                        panels[component],
+                        times,
+                        [x[component+2] for x in xs];
+                        color,
+                        linestyle,
+                        linewidth=2,
+                    )
+                end
                 CM.lines!(
                     panels[2+component],
                     (0:(length(us)-1)) .* settings.time_step,
@@ -1906,36 +1936,55 @@ function trial_page(data, row)
         linestyle=:dot,
         label="Collision avoidance, $(settings.collision_avoidance) m",
     )
-    CM.axislegend(separation; position=:ct, labelsize=13)
-    CM.Legend(
-        figure[6, 1],
-        vcat(
-            [CM.LineElement(color=Intersection.player_plot_color(player), linewidth=3) for player in 1:NUM_PLAYERS],
-            [CM.LineElement(color=:gray30, linestyle=t.linestyle, linewidth=2) for t in trajectories],
-        ),
-        vcat("Player 1", "Player 2", [t.name for t in trajectories]);
-        orientation=:horizontal,
-        framevisible=false,
-    )
-    CM.Label(
-        figure[7, 1],
-        unicycle ?
-        "Circle: start; star: goal. Dotted: heading limits in each player's colour; " *
-        "the along-lane speed cap and the acceleration bounds in black." :
-        "Circle: start; star: goal. Dotted: speed bounds in each player's colour, control bounds in black.";
-        fontsize=14,
-    )
-    # Fixed page, map (square, as tall as its row) and separation widths, so the maps and their
-    # separation plot stay together however many trajectories a page has.
-    CM.colsize!(figure.layout, 1, CM.Fixed(1540))
+    if !trajectory_only
+        CM.Legend(
+            figure[6, 1],
+            vcat(
+                [CM.LineElement(color=Intersection.player_plot_color(player), linewidth=3) for player in 1:NUM_PLAYERS],
+                [CM.LineElement(color=:gray30, linestyle=t.linestyle, linewidth=2) for t in trajectories],
+            ),
+            vcat("Player 1", "Player 2", [t.name for t in trajectories]);
+            orientation=:horizontal,
+            framevisible=false,
+        )
+        CM.Label(
+            figure[7, 1],
+            unicycle ?
+            "Circle: start; star: goal. Dotted: heading limits in each player's colour; " *
+            "the along-lane speed cap and the acceleration bounds in black." :
+            "Circle: start; star: goal. Dotted: speed bounds in each player's colour, control bounds in black.";
+            fontsize=14,
+        )
+    end
+    # Shared row and equal plot-area heights keep the map, separation and speed axes aligned.
+    CM.colsize!(figure.layout, 1, CM.Fixed(1700 + 480(length(trajectories)-1)))
     foreach(column -> CM.colsize!(maps, column, CM.Fixed(380)), eachindex(trajectories))
     CM.colsize!(maps, length(trajectories)+1, CM.Fixed(480))
-    CM.rowsize!(figure.layout, 3, 320)  # residual plots and their legend
-    CM.rowsize!(figure.layout, 4, 380)
-    CM.rowsize!(figure.layout, 5, 220)
+    CM.colsize!(maps, length(trajectories)+2, CM.Fixed(480))
+    CM.colgap!(maps, 32)
+    CM.rowsize!(figure.layout, trajectory_only ? 1 : 4, 380)
+    if !trajectory_only
+        CM.rowsize!(figure.layout, 3, 320)  # residual plots and their legend
+        CM.rowsize!(figure.layout, 5, 220)
+    end
     CM.rowgap!(figure.layout, 24)
     CM.resize_to_layout!(figure)
     figure
+end
+
+"""
+Export one saved trial's aligned trajectory, vehicle-separation and speed row without solving
+any KKT system. Defaults to the first objective variant and trial 1; `output_path` overrides
+`trajectory_<variant>_<trial>.pdf` in the run directory. The separation panel has no legend.
+"""
+function plot_trajectory(directory; variant=nothing, trial=1, output_path=nothing)
+    data = deserialize(joinpath(directory, "results.jls"))
+    variant = isnothing(variant) ? first(data.settings.objective_variants) : variant
+    row = only(filter(r -> r.variant === variant && r.trial == trial, data.results))
+    figure = trial_page(data, row; trajectory_only=true)
+    path = isnothing(output_path) ? joinpath(directory, "trajectory_$(variant)_$(trial).pdf") : output_path
+    Intersection.save_figure(path, figure)
+    path
 end
 
 """
@@ -2062,7 +2111,7 @@ function summary_page(data, directory)
         "Every solve uses ProjectedLM (the reduced system in Scholtes form); each ρ stage's inner loop stops once its scaled relaxed residual drops below min(ρ, $(settings.inner_ρ_tol)), at max_inner_iters, or on a line-search stall, unless the scaled residual reaches its tolerance first. :fixed_primal recovery solves the complete system with the physical trajectory as a parameter, so only the remaining columns move; nonnegative coordinates stay inside the sign box. Exact complete equations have no ρ schedule. All complete rows remain after fixing physical columns.",
     )
     paragraph!(
-        "Residual curves show the scaled relaxed and unrelaxed residuals on logarithmic axes, concatenated across stages, against solver-trace samples (solver iterates). Reduced curves include all sampled trials; complete curves include all attempted checks, using each check's kept (best) try. Histograms use accepted pairs only. Curves use available samples only: no padding after a run ends, and a gap where a sample is not finite. On the aggregate page, lines are geometric means and bands are mean +/- one sample standard deviation in log10 residual, drawn at indices with at least two contributors. Stage endpoints and raw histories are in results.jls. Each trial page shows that trial's own curves (the relaxed-residual plot marks where each reduced ρ stage starts), its reduced and :warmstart complete trajectories next to their vehicle separation, and their $(is_unicycle(settings) ? "speed, heading, acceleration a and sideways acceleration v·ω" : "velocity and acceleration") profiles overlaid (solid: reduced; dashed: complete), including failed returned iterates with explicit status labels.",
+        "Residual curves show the scaled relaxed and unrelaxed residuals on logarithmic axes, concatenated across stages, against solver-trace samples (solver iterates). Reduced curves include all sampled trials; complete curves include all attempted checks, using each check's kept (best) try. Histograms use accepted pairs only. Curves use available samples only: no padding after a run ends, and a gap where a sample is not finite. On the aggregate page, lines are geometric means and bands are mean +/- one sample standard deviation in log10 residual, drawn at indices with at least two contributors. Stage endpoints and raw histories are in results.jls. Each trial page shows that trial's own curves (the relaxed-residual plot marks where each reduced ρ stage starts), its reduced and :warmstart complete trajectories, vehicle separation and speed in one aligned row, and its remaining $(is_unicycle(settings) ? "heading, acceleration a and sideways acceleration v·ω" : "velocity and acceleration") profiles below, overlaid (solid: reduced; dashed: complete), including failed returned iterates with explicit status labels.",
     )
     paragraph!(
         "A solve is accepted iff its scaled residual is at most $(settings.tol) (reduced) or $(settings.complete_tol) (complete); the solver's exit status is not required. A ρ chain runs all its stages and is judged at the stage with the lowest scaled residual, and a complete check keeps its best try (retries restart with the next η); that iterate is the one kept, compared and plotted. Fixed trajectories retain the reduced solution's finite physical residual; these rows are not removed. The full residual includes stationarity, equality, complementarity, and auxiliary-slack equations. The scaled relaxed residual, largest residual entry, multiplier signs and original physical feasibility are recorded as diagnostics only. Failures do not prove incompatibility.",
