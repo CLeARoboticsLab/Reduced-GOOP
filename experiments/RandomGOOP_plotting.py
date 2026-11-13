@@ -22,7 +22,8 @@ script writes into <run_dir>/figures/:
                                        ρ = 1.0 and 0.1, one row per class, against the Newton step from the
                                        start (every run averaged at every step, a converged run held at its last residual), with the quadratic
                                        reference from the first step whose mean is below 1e-3; one figure per
-                                       sampling mode
+                                       sampling mode. The primal_only figure adds a note (one_step_note) when
+                                       every complete run of the quadratic class stopped after one step
   fig2_sec6.pdf                        the copy of --mode's figure under the manuscript's file name
 
 Table 2 cells: sizes from the manuscript's formulas (Props. thm:quadratic-growth-reduced-kkt and
@@ -44,6 +45,7 @@ import argparse
 import csv
 import math
 import pathlib
+import re
 import shutil
 from collections import defaultdict
 
@@ -378,6 +380,81 @@ def plot_local_panel(ax, curves, color, label, x_max=None, reference_start=None)
     ax.grid(True, color="#b0b0b0", linewidth=0.4, alpha=0.6)
 
 
+# The note under the primal_only figure, and the mark (NOTE_MARK) on the panels it explains.
+NOTE_MARK = "†"
+NOTE_FONT_SIZE = 6
+
+
+def upper_bound_text(value):
+    """`value` rounded up to one significant digit, as mathtext: 8.8e-12 → 9·10⁻¹², 1e-11 → 10⁻¹¹."""
+    exponent = math.floor(math.log10(value))
+    mantissa = math.ceil(round(value / 10.0**exponent, 9))
+    if mantissa == 10:
+        mantissa, exponent = 1, exponent + 1
+    return rf"10^{{{exponent}}}" if mantissa == 1 else rf"{mantissa}\cdot10^{{{exponent}}}"
+
+
+def one_step_note(rows, run_dir):
+    """
+    Why a primal-only start of the quadratic class converges in one Newton step for the complete system: the
+    note's text, or None unless every such run (at every complete ρ in LOCAL_PANELS) stopped after one step. The
+    largest ‖K_ρ‖₂ after that step comes from the traces and tol_inner from run_info.txt; the statement on
+    ker J(z₀) was checked numerically for the plotted instance (K = 4, trial 1) at every start.
+    """
+    rhos = [rho for system, rho in LOCAL_PANELS if system == "complete"]
+    curves = [c for rho in rhos for c in local_curves(rows, "primal_only", "quadratic", "complete", rho)]
+    if not curves or any(len(c) != 2 for c in curves):
+        return None
+    after = upper_bound_text(max(10.0 ** c[1] for c in curves))
+    tolerance = re.search(r"tol_inner = ([0-9.eE+-]+)", (pathlib.Path(run_dir) / "run_info.txt").read_text())
+    below = f"below the tolerance ${upper_bound_text(float(tolerance[1]))}$" if tolerance else "below the tolerance"
+    # No spaces inside $…$: wrapped_text breaks lines at spaces. The braces in x^{\star} and J^{\top} keep mathtext
+    # from spacing the symbol as a binary operator.
+    return (
+        f"{NOTE_MARK} One Newton step, complete system, quadratic class. Quadratic objectives and linear constraints make "
+        r"$K_\rho(x,w)$ affine in $x$ for fixed duals and slacks $w$, so the start $z_0=(x^{\star}+\delta{x},w^{\star})$ gives "
+        r"$K_\rho(z_0)=J(z_0)\,d$ with $d=z_0-y^{\star}_\rho=(\delta{x},0)$. $J(z_0)$ is singular, but $\ker{J(z_0)}$ has no "
+        r"primal component (it is spanned by multipliers $\bar{\lambda}$); hence $d\perp\ker{J(z_0)}$, and the "
+        r"minimum-norm Newton step $-J(z_0)^{+}K_\rho(z_0)=-d$ lands on $y^{\star}_\rho$. The Levenberg–Marquardt damping "
+        r"leaves the linearized residual $\eta^2(JJ^{\!\top}+\eta^2I)^{-1}K_\rho(z_0)$; after the step "
+        rf"$\Vert{{K_\rho}}\Vert_2\leq{after}$, {below}. In the reduced system $\ker{{J(z_0)}}$ has primal components, "
+        r"so the step also moves $w$, in which $K_\rho$ is not affine."
+    )
+
+
+def wrapped_text(fig, text, width, **text_options):
+    """`text` broken at spaces into lines no wider than `width` (a fraction of the figure's width) as `fig` draws it."""
+    renderer = fig.canvas.get_renderer()
+    probe = fig.text(0, 0, "", **text_options)
+    lines, line = [], ""
+    for word in text.split(" "):
+        candidate = f"{line} {word}" if line else word
+        probe.set_text(candidate)
+        if line and probe.get_window_extent(renderer).width > width * fig.bbox.width:
+            lines.append(line)
+            line = word
+        else:
+            line = candidate
+    probe.remove()
+    return "\n".join([*lines, line])
+
+
+def add_note(fig, axes, classes, xlabel, note):
+    """NOTE_MARK on the quadratic row's complete panels, and `note` under `xlabel`, the figure's x label."""
+    row = classes.index("quadratic")
+    for col, (system, _) in enumerate(LOCAL_PANELS):
+        if system == "complete":
+            axes[row][col].text(0.95, 0.93, NOTE_MARK, transform=axes[row][col].transAxes, ha="right", va="top")
+    # The note sits below the constrained layout, which does not move it; the tight bounding box takes it in. It
+    # spans the y labels' left edge to the last column's right edge.
+    fig.draw_without_rendering()
+    bottom = xlabel.get_window_extent().y0 / fig.bbox.height
+    left = min(ax.yaxis.label.get_window_extent().x0 for ax in axes[:, 0]) / fig.bbox.width
+    right = axes[0][-1].get_position().x1
+    text = wrapped_text(fig, note, right - left, fontsize=NOTE_FONT_SIZE)
+    fig.text(left, bottom - 0.03, text, ha="left", va="top", fontsize=NOTE_FONT_SIZE, linespacing=1.35)
+
+
 def write_local_convergence(run_dir, manuscript_mode):
     """One figure per sampling mode in the run's traces.csv; `manuscript_mode`'s is also copied as LOCAL_FIGURE."""
     run_dir = pathlib.Path(run_dir)
@@ -408,13 +485,16 @@ def write_local_convergence(run_dir, manuscript_mode):
                 K = levels[class_name]
                 axes[row][0].set_ylabel(f"{'Quadratic' if class_name == 'quadratic' else 'Nonquadratic'}, K = {K}\n" + r"$\log_{10}$ residual")
             axes[0][0].yaxis.set_major_locator(MaxNLocator(nbins=4, integer=True))
-            fig.supxlabel("Newton steps from the start", fontsize=7.5)
+            xlabel = fig.supxlabel("Newton steps from the start", fontsize=7.5)
             handles = {}
             for ax in axes.flat:
                 for handle, label in zip(*ax.get_legend_handles_labels()):
                     handles.setdefault(label, handle)
             order = [label for label in ("Reduced KKT", "Complete KKT", QUADRATIC_REFERENCE) if label in handles]
             fig.legend([handles[label] for label in order], order, loc="outside upper center", ncol=len(order), frameon=False)
+            note = one_step_note(rows, run_dir) if mode == "primal_only" and "quadratic" in classes else None
+            if note:
+                add_note(fig, axes, classes, xlabel, note)
             paths = [out_dir / f"local_convergence_{mode}.{ext}" for ext in ("png", "pdf")]
             for path in paths:
                 fig.savefig(path, bbox_inches="tight")

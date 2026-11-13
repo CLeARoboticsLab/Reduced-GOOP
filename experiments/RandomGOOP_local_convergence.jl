@@ -13,7 +13,7 @@ on the reduced (5.2)):
     each to ‖K_ρ‖₂ < `tol_inner` (`centers`);
  2. `num_starts` starts around y*_ρ, in each of `modes`:
       `:primal_only`    drawn uniformly from the ball of `radius` in the primal coordinates
-                        (`ReducedGOOP.ball_starts`); the duals and slacks stay at y*_ρ's values. The reduced and
+                        (`ReducedGOOP.ball_starts`); the duals and slacks stay (fixed) at y*_ρ's values. The reduced and
                         the complete system get the same primal offsets;
       `:whole_iterate`  every coordinate moves, by an offset δ drawn uniformly from the ball of `radius` in all
                         of z: additively, z_k + δ_k, except the sign box (`nonnegative_dims`), which moves
