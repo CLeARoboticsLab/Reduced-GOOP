@@ -109,12 +109,19 @@ end
 
 """
 Options of a run of `formulation`'s solver held at ρ: the study's stage options (MonteCarlo_RandomGOOP.stage_options:
-its linear solver and η) with no ‖K₀‖ stop (tol = 0), so the run ends at ‖K_ρ‖₂ < tol_inner.
+its linear solver and η) with no ‖K₀‖ stop (tol = 0), so the run ends at ‖K_ρ‖₂ < tol_inner, and with the
+per-step histories the traces are made of (record_convergence, which the study's timed stages leave off).
 """
 function fixed_rho_options(formulation, settings, study, ρ)
     options = MRG.stage_options(formulation, study, ρ)
     fields = (; (name => getfield(options, name) for name in fieldnames(typeof(options)))...)
-    typeof(options)(; fields..., tol=0.0, tol_inner=settings.tol_inner, max_inner_iters=settings.max_inner_iters)
+    typeof(options)(;
+        fields...,
+        tol=0.0,
+        tol_inner=settings.tol_inner,
+        max_inner_iters=settings.max_inner_iters,
+        record_convergence=true,
+    )
 end
 
 """

@@ -815,7 +815,8 @@ solver_method(formulation) = formulation.solver === :pdip ? ReducedGOOP.PDIP() :
 """
 Options of one ρ stage of `formulation`'s solver, PDIPOptions or ProjectedLMOptions, in plain ‖·‖₂: the
 stage stops at ‖K_ρ‖₂ < ε_ρ = ρ, and the solver's ‖K₀‖₂ < epsilon_0 test, before every Newton step, stops the
-whole solve. The histories make the stage's trace (stage_history), which results.jls keeps.
+whole solve. The timed call records no per-step history (record_convergence off): the CSV files need only
+the stage's last iterate (stage_history), and the timing should hold the solve alone.
 
 The Levenberg–Marquardt η of the step −Jᵀ(JJᵀ + η²I)⁻¹K_ρ:
   PDIP          constant, eta_0 (its :klu and :ldl; its other linear solvers have no η);
@@ -826,23 +827,25 @@ Every other option is the solver's default.
 function stage_options(formulation, settings, ρ)
     (; solver, linear_solver) = formulation
     (; max_inner_iters, eta_0) = settings
-    stage = (; ρ_schedule=[Float64(ρ)], max_inner_iters, tol=settings.epsilon_0, tol_inner=ρ, linear_solver, record_convergence=true)
+    stage = (; ρ_schedule=[Float64(ρ)], max_inner_iters, tol=settings.epsilon_0, tol_inner=ρ, linear_solver)
     solver === :pdip && return ReducedGOOP.PDIPOptions(; stage..., η=eta_0)
     linear_solver === :klu && return ReducedGOOP.ProjectedLMOptions(; stage..., η=eta_0, η_min=eta_0, η_max=eta_0)
     ReducedGOOP.ProjectedLMOptions(; stage...)
 end
 
 """
-A stage's trace from the solver's histories (one entry per stopping test): one row, ‖K_ρ‖₂ (`norm_K_ρ`),
-‖K₀‖₂ (`norm_K₀`) and the step's η (`eta`), per iterate a Newton step was taken from, then the stage's last
-iterate, with the η a next step would start from: `newton_steps` + 1 rows. PDIP returns no η: `eta` is NaN.
+A stage's trace: ‖K_ρ‖₂ (`norm_K_ρ`), ‖K₀‖₂ (`norm_K₀`) and η (`eta`) of the stage's last iterate, with the η a
+next step would start from; when the solver recorded its histories (record_convergence), preceded by one row
+per iterate a Newton step was taken from: `newton_steps` + 1 rows. PDIP returns no η: `eta` is NaN.
 """
 function stage_history(output)
+    last_row = (; norm_K_ρ=output.norm_K_ρ, norm_K₀=output.norm_K₀, eta=get(output, :η, NaN))
+    haskey(output, :norm_K_ρ_history) || return [last_row]
     eta(k) = haskey(output, :η_history) ? output.η_history[k] : NaN
     history = [
         (; norm_K_ρ=output.norm_K_ρ_history[k], norm_K₀=output.norm_K₀_history[k], eta=eta(k)) for k in 1:output.newton_steps
     ]
-    push!(history, (; norm_K_ρ=output.norm_K_ρ, norm_K₀=output.norm_K₀, eta=get(output, :η, NaN)))
+    push!(history, last_row)
 end
 
 """
