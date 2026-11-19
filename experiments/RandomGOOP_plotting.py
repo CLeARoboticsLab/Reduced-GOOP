@@ -7,7 +7,8 @@ interior_point_perturbed (the reduced (5.2) and the complete :perturbed system, 
 scholtes_perturbed (the reduced Scholtes system in its place). The copies under the manuscript's names
 (table2.tex, table3.tex, timing_per_rho_sec6.pdf, fig3_sec6.pdf) are written for the manuscript's pair only:
   timing_per_rho_<pair>.{png,pdf}      manuscript Fig 2: Newton steps (top row) and solve seconds (bottom
-                                       row) per ρ stage, mean ± std after the 2.5 % trimming, one column per class
+                                       row) per ρ stage, mean ± std after the 2.5 % trimming, one column per class,
+                                       with a note giving the solver setup each solve makes once, in no stage (setup_note)
   fig3_<pair>.{png,pdf}                manuscript Fig 4: histograms of log10 ‖z_complete − z_reduced‖₂,
   fig3_<pair>_<class>.pdf              one panel per class; and one file per class
   table2_<pair>.tex, table2.tex        Table 2 (tab:kkt-compare-levels) in the manuscript's layout
@@ -36,7 +37,7 @@ accepted gets a dagger, and the counts are listed in a comment below the table.
 Usage (MonteCarlo_RandomGOOP.run and RandomGOOP_local_convergence.run call this at the end, through
 plot_results):
     uv run --no-project --isolated --with matplotlib --with numpy python -I experiments/RandomGOOP_plotting.py \
-        <run_dir> [--fig-levels quadratic=4,nonquadratic=3]
+        <run_dir> [--fig-levels quadratic=7,nonquadratic=5]
     uv run --no-project --isolated --with matplotlib --with numpy python -I experiments/RandomGOOP_plotting.py \
         --local-convergence <run_dir> [--mode whole_iterate]
 """
@@ -380,7 +381,7 @@ def plot_local_panel(ax, curves, color, label, x_max=None, reference_start=None)
     ax.grid(True, color="#b0b0b0", linewidth=0.4, alpha=0.6)
 
 
-# The note under the primal_only figure, and the mark (NOTE_MARK) on the panels it explains.
+# The notes under the primal_only figure and Fig 2, and the mark (NOTE_MARK) on the panels or label each explains.
 NOTE_MARK = "†"
 NOTE_FONT_SIZE = 6
 
@@ -445,8 +446,12 @@ def add_note(fig, axes, classes, xlabel, note):
     for col, (system, _) in enumerate(LOCAL_PANELS):
         if system == "complete":
             axes[row][col].text(0.95, 0.93, NOTE_MARK, transform=axes[row][col].transAxes, ha="right", va="top")
-    # The note sits below the constrained layout, which does not move it; the tight bounding box takes it in. It
-    # spans the y labels' left edge to the last column's right edge.
+    note_below(fig, axes, xlabel, note)
+
+
+def note_below(fig, axes, xlabel, note):
+    """`note` under `xlabel`, the figure's x label, from the y labels' left edge to the last column's right edge."""
+    # The note sits below the constrained layout, which does not move it; the tight bounding box takes it in.
     fig.draw_without_rendering()
     bottom = xlabel.get_window_extent().y0 / fig.bbox.height
     left = min(ax.yaxis.label.get_window_extent().x0 for ax in axes[:, 0]) / fig.bbox.width
@@ -680,9 +685,34 @@ def rho_label(rho):
     return "1" if exponent == 0 else f"$\\mathdefault{{10^{{{exponent}}}}}$"
 
 
+def setup_note(run, classes, fig_levels, systems):
+    """
+    Fig 2's note: the seconds per stage leave out the solver setup, which each solve makes once, before its first
+    stage, and which its solve time (Table 2) includes; with each system's mean setup time at the plotted K
+    (accepted solves, trimmed as Table 2). None for runs before setup_seconds was recorded.
+    """
+    parts = []
+    for class_name in classes:
+        K = fig_levels[class_name]
+        times = []
+        for system in systems:
+            values = [number(r["setup_seconds"]) for r in solve_rows(run, class_name, K, system) if r["accepted"] == "true" and r.get("setup_seconds", "") != ""]
+            if values:
+                times.append(f"{'reduced' if system.startswith('reduced') else 'complete'} {format_seconds(trimmed(values).mean())} s")
+        if times:
+            parts.append(f"{'quadratic' if class_name == 'quadratic' else 'nonquadratic'}, K = {K}: {', '.join(times)}")
+    if not parts:
+        return None
+    return (
+        f"{NOTE_MARK} Not shown: the solver setup (the structure of the normal equations JJᵀ), made once per solve before "
+        f"its first ρ stage and included in the solve time of Table 2. Mean setup per solve, {'; '.join(parts)}."
+    )
+
+
 def write_timing_per_rho(run, reduced, formulation, fig_levels, out_dir):
     # Drawn at the printed width like Fig 3: Newton steps (top row) and seconds (bottom row), one column per
-    # class, each row on one y axis; mean ± std curves in Fig 3's style (your calls, 2026-11-01).
+    # class, each row on one y axis; mean ± std curves in Fig 3's style (your calls, 2026-11-01). The note under
+    # it gives the setup each solve makes once, which no stage's seconds include (setup_note).
     classes = [c for c in CLASS_ORDER if fig_levels.get(c) in levels_run(run, c)]
     if not classes:
         return []
@@ -715,16 +745,19 @@ def write_timing_per_rho(run, reduced, formulation, fig_levels, out_dir):
                 ax.grid(True, color="#b0b0b0", linewidth=0.4, alpha=0.6)
             axes[0][col].set_title(f"{'Quadratic' if class_name == 'quadratic' else 'Nonquadratic'}, K = {fig_levels[class_name]}")
         axes[0][0].set_ylabel("Newton steps per stage")
-        axes[1][0].set_ylabel("seconds per stage")
+        note = setup_note(run, classes, fig_levels, (reduced, formulation))
+        axes[1][0].set_ylabel("seconds per stage" + (f" {NOTE_MARK}" if note else ""))
         # The rows' tick labels differ in width (8 against 10⁻²); align the two labels on one vertical line.
         fig.align_ylabels(axes[:, 0])
-        fig.supxlabel("ρ stage", fontsize=7.5)
+        xlabel = fig.supxlabel("ρ stage", fontsize=7.5)
         handles = {}
         for ax in axes.flat:
             for handle, label in zip(*ax.get_legend_handles_labels()):
                 handles.setdefault(label, handle)
         order = [label for label in ("Reduced KKT", "Complete KKT") if label in handles]
         fig.legend([handles[label] for label in order], order, loc="outside upper center", ncol=len(order), frameon=False)
+        if note:
+            note_below(fig, axes, xlabel, note)
         paths = [out_dir / f"timing_per_rho_{SHORT[reduced]}_{formulation}.{ext}" for ext in ("png", "pdf")]
         for path in paths:
             fig.savefig(path, bbox_inches="tight")
@@ -746,7 +779,7 @@ def parse_levels(text):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("run_dir")
-    parser.add_argument("--fig-levels", default="quadratic=4,nonquadratic=3", help="K of Fig 2 (per ρ stage) and Fig 4, per class")
+    parser.add_argument("--fig-levels", default="quadratic=7,nonquadratic=5", help="K of Fig 2 (per ρ stage) and Fig 4, per class")
     parser.add_argument("--local-convergence", action="store_true", help="run_dir is a RandomGOOP_local_convergence run")
     parser.add_argument("--mode", default="whole_iterate", help="--local-convergence: the sampling mode copied as the manuscript's Fig 3")
     args = parser.parse_args()

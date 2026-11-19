@@ -211,13 +211,8 @@ default_settings() = (;
     num_instances=100,                           # instances per objective class and K
     rng_seed=123,                                # (class, K) samples from Xoshiro(rng_seed + 100·class index + K)
     objective_classes=(:quadratic, :nonquadratic), # names in objective_classes(settings)
-    # K, the preference levels of every player, per class (levels_for; a range applies to every class).
-    # Cosh code generation time grows fast with K: the nonquadratic reduced system takes hours to build and
-    # compile at K = 5 and most of a day at K = 6, and may need more than 16 GB there.
-    num_levels=(; quadratic=2:6, nonquadratic=2:6),
-    # K whose complete system is built, per class (levels_for); other K solve only the reduced system. The
-    # nonquadratic complete system is left out at K = 5, 6, whose builds would take far longer still.
-    complete_levels=(; quadratic=2:6, nonquadratic=2:4),
+    num_levels=(; quadratic=2:7, nonquadratic=2:6),
+    complete_levels=(; quadratic=2:7, nonquadratic=2:5),
     # Problem (module docstring)
     num_players=4,                               # N
     primal_dimension=10,                         # n, primal variables per player
@@ -341,11 +336,7 @@ function build_systems(class, num_levels, settings)
     (; problem, layout) = get_setup(class, num_levels, settings)
     label = "$(class.name), K = $num_levels"
     # The formulation `name`: `generate(problem)`, built and timed, with the solver of `system` (:reduced or
-    # :complete), the σ targets `slack_targets(kkt)`, and the solver's keywords `solve_keywords`: for ProjectedLM
-    # its NewtonStepWorkspace, made once here, so that no stage call rebuilds the normal equations of J_F J_Fᵀ
-    # (23 ms and 115 MB per call for the reduced system at quadratic K = 4, against ≈ 1 ms per Newton step:
-    # rebuilt in each of the 13 stage calls, it was most of a solve's time, and its garbage, collected inside the
-    # timed calls, made the pauses of run 20261112_085029); PDIP takes none.
+    # :complete) and the σ targets `slack_targets(kkt)`. The solver's setup is made by each solve (solve_setup).
     function formulation(name, generate, slack_targets; system)
         print("Building the $(system_label(name)) KKT system for $label (symbolic construction, Jacobian and code generation)... ")
         flush(stdout)
@@ -353,8 +344,7 @@ function build_systems(class, num_levels, settings)
         println("done in $(round(construction.time; digits=1)) s")
         kkt = construction.value
         (; solver, linear_solver) = solver_settings(settings, system)
-        solve_keywords = solver === :projected_lm ? (; workspace=ReducedGOOP.NewtonStepWorkspace(kkt, linear_solver)) : (;)
-        (; name, kkt, solver, linear_solver, slack_targets=slack_targets(kkt), construction_seconds=construction.time, solve_keywords)
+        (; name, kkt, solver, linear_solver, slack_targets=slack_targets(kkt), construction_seconds=construction.time)
     end
     reduced = if reduced_system(settings) === :scholtes
         formulation(:scholtes, ReducedGOOP.generate_slacked_scholtes_reduced_kkt_system, kkt -> nothing; system=:reduced)
@@ -496,6 +486,7 @@ function check_complete_kkt(record, systems, instance, settings)
             error=sprint(showerror, err, catch_backtrace()),
             newton_steps=0,
             seconds=0.0,
+            setup_seconds=0.0,
             compile_seconds=0.0,
         )
     end
@@ -866,11 +857,18 @@ triggers inside it would be timed as part of it. A collection can still fall ins
 run, when the saved results make the heap large, one costs 0.3–0.7 s (run 20261112_085029). Each stage
 records the collection time inside its call (`gc_seconds`, stages.csv), and with `exclude_gc_time` its time
 leaves it out, as it leaves out compilation.
+
+The solver's setup (solve_setup) is made once per solve, before the first stage, and every stage call
+reuses it; its time (`setup_seconds`, without compilation and, with `exclude_gc_time`, garbage collection)
+is part of the solve's `seconds`.
 """
 function solve_system(formulation, problem, θ, initial_guess, settings; context, io=stdout)
     (; kkt) = formulation
     settings.gc_before_solve && GC.gc()
     y = cold_initialization(formulation, initial_guess, θ, settings)
+    setup = @timed solve_setup(formulation)
+    solve_keywords = setup.value
+    setup_seconds = max(0.0, setup.time - setup.compile_time - (settings.exclude_gc_time ? setup.gctime : 0.0)) # as MCI.stage_record
     # The full residual at the stage's ρ and at ρ = 0 (K₀), for the table and the best-stage choice.
     r, r0 = zeros(kkt.kkt_dimension), zeros(kkt.kkt_dimension)
     stages = Any[]
@@ -881,7 +879,7 @@ function solve_system(formulation, problem, θ, initial_guess, settings; context
         stage_initial = copy(y)
         options = stage_options(formulation, settings, ρ)
         # Measure per-ρ solve time: solve(Projectedlm(),...) 
-        timed = @timed ReducedGOOP.solve(solver_method(formulation), kkt, θ; z₀=y, options, formulation.solve_keywords...)
+        timed = @timed ReducedGOOP.solve(solver_method(formulation), kkt, θ; z₀=y, options, solve_keywords...)
         output = timed.value
         y .= output.z
         push!(stages, MCI.stage_record(; ρ, parameter=:rho, timed, history=stage_history(output), initial=stage_initial, final=copy(y), exclude_gc=settings.exclude_gc_time))
@@ -934,10 +932,20 @@ function solve_system(formulation, problem, θ, initial_guess, settings; context
         status=stages[best.index].status,
         reason=stages[best.index].reason,
         newton_steps=sum(s.newton_steps for s in stages),
-        seconds=sum(s.seconds for s in stages), # cumulative solve time: sum over all ρ stages
+        seconds=setup_seconds + sum(s.seconds for s in stages), # cumulative solve time: the setup and every ρ stage
+        setup_seconds,
         compile_seconds=sum(s.compile_seconds for s in stages),
     )
 end
+
+"""
+The solver's setup, made once per solve and passed to each of its stage calls as keywords: for ProjectedLM its
+NewtonStepWorkspace (J_F and, for :normal, the normal equations of J_F J_Fᵀ), which depends only on J's pattern
+(23 ms and 115 MB for the reduced system at quadratic K = 4; made in each of the 13 stage calls instead, it was
+most of a solve's time, and its garbage made the pauses of run 20261112_085029). PDIP takes none.
+"""
+solve_setup(formulation) =
+    formulation.solver === :projected_lm ? (; workspace=ReducedGOOP.NewtonStepWorkspace(formulation.kkt, formulation.linear_solver)) : (;)
 
 # ── Metrics, saved results and final summary ───────────────────────────────────
 
@@ -1052,9 +1060,10 @@ The run's CSV files, read by experiments/RandomGOOP_plotting.py:
   setup.csv     one row per (class, K, system): build time, and the warm-up's first-solve time and the
                 part of it spent compiling (jit_warmup)
   solves.csv    one row per solve (system reduced, formulation scholtes or interior_point, the (5.2);
-                complete, perturbed): accepted, solve time (no compilation), Newton steps,
-                ‖K₀‖₂ of the judged iterate, the distance to the trial's reduced z, and Fig 4's distance
-                between the two iterates at the end of the stage ρ = fig3_rho (distance_fig3)
+                complete, perturbed): accepted, solve time (the setup and every stage, no compilation),
+                the setup's part of it (solve_setup), Newton steps, ‖K₀‖₂ of the judged iterate, the
+                distance to the trial's reduced z, and Fig 4's distance between the two iterates at the end
+                of the stage ρ = fig3_rho (distance_fig3)
   stages.csv    one row per ρ stage of every solve: Newton steps, solve time (no compilation, and with
                 exclude_gc_time no garbage collection), compile time, the garbage-collection time inside
                 the call, status, and ‖K_ρ‖₂, ‖K₀‖₂ at the stage's last iterate
@@ -1087,7 +1096,8 @@ function export_csv(directory)
     )
     solves, stage_rows = Any[], Any[]
     function add_solve!(key, result; distance="", distance_fig3="")
-        push!(solves, (key..., result.accepted, result.seconds, result.newton_steps, result.validation.rms_K₀, distance, distance_fig3))
+        setup_seconds = get(result, :setup_seconds, "") # runs before setup_seconds was recorded have none
+        push!(solves, (key..., result.accepted, result.seconds, setup_seconds, result.newton_steps, result.validation.rms_K₀, distance, distance_fig3))
         for (stage, s) in enumerate(result.stages)
             last_norm_K_ρ, last_norm_K₀ = isempty(s.history) ? (NaN, NaN) : (last(s.history).norm_K_ρ, last(s.history).norm_K₀)
             gc_seconds = get(s, :gc_seconds, "") # runs before gc_seconds was recorded have none
@@ -1110,7 +1120,7 @@ function export_csv(directory)
     )
     write_csv(
         joinpath(directory, "solves.csv"),
-        ("class", "K", "trial", "system", "formulation", "accepted", "seconds", "newton_steps", "norm_K₀", "distance", "distance_fig3"),
+        ("class", "K", "trial", "system", "formulation", "accepted", "seconds", "setup_seconds", "newton_steps", "norm_K₀", "distance", "distance_fig3"),
         solves,
     )
     directory
