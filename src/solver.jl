@@ -351,7 +351,8 @@ The projected Levenberg–Marquardt method: Newton's method on K_ρ(z) = 0 for e
 
 `z₀` and the outputs are as for `PDIP`; the outputs add `η`, the η after the last step (to continue a
 solve from), and with `record_convergence` `η_history` (the η of each Newton step, and of a last one
-the line search rejected).
+the line search rejected). `workspace`: the `NewtonStepWorkspace(kkt, options.linear_solver)` to solve in,
+which a caller solving `kkt` many times makes once and passes to every solve; by default each solve makes its own.
 """
 function solve(
     ::ProjectedLM,
@@ -359,6 +360,7 @@ function solve(
     θ::AbstractVector{<:Real};
     z₀ = nothing,
     options::ProjectedLMOptions = ProjectedLMOptions(),
+    workspace = NewtonStepWorkspace(kkt, options.linear_solver),
 )
     (; ρ_schedule, max_inner_iters, tol, tol_inner, linear_solver, η) = options
     (; η_min, η_max, gain_low, gain_high, η_tightening_rate, η_loosening_rate) = options
@@ -398,10 +400,12 @@ function solve(
     all(>(0), view(z, kkt.nonnegative_dims)) ||
         throw(ArgumentError("z₀ must be positive on nonnegative_dims (σ and γ, and for the Scholtes system ϕ, σ̂ and u)."))
 
-    # Set up common memory.
+    # Set up common memory. J_F (J with the held columns zeroed) and the normal equations (J_F J_Fᵀ and its factor,
+    # :normal) come from the workspace, made once per KKT system and linear solver.
     J = kkt.∇K_ρ!.result_buffer
-    J_F = copy(J) # J with the held columns zeroed
-    normal_equations = _normal_equations(J_F, linear_solver) # J_F J_Fᵀ and its factor, kept across steps (:normal)
+    workspace.J === J && workspace.linear_solver === linear_solver ||
+        throw(ArgumentError("workspace was made for another KKT system or linear solver"))
+    (; J_F, normal_equations) = workspace
     K_ρ = zeros(kkt.kkt_dimension) # K_ρ(z)
     K_ρ_trial = zeros(kkt.kkt_dimension) # K_ρ(z_trial)
     K₀ = zeros(kkt.kkt_dimension) # K₀(z): K_ρ(z) at ρ = 0 (for the Scholtes system with u = 0), for ‖K₀‖
@@ -589,8 +593,8 @@ end
 
 # ──────────────────────────────────────────────────────────────────────────────────────────────────────
 # 3. The Newton step, shared by both solvers
-# Also the workspace of the `:normal` linear solver (`_NormalEquations`), which `ProjectedLM` builds once per
-# solve and reuses at every Newton step.
+# Also the workspace of the `:normal` linear solver (`_NormalEquations`), which `ProjectedLM` keeps in its
+# `NewtonStepWorkspace`: built once per KKT system, reused at every Newton step of every solve given it.
 # ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 """
@@ -744,4 +748,28 @@ function _cholesky!(normal_equations, JJᵀ, η)
     end
     normal_equations.factor = issuccess(factor) ? factor : nothing # a failed factor is not reused
     factor
+end
+
+"""
+    NewtonStepWorkspace(kkt::GOOPKKTSystem, linear_solver::Symbol)
+
+What the Newton step builds from J's pattern alone: J_F, a copy of J's pattern (ProjectedLM's J with the held
+columns zeroed), and for `:normal` the normal equations of J_F J_Fᵀ with their CHOLMOD factor (`nothing` for the
+other linear solvers). Neither depends on θ, ρ or the iterate, so one workspace serves every solve of `kkt`.
+"""
+struct NewtonStepWorkspace{T1,T2}
+    "The KKT system's Jacobian buffer (`kkt.∇K_ρ!.result_buffer`); it identifies the system served."
+    J::T1
+    "The linear solver served."
+    linear_solver::Symbol
+    "J with the held columns zeroed, i.e., J restricted to the free coordinates."
+    J_F::T1
+    "The normal equations of J_F J_Fᵀ (`:normal`), else `nothing`."
+    normal_equations::T2
+end
+
+function NewtonStepWorkspace(kkt::GOOPKKTSystem, linear_solver::Symbol)
+    J = kkt.∇K_ρ!.result_buffer
+    J_F = copy(J)
+    NewtonStepWorkspace(J, linear_solver, J_F, _normal_equations(J_F, linear_solver))
 end

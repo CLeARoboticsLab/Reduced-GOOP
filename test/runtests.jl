@@ -909,6 +909,38 @@ end
         end
     end
 
+    @testset "ProjectedLM in a reused NewtonStepWorkspace returns exactly what it returns without one" begin
+        goop = coupled_problem(d -> cosh(d) - 1)
+        θ = Float64[]
+        complete = RG.generate_slacked_complete_kkt_system(goop; complementarity = :perturbed)
+        scholtes = RG.generate_slacked_scholtes_reduced_kkt_system(goop)
+        start(k, x) = k === scholtes ? scholtes_start(scholtes, x, 1.0; θ) : x
+        for k in (complete, scholtes), linear_solver in (:normal, :klu, :ldl)
+            workspace = RG.NewtonStepWorkspace(k, linear_solver)
+            # Two solves from two starts, each stage a call of its own from the last stage's iterate (as the random
+            # GOOP study calls it): one workspace serves every call, across stages and solves, and with :normal
+            # every call after the first reuses the factor's symbolic analysis.
+            for x₀ in (zeros(4), [0.2, -0.3, 0.1, 0.4])
+                z_own = z_reused = start(k, x₀)
+                for ρ in (1.0, 1e-2, 1e-4, 1e-6)
+                    options = RG.ProjectedLMOptions(; ρ_schedule = [ρ], max_inner_iters = 50, tol = 1e-10, tol_inner = ρ,
+                        linear_solver)
+                    own = RG.solve(RG.ProjectedLM(), k, θ; z₀ = z_own, options)
+                    reused = RG.solve(RG.ProjectedLM(), k, θ; z₀ = z_reused, options, workspace)
+                    @test reused.z == own.z
+                    @test (reused.newton_steps, reused.termination_reason, reused.η, reused.status) ==
+                          (own.newton_steps, own.termination_reason, own.η, own.status)
+                    z_own, z_reused = own.z, reused.z
+                end
+            end
+        end
+        # A workspace serves only the KKT system and the linear solver it was made for.
+        workspace = RG.NewtonStepWorkspace(scholtes, :normal)
+        @test_throws ArgumentError RG.solve(RG.ProjectedLM(), complete, θ; z₀ = zeros(4), workspace)
+        @test_throws ArgumentError RG.solve(RG.ProjectedLM(), scholtes, θ; z₀ = start(scholtes, zeros(4)),
+            options = RG.ProjectedLMOptions(; linear_solver = :klu), workspace)
+    end
+
     @testset "the stages and termination reasons of both solvers" begin
         quadratic = RG.generate_slacked_reduced_kkt_system(free_problem(x -> x^2))
         # K_ρ = atan(x): from x = 2 the full Newton step overshoots, to |atan(x)| larger than at x = 2.

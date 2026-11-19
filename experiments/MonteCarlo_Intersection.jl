@@ -222,7 +222,7 @@ the velocity along ψ; a and ω are the changes between knots. Positions stay th
 so the guess need not satisfy the unicycle dynamics. Returns the guess and the double-integrator solve.
 """
 function double_integrator_guess(double_integrator, instance, settings)
-    (; dynamics, problem, flatten_parameters, reduced_kkt) = double_integrator
+    (; dynamics, problem, flatten_parameters, reduced_kkt, reduced_workspace) = double_integrator
     # The sampled unicycle states [px, py, v, ψ] as double-integrator states [px, py, vx, vy].
     states = [[s[1], s[2], s[3] * cos(s[4]), s[3] * sin(s[4])] for s in instance.states]
     (; θ, initial_guess) = instance_inputs((; states), flatten_parameters, dynamics, settings)
@@ -232,6 +232,7 @@ function double_integrator_guess(double_integrator, instance, settings)
         θ,
         initial_guess,
         merge(settings, (; eta_0=settings.guess_eta_0));
+        workspace=reduced_workspace,
         context="double integrator",
         io=devnull,
     )
@@ -398,7 +399,8 @@ function build_double_integrator(variant, settings)
     println("Building the double integrator's reduced KKT system for $(variant.name), for the initial guesses...")
     flush(stdout)
     reduced_kkt = ReducedGOOP.generate_slacked_scholtes_reduced_kkt_system(problem; codegen=:fast_differentiation)
-    (; dynamics, problem, flatten_parameters, reduced_kkt)
+    reduced_workspace = ReducedGOOP.NewtonStepWorkspace(reduced_kkt, settings.linear_solver) # (build_systems)
+    (; dynamics, problem, flatten_parameters, reduced_kkt, reduced_workspace)
 end
 
 """
@@ -406,6 +408,11 @@ One objective variant's problem and systems: the reduced KKT system, then for ea
 formulation its KKT system, σ targets, fixed-primal system and variable mapping, and for :unicycle the
 double integrator's systems (build_double_integrator). Prints the system sizes, and returns everything
 with the variant's results.jls metadata (sizes, construction times).
+
+Each system solved gets its ProjectedLM NewtonStepWorkspace here, made once and passed to every stage call
+(solve_reduced, solve_complete): a call without one rebuilds the normal equations of J_F J_Fᵀ, which in the
+random GOOP study cost more than all of a stage's Newton steps and allocated enough to trigger garbage
+collections inside the timed calls.
 """
 function build_systems(variant, builders, dynamics, settings)
     (; problem, flatten_parameters) = variant_problem(variant, dynamics, settings)
@@ -416,6 +423,7 @@ function build_systems(variant, builders, dynamics, settings)
         codegen=:fast_differentiation,
     )
     reduced_kkt = reduced_construction.value
+    reduced_workspace = ReducedGOOP.NewtonStepWorkspace(reduced_kkt, settings.linear_solver)
     formulations = map(builders) do builder
         println("Building :$(builder.name) complete KKT system for $(variant.name) variant...")
         flush(stdout)
@@ -423,6 +431,8 @@ function build_systems(variant, builders, dynamics, settings)
         complete_kkt = complete_construction.value
         slack_targets = slack_target_values(complete_kkt)
         fixed = fixed_primal_formulation(complete_kkt)
+        workspace = ReducedGOOP.NewtonStepWorkspace(complete_kkt, settings.linear_solver)
+        fixed_workspace = ReducedGOOP.NewtonStepWorkspace(fixed.system, settings.linear_solver)
         mapping = variable_mapping(reduced_kkt, complete_kkt)
         # The exact system is square; the fixed-primal Jacobian keeps every row but drops the
         # physical columns.
@@ -434,6 +444,8 @@ function build_systems(variant, builders, dynamics, settings)
             complete_kkt,
             slack_targets,
             fixed,
+            workspace,
+            fixed_workspace,
             mapping,
             construction_seconds=complete_construction.time,
         )
@@ -459,7 +471,7 @@ function build_systems(variant, builders, dynamics, settings)
     println("KKT system sizes, $(variant.name) variant:")
     foreach(line -> println("  ", line), size_lines(metadata))
     double_integrator = is_unicycle(settings) ? build_double_integrator(variant, settings) : nothing
-    (; variant, problem, flatten_parameters, reduced_kkt, formulations, metadata, double_integrator)
+    (; variant, problem, flatten_parameters, reduced_kkt, reduced_workspace, formulations, metadata, double_integrator)
 end
 
 """
@@ -467,13 +479,13 @@ Untimed JIT warm-up on `instance`, so measured trials don't pay first-call compi
 solve and one try of every complete check, results discarded. Not related to the :warmstart mode.
 """
 function jit_warmup(systems, modes, instance, dynamics, settings)
-    (; variant, problem, flatten_parameters, reduced_kkt, formulations, double_integrator) = systems
+    (; variant, problem, flatten_parameters, reduced_kkt, reduced_workspace, formulations, double_integrator) = systems
     (; θ, initial_guess) = instance_inputs(instance, flatten_parameters, dynamics, settings; double_integrator)
     print("Warm-up for $(variant.name) (untimed; compiles every solver path; results discarded)... ")
     flush(stdout)
     seconds = @elapsed begin
         context = "warm-up, $(variant.name)"
-        reduced = solve_reduced(reduced_kkt, problem, θ, initial_guess, settings; context, io=devnull)
+        reduced = solve_reduced(reduced_kkt, problem, θ, initial_guess, settings; workspace=reduced_workspace, context, io=devnull)
         for formulation in formulations, mode in modes
             start = complete_initialization(formulation, reduced.output, θ, settings)
             solve_complete(
@@ -499,7 +511,7 @@ One trial's reduced solve: print the trial banner, solve from the instance's ini
 fills them.
 """
 function solve_reduced_kkt(systems, trial, instance, dynamics, num_checks, settings)
-    (; variant, problem, flatten_parameters, reduced_kkt, double_integrator) = systems
+    (; variant, problem, flatten_parameters, reduced_kkt, reduced_workspace, double_integrator) = systems
     println("\n══ Trial $trial/$(settings.num_instances) · $(variant.name) ══")
     initial_state1, initial_state2 = instance.states
     println("  P1 initial state $(state_label(settings)): $(round.(initial_state1; digits=3))")
@@ -515,7 +527,7 @@ function solve_reduced_kkt(systems, trial, instance, dynamics, num_checks, setti
         k₀_range(double_integrator_solve.validation),
     )
     context = trial_context(trial, variant.name)
-    reduced = solve_reduced(reduced_kkt, problem, θ, initial_guess, settings; context)
+    reduced = solve_reduced(reduced_kkt, problem, θ, initial_guess, settings; workspace=reduced_workspace, context)
     println(
         reduced_verdict(reduced, settings),
         reduced.accepted ? " Running its $num_checks complete checks." : " Skipping its $num_checks complete checks.",
@@ -961,20 +973,24 @@ function study_output(output, kkt)
 end
 
 """
-One ρ stage's record: the solver's outcome, its timing (`seconds` excludes measured compilation),
-its trace, and the iterate it started from and ended at.
+One ρ stage's record: the solver's outcome, its timing (`seconds` excludes measured compilation, and
+with `exclude_gc` the garbage collection inside the call too; `gc_seconds` is always recorded), its
+trace, and the iterate it started from and ended at. @timed's `compile_time` includes recompilation
+(`recompile_time` is the part of it that recompiled), so it alone is the compilation.
 """
-function stage_record(; ρ, parameter, timed, history, initial, final)
+function stage_record(; ρ, parameter, timed, history, initial, final, exclude_gc=false)
     output = timed.value
+    excluded = timed.compile_time + (exclude_gc ? timed.gctime : 0.0)
     (;
         ρ,
         parameter,
         status=output.status,
         reason=output.termination_reason,
         newton_steps=output.newton_steps,
-        seconds=max(0.0, timed.time-timed.compile_time-timed.recompile_time),
+        seconds=max(0.0, timed.time-excluded),
         wall_seconds=timed.time,
-        compile_seconds=timed.compile_time+timed.recompile_time,
+        compile_seconds=timed.compile_time,
+        gc_seconds=timed.gctime,
         history,
         initial,
         final,
@@ -1003,7 +1019,7 @@ function validate_solution(problem, θ, z; r, k₀, rms_K_ρ, rms_K₀, sign_vio
     )
 end
 
-function solve_reduced(reduced_kkt, problem, θ, initial_guess, settings; context, io=stdout)
+function solve_reduced(reduced_kkt, problem, θ, initial_guess, settings; workspace, context, io=stdout)
     # F(z; ρ) has m rows: the stationarity and equality rows, then two per complementarity pair (its
     # slack row and its product). Settings hold RMS tolerances, so they are scaled by √m.
     m = reduced_kkt.kkt_dimension
@@ -1036,7 +1052,7 @@ function solve_reduced(reduced_kkt, problem, θ, initial_guess, settings; contex
             preference_slacks=stage_preference_slacks,
         )
         options = solver_options(settings; ρ, tol=settings.tol, eta=settings.eta_0, residual_scale)
-        timed = @timed ReducedGOOP.solve(ReducedGOOP.ProjectedLM(), reduced_kkt, θ; z₀=w₀, options)
+        timed = @timed ReducedGOOP.solve(ReducedGOOP.ProjectedLM(), reduced_kkt, θ; z₀=w₀, options, workspace)
         output = study_output(timed.value, reduced_kkt)
         history = solver_history(timed.value)
         push!(
@@ -1259,6 +1275,7 @@ function solve_complete(
     # 1000+ steps, while Scholtes on the fixed-primal system met the tolerance in under 100.
     fixed_mode = mode.name === :fixed_primal
     system = fixed_mode ? formulation.fixed.system : complete_kkt
+    workspace = fixed_mode ? formulation.fixed_workspace : formulation.workspace
     parameters = fixed_mode ? [θ; physical] : θ
     unknowns = fixed_mode ? formulation.fixed.free : Colon()
     residual_scale = sqrt(complete_kkt.kkt_dimension)
@@ -1279,7 +1296,7 @@ function solve_complete(
             # exact ignores ρ (its residual is evaluated at ρ = 0); the 1e-12 floor only keeps ρ and
             # tol_inner positive.
             options = solver_options(settings; ρ=max(ρ, 1e-12), tol=settings.complete_tol, eta, residual_scale)
-            timed = @timed ReducedGOOP.solve(ReducedGOOP.ProjectedLM(), system, parameters; z₀=y[unknowns], options)
+            timed = @timed ReducedGOOP.solve(ReducedGOOP.ProjectedLM(), system, parameters; z₀=y[unknowns], options, workspace)
             output = study_output(timed.value, system)
             history = solver_history(timed.value)
             y[unknowns] .= output.w
