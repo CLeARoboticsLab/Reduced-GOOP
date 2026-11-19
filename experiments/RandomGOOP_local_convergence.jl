@@ -54,7 +54,7 @@ default_settings() = (;
     radius=1.0,                            # the ball's radius, in ‖·‖₂ of the offset δ
     rhos=[1.0, 0.1],                       # the stages; the first stages of the study's rho_schedule
     # One instance per class: its K and its trial number in the study.
-    instances=(; quadratic=(; num_levels=4, trial=1), nonquadratic=(; num_levels=3, trial=1)),
+    instances=(; quadratic=(; num_levels=7, trial=1), nonquadratic=(; num_levels=5, trial=1)),
     seed=1,                                # the starts' random stream (start_rng)
     tol_inner=1e-11,                       # a run stops at ‖K_ρ‖₂ < tol_inner
     max_inner_iters=1000,                  # t_max
