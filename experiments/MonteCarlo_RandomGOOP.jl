@@ -211,8 +211,8 @@ default_settings() = (;
     num_instances=100,                           # instances per objective class and K
     rng_seed=123,                                # (class, K) samples from Xoshiro(rng_seed + 100·class index + K)
     objective_classes=(:quadratic, :nonquadratic), # names in objective_classes(settings)
-    num_levels=(; quadratic=2:7, nonquadratic=2:6),
-    complete_levels=(; quadratic=2:7, nonquadratic=2:5),
+    num_levels=(; quadratic=2:6, nonquadratic=2:4),
+    complete_levels=(; quadratic=2:6, nonquadratic=2:4),
     # Problem (module docstring)
     num_players=4,                               # N
     primal_dimension=10,                         # n, primal variables per player

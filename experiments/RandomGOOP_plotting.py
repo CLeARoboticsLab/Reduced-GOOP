@@ -779,7 +779,7 @@ def parse_levels(text):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("run_dir")
-    parser.add_argument("--fig-levels", default="quadratic=7,nonquadratic=5", help="K of Fig 2 (per ρ stage) and Fig 4, per class")
+    parser.add_argument("--fig-levels", default="quadratic=6,nonquadratic=4", help="K of Fig 2 (per ρ stage) and Fig 4, per class")
     parser.add_argument("--local-convergence", action="store_true", help="run_dir is a RandomGOOP_local_convergence run")
     parser.add_argument("--mode", default="whole_iterate", help="--local-convergence: the sampling mode copied as the manuscript's Fig 3")
     args = parser.parse_args()
