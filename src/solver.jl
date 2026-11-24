@@ -98,7 +98,7 @@ function solve(
     )
     η > 0 || throw(ArgumentError("η must be positive, got $η"))
     isempty(ρ_schedule) && throw(ArgumentError("ρ_schedule is empty"))
-    kkt.kind === :scholtes && throw(ArgumentError("PDIP cannot solve the Scholtes system: its exact products σ̂ ⊙ ϕ = 0 have no interior. Use ProjectedLM."))
+    kkt.complementarity === :scholtes && throw(ArgumentError("PDIP cannot solve the Scholtes system: its exact products σ̂ ⊙ ϕ = 0 have no interior. Use ProjectedLM."))
     kkt.complementarity === :exact && throw(ArgumentError("PDIP cannot solve the exact complete system: its products σ ⊙ γ = 0 have no interior. Use complementarity = :perturbed, or ProjectedLM."))
     0 < β < 1 && 0 < min_step < 1 ||
         throw(ArgumentError("β and min_step must lie in (0, 1), got $β and $min_step"))

@@ -10,8 +10,8 @@ For every objective class, number of preference levels K and sampled instance, s
  1. the REDUCED KKT system, by `reduced_solver`: its Scholtes form by `:projected_lm` (the projected
     Levenberg–Marquardt method, `solve(ProjectedLM(), …)`), or the ρ-perturbed (5.2) by `:pdip`
     (Algorithm 5.1, `solve(PDIP(), …)`), and
- 2. for K in `complete_levels`, the ρ-perturbed COMPLETE KKT system (6.1), by `complete_solver` (`:pdip`
-    or `:projected_lm`), using nothing from the reduced solve, and report ‖z_complete − z_reduced‖₂.
+ 2. for K in `complete_levels`, the COMPLETE KKT system in Scholtes form by ProjectedLM, from the same
+    physical start, and report ‖z_complete − z_reduced‖₂.
 Each solver takes its Newton step by its system's linear solver (`reduced_linear_solver`,
 `complete_linear_solver`; stage_options). A stage at ρ starts at the previous stage's last iterate and stops
 once ‖K_ρ‖₂ < ε_ρ = ρ, at a line-search failure (α < 1e-14) or after `max_inner_iters` Newton steps. The
@@ -22,7 +22,8 @@ Problem. N players with n primal variables each; z ∈ R^{Nn} aggregates all pla
 function below depends on all of z, so the players are coupled. Player i's levels, outermost first:
     J_1 = ‖z‖², or ½‖R_1 z + p_1‖² with quadratic_top_level = :rank2 (quadratic class only); for k = 2..K
       :quadratic     J_k = ½‖R_k z + p_k‖²  (= ½zᵀQ_k z + q_kᵀz + ½‖p_k‖², Q_k = R_kᵀR_k rank 2, q_k = R_kᵀp_k)
-      :nonquadratic  J_k = exp(v_kᵀz − s_k) + exp(−(v_kᵀz − s_k)),  ‖v_k‖ = 1
+      :nonquadratic  J_k = ½‖R_k z + p_k‖² for 2 ≤ k < K
+                     J_K = exp(v_Kᵀz − s_K) + exp(−(v_Kᵀz − s_K)),  ‖v_K‖ = 1
     equalities     H z − b = 0                                  (m_E rows)
     inequalities   on D(z) = R_K z ∈ R² (:quadratic) or v_Kᵀz ∈ R (:nonquadratic), what the innermost
                    objective depends on (m_I = 2 rows). The quadratic class is a quadratic GOOP, with
@@ -37,10 +38,7 @@ so each (class, K) system is built once. z = 0 is strictly feasible for every in
 construction (sample_inequality), and every solve, reduced or complete, starts there.
 
 Terms
-  perturbed  the ρ-perturbed complete system (6.1), the complete counterpart of the reduced (5.2): the
-             exact complete system's equations with level-indexed slacks in the products and every
-             product = ρ.
-  Scholtes   the reduced system with the Scholtes relaxation in place of the (5.2)'s interior-point one:
+  Scholtes   either system with ordinary products relaxed to
              σ ⊙ γ + u = ρ𝟙 with u ≥ 0 (σ ⊙ γ ≤ ρ𝟙), and the lower levels' relaxed products slacked by σ̂,
              with multipliers ϕ ≥ 0 and σ̂ ⊙ ϕ = 0.
   R, K₀      the residual ‖·‖₂ at the stage's ρ, and at ρ = 0 (for the Scholtes system, with u = 0).
@@ -60,7 +58,7 @@ const MCI = MonteCarlo_Intersection
 # ── Problem definition ─────────────────────────────────────────────────────────
 
 """
-The objective classes (module docstring). `levels(k)` names level k's objective, :norm, :quadratic or
+The objective classes (module docstring). `levels(k, K)` names level k's objective, :norm, :quadratic or
 :cosh, with level 1 the outermost; `constraint_type` is the form of the inequalities: always :linear
 for the quadratic class (a quadratic GOOP has linear constraints), and `nonquadratic_constraint_type`
 (:linear or :nonlinear) for the nonquadratic class.
@@ -69,12 +67,12 @@ function objective_classes(settings)
     [
         (;
             name=:quadratic,
-            levels=k -> k == 1 && settings.quadratic_top_level === :norm ? :norm : :quadratic,
+            levels=(k, K) -> k == 1 && settings.quadratic_top_level === :norm ? :norm : :quadratic,
             constraint_type=:linear,
         ),
         (;
             name=:nonquadratic,
-            levels=k -> k == 1 ? :norm : :cosh,
+            levels=(k, K) -> k == 1 ? :norm : k == K ? :cosh : :quadratic,
             constraint_type=settings.nonquadratic_constraint_type,
         ),
     ]
@@ -117,10 +115,10 @@ function parameter_layout(class, num_levels, settings)
     (; num_players, primal_dimension, equality_dimension, inequality_dimension) = settings
     n = num_players * primal_dimension
     level_shapes = map(1:num_levels) do k
-        kind = class.levels(k)
+        kind = class.levels(k, num_levels)
         kind === :norm ? (;) : kind === :quadratic ? (; R=(2, n), p=(2,)) : (; v=(n,), s=())
     end
-    d = class.levels(num_levels) === :quadratic ? 2 : 1
+    d = class.levels(num_levels, num_levels) === :quadratic ? 2 : 1
     inequality_shapes =
         class.constraint_type === :linear ? (; W=(inequality_dimension, d), c=(inequality_dimension,)) :
         (; C=(inequality_dimension, d), r=(inequality_dimension,))
@@ -167,7 +165,7 @@ function get_setup(class, num_levels, settings)
     data(θ; player) = unflatten_parameters(θ[Block(player)], layout)
 
     preferences = [
-        Function[(z, θ) -> level_objective(class.levels(k), data(θ; player).levels[k], z) for k in 1:num_levels]
+        Function[(z, θ) -> level_objective(class.levels(k, num_levels), data(θ; player).levels[k], z) for k in 1:num_levels]
         for player in 1:num_players
     ]
     equality_constraints = [
@@ -179,7 +177,7 @@ function get_setup(class, num_levels, settings)
     inequality_constraints = [
         function (z, θ)
             (; levels, inequality) = data(θ; player)
-            D = innermost_image(class.levels(num_levels), levels[num_levels], z)
+            D = innermost_image(class.levels(num_levels, num_levels), levels[num_levels], z)
             inequality_values(class.constraint_type, inequality, D)
         end for player in 1:num_players
     ]
@@ -211,8 +209,8 @@ default_settings() = (;
     num_instances=100,                           # instances per objective class and K
     rng_seed=123,                                # (class, K) samples from Xoshiro(rng_seed + 100·class index + K)
     objective_classes=(:quadratic, :nonquadratic), # names in objective_classes(settings)
-    num_levels=(; quadratic=2:6, nonquadratic=2:4),
-    complete_levels=(; quadratic=2:6, nonquadratic=2:4),
+    num_levels=(; quadratic=2:6, nonquadratic=2:6),
+    complete_levels=(; quadratic=2:6, nonquadratic=2:6),
     # Problem (module docstring)
     num_players=4,                               # N
     primal_dimension=10,                         # n, primal variables per player
@@ -226,8 +224,8 @@ default_settings() = (;
     target_floor=0.25,                           # minimum ‖target‖ of the innermost level (redraw_target)
     # The solves, in plain ‖·‖₂ (your calls, 2026-10-30; module docstring)
     #! format: off
-    # 13 stages, to 1e-12: every system meets ‖K₀‖₂ < epsilon_0 by then (your call, 2026-10-30).
-    rho_schedule = [1.0, 1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9, 1e-10, 1e-11, 1e-12], # both systems
+    # 15 continuation stages shared by the reduced and complete systems.
+    rho_schedule = [1.0, 1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9, 1e-10, 1e-11, 1e-12, 1e-13, 1e-14], # both systems
     #! format: on
     max_inner_iters=1000,                        # t_max, Newton steps per ρ stage
     gc_before_solve=true,                        # a full garbage collection before each solve, outside its timing (solve_system)
@@ -235,14 +233,14 @@ default_settings() = (;
     # Each system's solver, :projected_lm or :pdip, and that solver's linear solver (LINEAR_SOLVERS).
     reduced_solver=:projected_lm,                # :projected_lm solves the Scholtes reduced system, :pdip the reduced (5.2) (reduced_system)
     reduced_linear_solver=:normal,               # ProjectedLM: :normal, :klu or :ldl; PDIP: :klu, :ldl, :svd (the exact pinv), …
-    complete_solver=:projected_lm,               # of the complete :perturbed system: :projected_lm or :pdip
+    complete_solver=:projected_lm,               # complete Scholtes uses ProjectedLM
     complete_linear_solver=:normal,              # as reduced_linear_solver
-    eta_0=1e-6,                                  # the constant Levenberg–Marquardt η: PDIP's, and ProjectedLM's with :klu (stage_options)
+    eta_0=1e-4,                                  # initial damping for each ρ stage, shared by both systems
     epsilon_0=1e-10,                             # ε₀, the success tolerance on the unperturbed ‖K₀‖₂
     # Fig 4 compares the reduced and complete iterates at the end of this stage, so both are at the same ρ
     # (the name keeps the figure's earlier number, as does the CSV column distance_fig3).
     fig3_rho=1e-11,
-    # Start of the (5.2) and the complete system (cold_initialization); initialize_scholtes! starts the Scholtes one
+    # Start of the legacy reduced system (5.2). Both Scholtes systems use initialize_scholtes!.
     positive_seed=1.0,                           # nonnegative variables
     positive_floor=1e-10,                        # floor for every nonnegative variable
     # ‖z_complete − z_reduced‖₂ up to this counts as the same solution (pass counts).
@@ -270,9 +268,9 @@ reduced_system(settings) = settings.reduced_solver === :projected_lm ? :scholtes
 solver_settings(settings, system) =
     (; solver=settings[Symbol(system, :_solver)], linear_solver=settings[Symbol(system, :_linear_solver)])
 
-"A system in the console output, from its formulation name (:scholtes, :interior_point or :perturbed)."
+"A system in the console output, from its formulation name (:scholtes, :interior_point or :scholtes_complete)."
 system_label(name) =
-    name === :scholtes ? "reduced Scholtes" : name === :interior_point ? "reduced (5.2)" : "complete :$name"
+    name === :scholtes ? "reduced Scholtes" : name === :interior_point ? "reduced (5.2)" : "complete Scholtes"
 
 "A solver in the console output, with its linear solver."
 solver_label(solver, linear_solver) =
@@ -310,6 +308,14 @@ function validated_settings(overrides)
         linear_solver in LINEAR_SOLVERS[solver] ||
             error("$(system)_linear_solver must be one of $(LINEAR_SOLVERS[solver]) for $(system)_solver = :$solver")
     end
+    paired = any(c -> !isempty(intersect(levels_for(settings.num_levels, c),
+        levels_for(settings.complete_levels, c))), settings.objective_classes)
+    if paired
+        settings.reduced_solver === settings.complete_solver === :projected_lm ||
+            error("A paired comparison uses ProjectedLM on both Scholtes systems")
+        settings.reduced_linear_solver === settings.complete_linear_solver ||
+            error("A paired comparison uses the same linear solver on both Scholtes systems")
+    end
     settings.eta_0 > 0 || error("eta_0 must be positive")
     settings.epsilon_0 > 0 || error("epsilon_0 must be positive")
     any(r -> isapprox(r, settings.fig3_rho; rtol=1e-9), settings.rho_schedule) ||
@@ -323,8 +329,8 @@ end
 
 """
 One class's problem and systems at K = num_levels: the reduced system (reduced_system) and, for K in
-complete_levels, the ρ-perturbed complete system (6.1). Each is a formulation, which solve_system solves:
-    name                    :scholtes or :interior_point (reduced), :perturbed (complete)
+complete_levels, the complete Scholtes system. Each is a formulation, which solve_system solves:
+    name                    :scholtes or :interior_point (reduced), :scholtes_complete (complete)
     kkt                     its GOOPKKTSystem
     solver, linear_solver   the system's settings (`reduced_…`, `complete_…`)
     slack_targets           (y, θ, ρ) -> the values its σ start at (cold_initialization); `nothing` for the
@@ -355,23 +361,29 @@ function build_systems(class, num_levels, settings)
     end
     complete = nothing
     if num_levels in levels_for(settings.complete_levels, class.name)
-        perturbed = problem -> ReducedGOOP.generate_slacked_complete_kkt_system(problem; complementarity=:perturbed)
-        complete = formulation(:perturbed, perturbed, MCI.slack_target_values; system=:complete)
-        @assert complete.kkt.variable_dimension == complete.kkt.kkt_dimension # square
+        complete = formulation(
+            :scholtes_complete, ReducedGOOP.generate_slacked_scholtes_complete_kkt_system,
+            kkt -> nothing; system=:complete,
+        )
     end
     # Sizes of the systems the solver works on: variables y and equations, no complementarity pairs.
-    sizes(p) = (; p.name, p.solver, p.linear_solver, variables=p.kkt.variable_dimension, equations=p.kkt.kkt_dimension, p.construction_seconds)
+    sizes(p) = (;
+        p.name, p.solver, p.linear_solver, variables=p.kkt.variable_dimension, equations=p.kkt.kkt_dimension,
+        sign_bounds=length(p.kkt.nonnegative_dims),
+        jacobian_nnz=ReducedGOOP.SparseArrays.nnz(p.kkt.∇K_ρ!.result_buffer),
+        p.construction_seconds,
+    )
     metadata = (;
         class=class.name,
         num_levels,
-        levels=[class.levels(k) for k in 1:num_levels],
+        levels=[class.levels(k, num_levels) for k in 1:num_levels],
         class.constraint_type,
         reduced=sizes(reduced),
         complete=isnothing(complete) ? nothing : sizes(complete),
     )
     println("KKT system sizes, $label:")
     for (system, p) in (("reduced", metadata.reduced), ("complete", metadata.complete))
-        isnothing(p) || println("  ", rpad("$system :$(p.name)", 26), p.variables, " variables · ", p.equations, " equations")
+        isnothing(p) || println("  ", rpad("$system :$(p.name)", 30), p.variables, " variables · ", p.equations, " equations")
     end
     (; class, num_levels, problem, layout, reduced, complete, metadata)
 end
@@ -538,7 +550,7 @@ function run(; overrides=(;))
     )
     println(
         "Systems: $(system_label(reduced_system(settings))) by $(solver_label(solver_settings(settings, :reduced)...)); ",
-        "$(system_label(:perturbed)) by $(solver_label(solver_settings(settings, :complete)...)).",
+        "$(system_label(:scholtes_complete)) by $(solver_label(solver_settings(settings, :complete)...)).",
     )
     println(
         "Each solve: stage ρ to ‖K_ρ‖₂ < ρ; ",
@@ -639,7 +651,7 @@ inequalities exclude its innermost target.
 function sample_instances(rng, class, num_levels, settings)
     (; num_players, primal_dimension, equality_dimension) = settings
     layout = parameter_layout(class, num_levels, settings)
-    kinds = [class.levels(k) for k in 1:num_levels]
+    kinds = [class.levels(k, num_levels) for k in 1:num_levels]
     innermost = kinds[num_levels]
     map(1:settings.num_instances) do _
         players = map(1:num_players) do player
@@ -740,7 +752,7 @@ function cold_initialization(formulation, initial_guess, θ, settings)
     (; kkt) = formulation
     ρ = first(settings.rho_schedule)
     y = zeros(kkt.variable_dimension)
-    if kkt.kind === :scholtes
+    if kkt.complementarity === :scholtes
         ReducedGOOP.initialize_scholtes!(y, kkt, θ, initial_guess, ρ; warm=false)
     else
         y[kkt.primal_dims] .= initial_guess
@@ -818,8 +830,8 @@ the stage's last iterate (stage_history), and the timing should hold the solve a
 
 The Levenberg–Marquardt η of the step −Jᵀ(JJᵀ + η²I)⁻¹K_ρ:
   PDIP          constant, eta_0 (its :klu and :ldl; its other linear solvers have no η);
-  ProjectedLM   with :klu constant, eta_0 (η = η_min = η_max); with :normal and :ldl its own default,
-                which it adapts after every step and restarts at every stage.
+  ProjectedLM   with :klu constant, eta_0 (η = η_min = η_max); with :normal and :ldl starts each
+                stage at eta_0 and adapts η after each step.
 Every other option is the solver's default.
 """
 function stage_options(formulation, settings, ρ)
@@ -828,7 +840,7 @@ function stage_options(formulation, settings, ρ)
     stage = (; ρ_schedule=[Float64(ρ)], max_inner_iters, tol=settings.epsilon_0, tol_inner=ρ, linear_solver)
     solver === :pdip && return ReducedGOOP.PDIPOptions(; stage..., η=eta_0)
     linear_solver === :klu && return ReducedGOOP.ProjectedLMOptions(; stage..., η=eta_0, η_min=eta_0, η_max=eta_0)
-    ReducedGOOP.ProjectedLMOptions(; stage...)
+    ReducedGOOP.ProjectedLMOptions(; stage..., η=eta_0)
 end
 
 """
@@ -847,7 +859,7 @@ function stage_history(output)
 end
 
 """
-One system's solve: `formulation` (the reduced Scholtes or (5.2), or the complete :perturbed) by its solver
+One system's solve: `formulation` (the reduced Scholtes or (5.2), or the complete Scholtes system) by its solver
 (solver_method), from the cold start down `rho_schedule` (stage_options). Each stage starts at the previous
 one's last iterate. The solve is judged at its best stage, the one with the lowest ‖K₀‖₂: accepted iff
 ‖K₀‖₂ <= epsilon_0 there. After the solver's ‖K₀‖₂ < epsilon_0 stop, every later stage returns at its first
@@ -1060,7 +1072,7 @@ The run's CSV files, read by experiments/RandomGOOP_plotting.py:
   setup.csv     one row per (class, K, system): build time, and the warm-up's first-solve time and the
                 part of it spent compiling (jit_warmup)
   solves.csv    one row per solve (system reduced, formulation scholtes or interior_point, the (5.2);
-                complete, perturbed): accepted, solve time (the setup and every stage, no compilation),
+                complete, scholtes_complete): accepted, solve time (the setup and every stage, no compilation),
                 the setup's part of it (solve_setup), Newton steps, ‖K₀‖₂ of the judged iterate, the
                 distance to the trial's reduced z, and Fig 4's distance between the two iterates at the end
                 of the stage ρ = fig3_rho (distance_fig3)
@@ -1077,7 +1089,8 @@ function export_csv(directory)
     sizes, setup = Any[], Any[]
     for m in metadata
         for (system, p) in (("reduced", m.reduced), ("complete", m.complete))
-            isnothing(p) || push!(sizes, (m.class, m.num_levels, system, p.name, p.variables, p.equations, p.construction_seconds))
+            isnothing(p) || push!(sizes, (m.class, m.num_levels, system, p.name, p.variables, p.equations,
+                p.construction_seconds, get(p, :sign_bounds, ""), get(p, :jacobian_nnz, "")))
         end
         for w in get(m, :warmup, NamedTuple[])
             build = (w.system === :reduced ? m.reduced : m.complete).construction_seconds
@@ -1086,7 +1099,7 @@ function export_csv(directory)
     end
     write_csv(
         joinpath(directory, "sizes.csv"),
-        ("class", "K", "system", "formulation", "variables", "equations", "construction_seconds"),
+        ("class", "K", "system", "formulation", "variables", "equations", "construction_seconds", "sign_bounds", "jacobian_nnz"),
         sizes,
     )
     write_csv(

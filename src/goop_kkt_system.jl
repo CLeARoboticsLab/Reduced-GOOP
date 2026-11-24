@@ -4,8 +4,8 @@
 
 as the generators return it: the reduced interior-point system (5.2)
 (`generate_slacked_reduced_kkt_system`), the complete systems (2.12)–(2.17) and (6.1)
-(`generate_slacked_complete_kkt_system`) and the reduced system in Scholtes form
-(`generate_slacked_scholtes_reduced_kkt_system`). θ are the parameters and ρ ≥ 0 relaxes the
+(`generate_slacked_complete_kkt_system`) and the systems in Scholtes form
+(`generate_slacked_scholtes_reduced_kkt_system` and `generate_slacked_scholtes_complete_kkt_system`). θ are the parameters and ρ ≥ 0 relaxes the
 complementarity rows.
 
 The fields, by group:
@@ -19,7 +19,7 @@ The fields, by group:
     among them: s ≥ 0 is a row of K_ρ, s − σ = 0, like every other inequality;
   - symbolic: `K_ρ_symbolic`, `z_symbolic`, for complete and Scholtes systems also
     `slack_expressions`, for complete systems `G_symbolic` and `levels`;
-  - the tags: `kind`, the system (`:reduced`, `:complete` or `:scholtes`), and `complementarity`,
+  - the tags: `system` (`:reduced` or `:complete`), and `complementarity`,
     its complementarity rows (`:interior_point`, `:exact`, `:perturbed` or `:scholtes`);
   - for the Scholtes system only: `complementarity_pairs` and `preference_slack_rows`, which its
     start (`initialize_scholtes!`) and K₀ read.
@@ -98,12 +98,12 @@ struct GOOPKKTSystem{T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T14}
     G_symbolic::T13
     "Per player and level, the symbolic data of the complete construction (complete systems; empty otherwise)"
     levels::T14
-    "The system: :reduced, :complete or :scholtes"
-    kind::Symbol
-    "Its complementarity rows: :interior_point (reduced), :exact or :perturbed (complete), :scholtes"
+    "The system: :reduced or :complete"
+    system::Symbol
+    "Its complementarity rows: :interior_point (reduced), :exact or :perturbed (complete), or :scholtes (either)"
     complementarity::Symbol
     # Required for the Scholtes system only (empty otherwise): its start, `initialize_scholtes!`, and K₀ read them.
-    "Per complementarity product, (; slack, multiplier, u_relaxation, label): the coordinates of σ (σ̂), γ (ϕ) and u (0 on an exact product), and the kind, player, level, lower level and inequality; the relaxed γ pairs, then the exact ϕ pairs (Scholtes only)"
+    "Per complementarity product, (; slack, multiplier, u_relaxation, label): the coordinates of σ (σ̂), γ (ϕ) and u (0 on an exact product), and the kind, player, level, lower level and inequality; in the order of slack_expressions (Scholtes only)"
     complementarity_pairs::Vector{NamedTuple}
     "Per preference slack, the index of its h + s row among `slack_expressions` (Scholtes only)"
     preference_slack_rows::Vector{Int}
@@ -340,7 +340,7 @@ function BuildGOOPKKTSystem(
     slack_expressions = T[],
     G_symbolic = T[],
     levels = Any[],
-    kind,
+    system,
     complementarity,
     complementarity_pairs = NamedTuple[],
     preference_slack_rows = Int[],
@@ -350,9 +350,15 @@ function BuildGOOPKKTSystem(
 ) where {T<:SymbolicTracingUtils.Symbolics.Num}
     codegen in (:native, :fast_differentiation) ||
         error("Unknown codegen option: $(codegen). Use :native or :fast_differentiation.")
-    (kind, complementarity) in
-    ((:reduced, :interior_point), (:complete, :exact), (:complete, :perturbed), (:scholtes, :scholtes)) ||
-        error("Unknown system: kind = $kind, complementarity = $complementarity.")
+    (system, complementarity) in
+    (
+        (:reduced, :interior_point),
+        (:complete, :exact),
+        (:complete, :perturbed),
+        (:reduced, :scholtes),
+        (:complete, :scholtes),
+    ) ||
+        error("Unknown system: system = $system, complementarity = $complementarity.")
     isempty(slack_expressions) || length(slack_expressions) == length(interior_point_slack_dims) ||
         error("one slack expression per interior point slack is expected")
     exact = complementarity === :exact
@@ -418,7 +424,7 @@ function BuildGOOPKKTSystem(
             slack_expressions,
             G_symbolic,
             levels,
-            kind,
+            system,
             complementarity,
             complementarity_pairs,
             preference_slack_rows,

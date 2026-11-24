@@ -679,8 +679,8 @@ include(joinpath(@__DIR__, "problems.jl"))
                 @test all(v -> any(w -> any(isequal(v - w), k.K_ρ_symbolic), σ), s)
             end
             @test isempty(reduced.slack_expressions)
-            @test (reduced.kind, reduced.complementarity) == (:reduced, :interior_point)
-            @test [(k.kind, k.complementarity) for k in complete_systems] == [(:complete, :exact), (:complete, :perturbed)]
+            @test (reduced.system, reduced.complementarity) == (:reduced, :interior_point)
+            @test [(k.system, k.complementarity) for k in complete_systems] == [(:complete, :exact), (:complete, :perturbed)]
             for k in complete_systems
                 σ = k.z_symbolic[k.interior_point_slack_dims]
                 @test length(k.slack_expressions) == length(σ)
@@ -695,7 +695,7 @@ include(joinpath(@__DIR__, "problems.jl"))
             # The Scholtes system's sign box is every complementarity pair's slack and multiplier (σ, γ; σ̂, ϕ) and
             # the relaxed pairs' u; its s ≥ 0, too, is a slack row.
             scholtes = RG.generate_slacked_scholtes_reduced_kkt_system(p)
-            @test (scholtes.kind, scholtes.complementarity) == (:scholtes, :scholtes)
+            @test (scholtes.system, scholtes.complementarity) == (:reduced, :scholtes)
             pairs = scholtes.complementarity_pairs
             @test sort(scholtes.nonnegative_dims) == sort([[pair.slack for pair in pairs]; [pair.multiplier for pair in pairs];
                 [pair.u_relaxation for pair in pairs if pair.u_relaxation != 0]])
@@ -812,7 +812,7 @@ end
             RG.generate_slacked_scholtes_reduced_kkt_system(case.problem))
         for k in systems
             θ, ρ, η = zeros(k.parameter_dimension), 1e-2, 1e-3
-            z = k.kind === :scholtes ? RG.initialize_scholtes!(zeros(k.variable_dimension), k, θ, case.expected, ρ) :
+            z = k.complementarity === :scholtes ? RG.initialize_scholtes!(zeros(k.variable_dimension), k, θ, case.expected, ρ) :
                 0.5 .+ 0.1 .* sin.(1:(k.variable_dimension))
             K_ρ = zeros(k.kkt_dimension)
             k.K_ρ!(K_ρ, z; θ, ρ)
@@ -1517,3 +1517,90 @@ end
         @test_throws ArgumentError RG.random_starts(prob_A.goop, θ0, 5; center = [-10.0], radius = 0.1)
     end
 end
+
+@testset "Complete Scholtes construction and solutions" begin
+    for case in (
+        build_benchmark_problem(; num_players = 1, levels = 2, kind = :quadratic),
+        build_benchmark_problem(; num_players = 1, levels = 3, kind = :nonlinear),
+        build_unconstrained_quadratic_problem(; levels = 3),
+    )
+        kkt = RG.generate_slacked_scholtes_complete_kkt_system(case.problem)
+        @test (kkt.system, kkt.complementarity) == (:complete, :scholtes)
+        θ = zeros(kkt.parameter_dimension)
+        ρ = 1e-2
+        physical_start = case.expected .+ 0.01
+        start = RG.initialize_scholtes!(zeros(kkt.variable_dimension), kkt, θ, physical_start, ρ)
+        @test start[kkt.primal_dims] == physical_start
+        @test all(>(0), start[kkt.nonnegative_dims])
+        @test_throws ArgumentError RG.solve(RG.PDIP(), kkt, θ; z₀ = start)
+
+        # Check the compiled derivatives with the lower-level multipliers held in the iterate.
+        y = 0.5 .+ 0.1 .* sin.(1:kkt.variable_dimension)
+        d = cos.(1:kkt.variable_dimension)
+        d ./= norm(d)
+        @test jacobian(kkt, y, ρ) * d ≈
+              (residual(kkt, y + 1e-6d, ρ) - residual(kkt, y - 1e-6d, ρ)) / 2e-6 atol = 1e-7
+
+        options = RG.ProjectedLMOptions(;
+            ρ_schedule = 10.0 .^ (-2:-1:-10),
+            max_inner_iters = 500,
+            tol = 1e-7,
+            tol_inner = 1e-10,
+            η = 1e-4,
+            η_max = 1e4,
+        )
+        complete = RG.solve(RG.ProjectedLM(), kkt, θ; z₀ = start, options)
+        @test complete.status === :solved
+        @test complete.norm_K₀ <= options.tol
+        @test complete.x ≈ case.expected atol = 1e-6 rtol = 0
+        @test RG.is_feasible(case.problem, complete.x, θ; tol = 1e-7).feasible
+        @test all(>(0), complete.z[kkt.nonnegative_dims])
+        for complementarity in (:exact, :perturbed)
+            reference = RG.generate_slacked_complete_kkt_system(case.problem; complementarity)
+            output = RG.solve(RG.ProjectedLM(), reference, θ; z₀ = physical_start, options)
+            @test output.status === :solved
+            @test complete.x ≈ output.x atol = 1e-5 rtol = 0
+        end
+    end
+
+    @testset "Relax before differentiating the upper Lagrangian" begin
+        goop = RG.ParametricGOOP(
+            BlockArray([0.3], [1]),
+            BlockArray(Float64[], [0]);
+            preferences = [Function[(x, θ) -> x[1]^2, (x, θ) -> x[1]^2 / 2, (x, θ) -> (x[1] - 1)^2 / 2]],
+            is_prioritized_constraint = [[false, false, false]],
+            equality_constraints = [nothing],
+            inequality_constraints = [(x, θ) -> [x[1] + 1]],
+        )
+        kkt = RG.generate_slacked_scholtes_complete_kkt_system(goop; codegen = :native)
+        outer, middle, inner = only(kkt.levels)
+        x = only(kkt.z_symbolic[kkt.primal_dims])
+        @test length(inner.gamma) == 1
+        ψ₂ = only(middle.lambda)
+        ϕ₂ = only(middle.phi)
+        γ₂ = kkt.z_symbolic[[
+            pair.multiplier for pair in kkt.complementarity_pairs
+            if pair.u_relaxation != 0 && pair.label.level == 2
+        ]]
+        @test length(γ₂) == 2
+        # ∂L₂/∂γ₃ includes the multiplier on γ₃ ≥ 0 and the derivative of ρ − (x + 1)γ₃.
+        @test iszero(Symbolics.simplify(middle.stationarity[2] - (ψ₂ - γ₂[2] + (x + 1) * ϕ₂)))
+        # The outer Lagrangian sees level 2's exact product, with an unrestricted equality multiplier.
+        @test length(middle.F) == 4
+        @test iszero(Symbolics.simplify(Symbolics.derivative(outer.L, outer.lambda[end]) + middle.Q[1] * ϕ₂))
+        @test length(outer.phi) == 3
+        @test count(p -> p.u_relaxation == 0, kkt.complementarity_pairs) == 4
+        ρ = 0.1
+        start = RG.initialize_scholtes!(
+            zeros(kkt.variable_dimension), kkt, Float64[], [0.3], ρ; warm = false,
+        )
+        targets = zeros(length(kkt.slack_expressions))
+        kkt.slack_targets!(targets, start; θ = Float64[], ρ)
+        @test start[kkt.interior_point_slack_dims] ≈ targets
+        for p in kkt.complementarity_pairs
+            p.u_relaxation == 0 && continue
+            @test 0 < start[p.slack] * start[p.multiplier] < ρ
+        end
+    end
+end
+

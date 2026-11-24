@@ -4,10 +4,9 @@ solution.
 
 For one instance of each objective class of the random GOOP study (`MonteCarlo_RandomGOOP.jl`, the same sampler
 and seeds, so the instance is one of Table 2's), each system (the study's reduced system, by default in
-Scholtes form, and the ρ-perturbed complete (6.1)) and each ρ in `rhos` (1 and 0.1, as Fig 3 has them), with
+Scholtes form, and the complete Scholtes form) and each ρ in `rhos` (1 and 0.1, as Fig 3 has them), with
 the study's settings, among them each system's solver and linear solver (by default ProjectedLM with :normal
-for both; `study_overrides = (; reduced_solver = :pdip, reduced_linear_solver = :klu, …)` gives Algorithm 5.1
-on the reduced (5.2)):
+for both):
 
  1. the center y*_ρ: the system's solution at ρ, from the study's cold start at z = 0 down the stages in `rhos`,
     each to ‖K_ρ‖₂ < `tol_inner` (`centers`);
@@ -54,7 +53,7 @@ default_settings() = (;
     radius=1.0,                            # the ball's radius, in ‖·‖₂ of the offset δ
     rhos=[1.0, 0.1],                       # the stages; the first stages of the study's rho_schedule
     # One instance per class: its K and its trial number in the study.
-    instances=(; quadratic=(; num_levels=7, trial=1), nonquadratic=(; num_levels=5, trial=1)),
+    instances=(; quadratic=(; num_levels=4, trial=1), nonquadratic=(; num_levels=3, trial=1)),
     seed=1,                                # the starts' random stream (start_rng)
     tol_inner=1e-11,                       # a run stops at ‖K_ρ‖₂ < tol_inner
     max_inner_iters=1000,                  # t_max
@@ -146,7 +145,7 @@ function run(; overrides=(;))
     (; settings, study) = validated_settings(overrides)
     directory = MCI.run_directory(settings.output_dir)
     println("Local convergence, $(MRG.system_label(MRG.reduced_system(study))) by $(MRG.solver_label(MRG.solver_settings(study, :reduced)...)) and ",
-        "$(MRG.system_label(:perturbed)) by $(MRG.solver_label(MRG.solver_settings(study, :complete)...)): $(settings.num_starts) starts in the ball of radius ",
+        "$(MRG.system_label(:scholtes_complete)) by $(MRG.solver_label(MRG.solver_settings(study, :complete)...)): $(settings.num_starts) starts in the ball of radius ",
         "$(settings.radius) around y*_ρ, ρ ∈ $(settings.rhos), modes $(settings.modes). Output: $directory")
     traces, starts_rows, center_rows, records = Any[], Any[], Any[], Any[]
     classes = filter(c -> haskey(settings.instances, c.name), MRG.objective_classes(study))

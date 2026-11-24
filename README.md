@@ -16,7 +16,7 @@ then optimize lower-priority behavior.
 `ReducedGOOP.jl` implements tractable nonlinear KKT reformulations of GOOP
 problems together with two solvers: a primal-dual interior-point method (`PDIP`,
 Algorithm 5.1 of the paper) and a projected Levenberg–Marquardt method
-(`ProjectedLM`), which solves the reduced system in Scholtes form down a ρ
+(`ProjectedLM`), which solves the reduced and complete systems in Scholtes form down a ρ
 homotopy. The experiment scripts reproduce the main computational examples from
 the paper, including the two-player intersection scenario and quadratic hierarchy
 benchmarks, plus a two-arm robotic pot-carrying game solved in Scholtes form.
@@ -102,7 +102,8 @@ solvers in `solver.jl`:
 | `generate_slacked_quasi_kkt_system(...)`    | Calls the reduced generator with `drop_higher_order_terms = true`. The code implements this by propagating `QuasiLagrangianTerm` objects and truncating higher-order derivative contributions.                                                 |
 | `generate_slacked_complete_kkt_system(...)` | Builds the complete KKT system, carrying inner-level stationarity, inequality rows and multipliers into the outer levels: `complementarity = :exact` (equations (2.12)–(2.17)) or `:perturbed` (equation (6.1), complementarity relaxed to ρ). |
 | `generate_slacked_scholtes_reduced_kkt_system(...)` | Builds the reduced system in Scholtes form: the same recursion as the reduced generator, with the relaxation σ ⊙ γ ≤ ρ𝟙 written as σ ⊙ γ + u − ρ𝟙 = 0 (u ≥ 0) and the lower levels' relaxed complementarity carried as an exact product σ̂ ⊙ ϕ = 0 (see below). |
-| `initialize_scholtes!(...)` | Starts the Scholtes system at a primal guess and a stage ρ: a cold start (every inequality strictly satisfied) or a warm, continuation start. |
+| `generate_slacked_scholtes_complete_kkt_system(...)` | Builds and differentiates the complete hierarchy with the Scholtes inequalities already present. Ordinary products are bounded by ρ, and the complementary products of the inherited Scholtes inequalities are exact. |
+| `initialize_scholtes!(...)` | Starts either Scholtes system at a primal guess and a stage ρ: a cold start (every inequality strictly satisfied) or a warm, continuation start. |
 
 The reduced formulation carries the lower levels' stationarity upward as policy
 constraints with their own multipliers; the complete formulation keeps every lower
@@ -120,8 +121,8 @@ reduced one without the terms differentiated more than `quasi_order` times.
 - index sets for primal variables, preference slacks, interior-point slacks,
   inequality duals, the equality/stationarity dual subsets used by selective warm
   starts, and the sign box (the coordinates kept positive);
-- KKT and variable dimensions, and tags naming the system (`kind`,
-  `complementarity`);
+- KKT and variable dimensions, and tags naming the formulation (`system`) and its
+  product equations (`complementarity`);
 - the symbolic residual and symbolic variable vector used to build the system, and,
   for the Scholtes system, its complementarity pairs.
 

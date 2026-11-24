@@ -67,7 +67,7 @@ other coordinates), or for the Scholtes system a primal point's cold start by `i
 """
 function _multistart_z₀(kkt, θ, start, options)
     length(start) == kkt.variable_dimension && return start
-    kkt.kind === :scholtes || return start
+    kkt.complementarity === :scholtes || return start
     initialize_scholtes!(zeros(kkt.variable_dimension), kkt, θ, start, first(options.ρ_schedule); warm = false)
 end
 
