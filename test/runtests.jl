@@ -1584,10 +1584,10 @@ end
         ]]
         @test length(γ₂) == 2
         # ∂L₂/∂γ₃ includes the multiplier on γ₃ ≥ 0 and the derivative of ρ − (x + 1)γ₃.
-        @test iszero(Symbolics.simplify(middle.stationarity[2] - (ψ₂ - γ₂[2] + (x + 1) * ϕ₂)))
+        @test iszero(Symbolics.expand(middle.stationarity[2] - (ψ₂ - γ₂[2] + (x + 1) * ϕ₂)))
         # The outer Lagrangian sees level 2's exact product, with an unrestricted equality multiplier.
         @test length(middle.F) == 4
-        @test iszero(Symbolics.simplify(Symbolics.derivative(outer.L, outer.lambda[end]) + middle.Q[1] * ϕ₂))
+        @test iszero(Symbolics.expand(Symbolics.derivative(outer.L, outer.lambda[end]) + middle.Q[1] * ϕ₂))
         @test length(outer.phi) == 3
         @test count(p -> p.u_relaxation == 0, kkt.complementarity_pairs) == 4
         ρ = 0.1

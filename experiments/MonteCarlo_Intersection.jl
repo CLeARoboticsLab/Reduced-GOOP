@@ -312,11 +312,11 @@ default_settings() = (;
     # Complete solver overrides; nothing selects the defaults for each dynamics, objective, and mode.
     complete_rho_schedule=nothing,
     complete_eta_0=nothing,
-    retry_eta=nothing,                           # one retry per entry, or [] for a single try
+    retry_eta=nothing,                           # replace all default retries with this damping list, or [] for a single try
     # Acceptance: a solve is accepted iff its unrelaxed KKT residual ‖K₀‖ / √(number of equations) <= tol,
     # at the best stage of its ρ chain (and, for a complete check, its best try).
     tol=2e-4,                                    # reduced system
-    complete_tol=2e-3,                           # complete systems
+    complete_tol=1e-3,                           # complete systems
     inner_ρ_tol=1e-2,                            # a ρ stage's inner stop: ‖K_ρ‖/√m < min(ρ, inner_ρ_tol). 1.0 for old behavior
     # Complete-system start (complete_initialization)
     positive_floor=1e-10,                        # floor for every nonnegative variable
@@ -331,8 +331,8 @@ default_settings() = (;
 Defaults that dynamics_model = :unicycle replaces, since it reads a state as [px, py, v, ψ]: P2 starts at
 2 m/s heading along its lane (+y), as the double integrator's vy = 2, and only its speed is perturbed.
 P1's defaults read the same in both models: 1.5 m/s heading along +x. The unicycle also has its own
-reduced eta_0. Every other setting is shared, control_bounds included: for the
-unicycle they bound its accelerations [a, v·ω] in m/s².
+reduced eta_0. The shared control_bounds bound its accelerations [a, v·ω] in m/s². The complete
+solver parameters are resolved separately by complete_solver_settings.
 """
 unicycle_defaults() = (; 
     base_initial_state2=[1.0, -5.0, 2.0, π/2], 
@@ -341,28 +341,53 @@ unicycle_defaults() = (;
 )
 
 """
-Resolve the complete solver settings for an objective and mode. The short schedule and damping
-values were tuned on fixed trajectories for the double-integrator cosh and both unicycle variants.
-Overrides replace the corresponding complete setting across all variants and modes.
+Resolve the complete solver settings for an objective and mode. The fixed-primal settings were
+tuned at the 1e-3 RMS cutoff. The fallback attempts vary the complete initialization or projection
+settings, with the same fixed physical trajectory and unrelaxed acceptance test.
 """
 function complete_solver_settings(settings, variant, mode)
     rho_schedule = settings.rho_schedule
     eta_0 = settings.eta_0
     retry_eta = is_unicycle(settings) ? [1e-6, 1e-5, 1e-4] : [1e-3, 1e-4, 1e-5]
-    if mode === :fixed_primal && (is_unicycle(settings) || variant === :cosh)
+    proj_eps = 1e-8
+    fallbacks = NamedTuple[]
+    if mode === :fixed_primal
         rho_schedule = [1e-6, 1e-7, 1e-8, 1e-9]
-        if !is_unicycle(settings)
-            eta_0, retry_eta = 1e-3, [1e-5]
+        if !is_unicycle(settings) && variant === :quadratic
+            eta_0, retry_eta = 3e-5, [1e-3, 3e-4, 1e-5]
+            push!(fallbacks, (; eta_0=3e-5, proj_eps=1e-3))
+        elseif !is_unicycle(settings)
+            eta_0, retry_eta = 1e-3, [3e-4, 3e-5, 1e-5]
+            push!(fallbacks, (; eta_0=1e-3, rho_schedule=[1e-4; 1e-5; rho_schedule]))
         elseif variant === :cosh
-            eta_0, retry_eta = 3e-4, [3e-5]
+            eta_0, retry_eta = 3e-4, [3e-5, 1e-4]
+            proj_eps = 1e-3
+            append!(fallbacks, [
+                (; eta_0=3e-4, rho_schedule=[1e-8, 1e-9, 1e-10, 1e-11]),
+                (; eta_0=3e-5, proj_eps=3e-3),
+                (; eta_0=3e-4, positive_floor=1e-4),
+                (; eta_0=3e-5, positive_floor=1e-4),
+                (; eta_0=6e-5, rho_schedule=[3e-6; rho_schedule]),
+                (; eta_0=3e-5, positive_floor=1e-5),
+                (; eta_0=6e-5, proj_eps=3e-3, positive_floor=1e-4),
+            ])
         else
-            eta_0, retry_eta = 3e-5, Float64[]
+            eta_0, retry_eta = 3e-4, [3e-5, 1e-4]
+            proj_eps = 1e-3
+            push!(fallbacks, (; eta_0=3e-5, positive_floor=1e-4))
         end
+    end
+    if !isnothing(settings.retry_eta)
+        empty!(fallbacks)
+    elseif !isnothing(settings.complete_rho_schedule)
+        fallbacks = [merge(attempt, (; rho_schedule=settings.complete_rho_schedule)) for attempt in fallbacks]
     end
     merge(settings, (;
         rho_schedule=something(settings.complete_rho_schedule, rho_schedule),
         eta_0=something(settings.complete_eta_0, eta_0),
         retry_eta=something(settings.retry_eta, retry_eta),
+        proj_eps,
+        fallbacks,
     ))
 end
 
@@ -603,6 +628,7 @@ function check_complete_kkt(record, systems, formulation, mode, settings)
             start,
             settings;
             context=trial_context(record.trial, record.variant),
+            reduced_output=reduced.output,
         )
     catch err
         validation = merge(
@@ -682,7 +708,7 @@ function run(; overrides=(;))
         systems = build_systems(variant, builders, dynamics, settings)
         check_settings = [complete_solver_settings(settings, variant.name, mode.name) for mode in modes]
         complete_solver = [
-            (; mode=mode.name, opts.rho_schedule, opts.eta_0, opts.retry_eta)
+            (; mode=mode.name, opts.rho_schedule, opts.eta_0, opts.retry_eta, opts.proj_eps, opts.fallbacks)
             for (mode, opts) in zip(modes, check_settings)
         ]
         push!(metadata, merge(systems.metadata, (; complete_solver)))
@@ -856,7 +882,8 @@ end
 tolerance_line(settings) = "Tolerances: reduced ‖K₀‖/√m ≤ $(compact(settings.tol)), complete ‖K₀‖/√m ≤ $(compact(settings.complete_tol))"
 
 complete_solver_line(variant, opts) =
-    "Complete :$variant, :$(opts.mode) | ρ = $(opts.rho_schedule) | η₀ = $(opts.eta_0) | retry η = $(opts.retry_eta)"
+    "Complete :$variant, :$(opts.mode) | ρ = $(opts.rho_schedule) | η₀ = $(opts.eta_0) | retry η = $(opts.retry_eta)" *
+    " | projection ε = $(get(opts, :proj_eps, 1e-8)) | $(length(get(opts, :fallbacks, ()))) fallback(s)"
 
 "Progress bar on its own line: other output interleaves with it, so it is not redrawn in place."
 function print_progress(done, total; width=24)
@@ -955,9 +982,9 @@ function print_kkt_stage(;
 end
 
 """
-ProjectedLM options for one ρ stage of any solve, reduced or complete; only ρ, the acceptance
-tolerance `tol` (an RMS) and the initial η differ between solves. Of the fixed constants, only
-proj_eps and η_max differ from the ProjectedLMOptions defaults; the rest come from settings.
+ProjectedLM options for one ρ stage of any solve, reduced or complete. The solve supplies ρ, the
+acceptance tolerance `tol` (an RMS) and the initial η. The complete solver may set its own projection
+threshold. The reduced solver uses proj_eps = 1e-8.
 `record_convergence` returns the histories the stage's trace is made of (solver_history).
 """
 function solver_options(settings; ρ, tol, eta, residual_scale)
@@ -968,7 +995,7 @@ function solver_options(settings; ρ, tol, eta, residual_scale)
         # A stage's inner loop stops at ‖K_ρ‖/√m < min(ρ, inner_ρ_tol): coarse stages are solved
         # more tightly than their ρ.
         tol_inner=min(ρ, settings.inner_ρ_tol) * residual_scale,
-        proj_eps=1e-8,
+        proj_eps=get(settings, :proj_eps, 1e-8),
         linear_solver=settings.linear_solver,
         η=eta,
         η_min=1e-8,
@@ -1293,10 +1320,9 @@ function solve_complete(
     retry_values=settings.retry_eta,
     context,
     io=stdout,
+    reduced_output=nothing,
 )
     (; complete_kkt) = formulation
-    # Each retry restarts the continuation from `initial` with the next η.
-    schedule = settings.rho_schedule
     # :warmstart solves the whole complete system. :fixed_primal solves the fixed-primal system,
     # whose unknowns are the free columns and whose parameters are [θ; x], so x cannot move.
     # Note: until 2026-10-22 :fixed_primal used NonlinearSolve's BoundedTrustRegion. On these
@@ -1309,8 +1335,16 @@ function solve_complete(
     unknowns = fixed_mode ? formulation.fixed.free : Colon()
     residual_scale = sqrt(complete_kkt.kkt_dimension)
     attempts = Any[]
-    for (attempt, eta) in enumerate([settings.eta_0; retry_values])
-        y = copy(initial)
+    # Damping retries reuse the first complete initialization. A fallback can also change
+    # the starting ρ or slack floor, so it initializes the complete variables again.
+    damping_attempts = [(; eta_0=eta) for eta in [settings.eta_0; retry_values]]
+    fallback_attempts = isnothing(reduced_output) ? () : get(settings, :fallbacks, ())
+    for (attempt, overrides) in enumerate([damping_attempts; collect(fallback_attempts)])
+        attempt_settings = merge(settings, overrides)
+        eta = attempt_settings.eta_0
+        attempt_initial = attempt <= length(damping_attempts) ? initial :
+            complete_initialization(formulation, reduced_output, θ, attempt_settings)
+        y = copy(attempt_initial)
         stages = Any[]
         best = nothing
         try_label =
@@ -1320,9 +1354,9 @@ function solve_complete(
             "$context | complete :$(formulation.name), :$(mode.name) mode | $try_label: η₀ = $(compact(eta))";
             io,
         )
-        for ρ in schedule
+        for ρ in attempt_settings.rho_schedule
             stage_initial = copy(y)
-            options = solver_options(settings; ρ, tol=settings.complete_tol, eta, residual_scale)
+            options = solver_options(attempt_settings; ρ, tol=settings.complete_tol, eta, residual_scale)
             timed = @timed ReducedGOOP.solve(ReducedGOOP.ProjectedLM(), system, parameters; z₀=y[unknowns], options, workspace)
             output = study_output(timed.value, system)
             history = solver_history(timed.value)
@@ -1378,7 +1412,9 @@ function solve_complete(
             (;
                 attempt,
                 eta,
-                initial=copy(initial),
+                proj_eps=get(attempt_settings, :proj_eps, 1e-8),
+                positive_floor=attempt_settings.positive_floor,
+                initial=copy(attempt_initial),
                 stages,
                 validation,
                 accepted,
@@ -2170,7 +2206,7 @@ function summary_page(data, directory)
         "Residual curves show the scaled relaxed and unrelaxed residuals on logarithmic axes, concatenated across stages, against solver-trace samples (solver iterates). Reduced curves include all sampled trials; complete curves include all attempted checks, using each check's kept (best) try. Histograms use accepted pairs only. Curves use available samples only: no padding after a run ends, and a gap where a sample is not finite. On the aggregate page, lines are geometric means and bands are mean +/- one sample standard deviation in log10 residual, drawn at indices with at least two contributors. Stage endpoints and raw histories are in results.jls. Each trial page shows that trial's own curves (the relaxed-residual plot marks where each reduced ρ stage starts), its reduced and :warmstart complete trajectories, vehicle separation and speed in one aligned row, and its remaining $(is_unicycle(settings) ? "heading, acceleration a and sideways acceleration v·ω" : "velocity and acceleration") profiles below, overlaid (solid: reduced; dashed: complete), including failed returned iterates with explicit status labels.",
     )
     paragraph!(
-        "A solve is accepted iff its scaled residual is at most $(settings.tol) (reduced) or $(settings.complete_tol) (complete); the solver's exit status is not required. A ρ chain runs all its stages and is judged at the stage with the lowest scaled residual, and a complete check keeps its best try (retries restart with the next η); that iterate is the one kept, compared and plotted. Fixed trajectories retain the reduced solution's finite physical residual; these rows are not removed. The full residual includes stationarity, equality, complementarity, and auxiliary-slack equations. The scaled relaxed residual, largest residual entry, multiplier signs and original physical feasibility are recorded as diagnostics only. Failures do not prove incompatibility.",
+        "A solve is accepted iff its scaled residual is at most $(settings.tol) (reduced) or $(settings.complete_tol) (complete); the solver's exit status is not required. A ρ chain runs all its stages and is judged at the stage with the lowest scaled residual, and a complete check keeps its best try. Damping retries reuse the complete initialization. Fallbacks can change the initialization or projection at the same fixed trajectory. The full residual includes stationarity, equality, complementarity, and auxiliary-slack equations, including the reduced trajectory's finite physical residual. The scaled relaxed residual, largest residual entry, multiplier signs and original physical feasibility are recorded as diagnostics only. Failures do not prove incompatibility.",
     )
     paragraph!(
         ":warmstart complete times are refinement costs. Construction and independent warm-ups are excluded. Reported solve seconds subtract Julia's measured compilation and recompilation time from wall time (clamped at zero); wall and compilation seconds are saved separately, and nonzero measured compilation is flagged below. Both starts and every attempt/stage are saved. No warm-up or previous-trial solution seeds measured trials.",
